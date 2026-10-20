@@ -168,6 +168,9 @@ async def latest_briefing() -> dict:
     doc = docs[0]
     doc.pop("_id", None)
     return doc
+
+
+@router.get("/customers/{customer_id}/context", response_model=CustomerContext)
 async def get_customer_context(
     customer_id: Annotated[int, Path(ge=1)],
     lead_limit: Annotated[int | None, Query(ge=1, le=500)] = None,
