@@ -2,16 +2,25 @@
 
 import { useEffect, useRef, useState } from "react";
 import * as echarts from "echarts";
-import { Activity, Boxes, FileText, Users, type LucideIcon } from "lucide-react";
+import {
+  Activity,
+  AlertTriangle,
+  Boxes,
+  FileText,
+  Users,
+  type LucideIcon,
+} from "lucide-react";
 import type { ReactNode } from "react";
 import {
   dashboardData,
   leads,
   mockDashboardCharts,
-  mockDashboardMetrics,
+  mockSignalsReport,
   orders,
   quotes,
 } from "@/lib/mockData";
+import { fetchSignals } from "@/services/api";
+import type { SignalsReport, SignalsSummary } from "@/types/api";
 
 type ChartData = (typeof mockDashboardCharts)[number];
 type LiveChartData = Omit<ChartData, "labels" | "values"> & {
@@ -20,13 +29,19 @@ type LiveChartData = Omit<ChartData, "labels" | "values"> & {
 };
 
 const mockLiveChartEvents = [
-  { label: "15:05", revenue: 8600, leads: 4, orders: 4 },
-  { label: "15:10", revenue: 8950, leads: 5, orders: 5 },
-  { label: "15:15", revenue: 9200, leads: 5, orders: 6 },
-  { label: "15:20", revenue: 9450, leads: 6, orders: 6 },
+  { label: "15:05", values: { stale_quotes: 4, unpaid_invoices: 4, stalled_orders: 2 } },
+  { label: "15:10", values: { stale_quotes: 5, unpaid_invoices: 4, stalled_orders: 3 } },
+  { label: "15:15", values: { stale_quotes: 5, unpaid_invoices: 5, stalled_orders: 3 } },
+  { label: "15:20", values: { stale_quotes: 6, unpaid_invoices: 5, stalled_orders: 4 } },
 ] as const;
 
-function ChartTile({ chart }: { chart: LiveChartData }) {
+function ChartTile({
+  chart,
+  summary,
+}: {
+  chart: LiveChartData;
+  summary: { count: number; total_amount: number };
+}) {
   const chartRef = useRef<HTMLDivElement>(null);
   const chartInstanceRef = useRef<echarts.ECharts | null>(null);
 
@@ -85,10 +100,8 @@ function ChartTile({ chart }: { chart: LiveChartData }) {
       <div className="flex items-start justify-between">
         <div>
           <p className="text-sm text-muted">{chart.title}</p>
-          <p className="mt-3 text-2xl font-semibold tracking-tight">
-            {chart.currency ? "$" : ""}
-            {chart.metric}
-          </p>
+          <p className="mt-3 text-2xl font-semibold tracking-tight">{summary.count}</p>
+          <p className="mt-1 text-xs text-muted">Total amount: {summary.total_amount}</p>
         </div>
         <span className="rounded-lg border border-border p-2 text-muted" aria-hidden="true">
           <Activity size={17} />
@@ -108,24 +121,33 @@ export function Dashboard() {
       values: [...chart.values],
     })),
   );
+  const [signalsReport, setSignalsReport] = useState<SignalsReport>(mockSignalsReport);
   const liveEventIndexRef = useRef(0);
+
+  useEffect(() => {
+    let isActive = true;
+
+    fetchSignals().then((report) => {
+      if (isActive) {
+        setSignalsReport(report);
+      }
+    });
+
+    return () => {
+      isActive = false;
+    };
+  }, []);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
       const event = mockLiveChartEvents[liveEventIndexRef.current];
       liveEventIndexRef.current = (liveEventIndexRef.current + 1) % mockLiveChartEvents.length;
 
-      const valuesByChart = {
-        revenue: event.revenue,
-        leads: event.leads,
-        orders: event.orders,
-      };
-
       setCharts((currentCharts) =>
         currentCharts.map((chart) => ({
           ...chart,
           labels: [...chart.labels.slice(1), event.label],
-          values: [...chart.values.slice(1), valuesByChart[chart.id]],
+          values: [...chart.values.slice(1), event.values[chart.id]],
         })),
       );
     }, 4000);
@@ -149,16 +171,31 @@ export function Dashboard() {
       </div>
 
       <div className="grid gap-4 sm:grid-cols-3">
-        {charts.map((chart) => (
-          <ChartTile key={chart.id} chart={chart} />
-        ))}
+        {charts.map((chart) => {
+          const summary = signalsReport.summary[chart.id];
+          return <ChartTile key={chart.id} chart={chart} summary={summary} />;
+        })}
       </div>
 
       <div className="grid gap-4 sm:grid-cols-3">
-        <MetricCard label="Active leads" value={mockDashboardMetrics.active_leads_count} icon={Users} />
-        <MetricCard label="Total orders" value={mockDashboardMetrics.total_orders} icon={Boxes} />
-        <MetricCard label="Total quotes" value={mockDashboardMetrics.total_quotes} icon={FileText} />
+        <MetricCard
+          label="Unpaid balance"
+          value={signalsReport.summary.unpaid_invoices.total_amount}
+          icon={AlertTriangle}
+        />
+        <MetricCard
+          label="Unpaid invoices"
+          value={signalsReport.summary.unpaid_invoices.count}
+          icon={FileText}
+        />
+        <MetricCard
+          label="Partially paid"
+          value={signalsReport.summary.unpaid_invoices.partially_paid_count}
+          icon={Boxes}
+        />
       </div>
+
+      <AttentionNeeded report={signalsReport} />
 
       <div className="grid gap-5 xl:grid-cols-2">
         <DataTable title="Orders" icon={Boxes}>
@@ -292,6 +329,87 @@ function DataTable({
         <h2 className="text-sm font-semibold">{title}</h2>
       </div>
       <div className="overflow-x-auto">{children}</div>
+    </section>
+  );
+}
+
+function AttentionNeeded({ report }: { report: SignalsReport }) {
+  const alertGroups: {
+    id: string;
+    title: string;
+    summary: SignalsSummary["stale_quotes"] | SignalsSummary["unpaid_invoices"] | SignalsSummary["stalled_orders"];
+    records: unknown[];
+    icon: LucideIcon;
+    details?: string;
+  }[] = [
+    {
+      id: "stale-quotes",
+      title: "Stale quotes",
+      summary: report.summary.stale_quotes,
+      records: report.stale_quotes,
+      icon: FileText,
+    },
+    {
+      id: "unpaid-invoices",
+      title: "Unpaid invoices",
+      summary: report.summary.unpaid_invoices,
+      records: report.unpaid_invoices,
+      icon: AlertTriangle,
+      details: `Overdue: ${report.summary.unpaid_invoices.overdue_count} · Unpaid: ${report.summary.unpaid_invoices.unpaid_count} · Partially paid: ${report.summary.unpaid_invoices.partially_paid_count}`,
+    },
+    {
+      id: "stalled-orders",
+      title: "Stalled orders",
+      summary: report.summary.stalled_orders,
+      records: report.stalled_orders,
+      icon: Boxes,
+    },
+  ];
+
+  return (
+    <section aria-labelledby="attention-title" className="rounded-xl border border-border bg-surface">
+      <div className="flex items-center gap-3 border-b border-border px-5 py-4">
+        <AlertTriangle size={17} className="text-accent" aria-hidden="true" />
+        <div>
+          <h2 id="attention-title" className="font-semibold">Attention needed</h2>
+          <p className="mt-1 text-xs text-muted">
+            Generated {report.generated_at} · Data range: {report.summary.data_from} to {report.summary.data_to}
+          </p>
+        </div>
+      </div>
+      <div className="grid gap-4 p-4 lg:grid-cols-3">
+        {alertGroups.map((group) => {
+          const Icon = group.icon;
+          return (
+            <article key={group.id} className="rounded-lg border border-border bg-[#0c0f15] p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-medium">{group.title}</h3>
+                  <p className="mt-2 text-xs text-muted">
+                    {group.summary.count} items · Total amount: {group.summary.total_amount}
+                  </p>
+                  {group.details && <p className="mt-1 text-xs text-muted">{group.details}</p>}
+                </div>
+                <Icon size={16} className="text-muted" aria-hidden="true" />
+              </div>
+              <div className="mt-4 space-y-2">
+                {group.records.length === 0 ? (
+                  <p className="text-xs text-muted">No records in this signal.</p>
+                ) : (
+                  group.records.map((record, index) => (
+                    <pre
+                      key={`${group.id}-${index}`}
+                      className="overflow-x-auto rounded-md border border-border bg-surface p-3 text-[11px] leading-5 text-muted"
+                    >
+                      {JSON.stringify(record, null, 2)}
+                    </pre>
+                  ))
+                )}
+              </div>
+            </article>
+          );
+        })}
+      </div>
     </section>
   );
 }

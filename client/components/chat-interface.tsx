@@ -1,7 +1,57 @@
+"use client";
+
+import { useState, type FormEvent } from "react";
 import { Bot, Send, Sparkles } from "lucide-react";
 import { chatData } from "@/lib/mockData";
+import { sendMessage } from "@/services/api";
+
+type ChatResponse = typeof chatData;
+type ChatEntry =
+  | { role: "user"; content: string }
+  | { role: "assistant"; content: string; response: ChatResponse };
+
+const initialMessages: ChatEntry[] = [
+  { role: "user", content: "Can you check the latest status of order ORD-77104?" },
+  {
+    role: "assistant",
+    content: chatData.markdownTitle,
+    response: chatData,
+  },
+];
 
 export function ChatInterface() {
+  const [messages, setMessages] = useState<ChatEntry[]>(initialMessages);
+  const [message, setMessage] = useState("");
+  const [isSending, setIsSending] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const submittedMessage = message.trim();
+    if (!submittedMessage || isSending) return;
+
+    setMessage("");
+    setErrorMessage("");
+    setMessages((currentMessages) => [
+      ...currentMessages,
+      { role: "user", content: submittedMessage },
+    ]);
+    setIsSending(true);
+
+    try {
+      const response = await sendMessage(submittedMessage);
+      setMessages((currentMessages) => [
+        ...currentMessages,
+        { role: "assistant", content: response.markdownTitle, response },
+      ]);
+    } catch (error) {
+      console.error("Chat interaction failed.", error);
+      setErrorMessage("Message could not be sent. Please try again.");
+    } finally {
+      setIsSending(false);
+    }
+  }
+
   return (
     <section aria-labelledby="chat-title" className="flex min-h-[32rem] flex-col rounded-xl border border-border bg-surface">
       <div className="flex items-center justify-between border-b border-border px-5 py-4">
@@ -13,52 +63,76 @@ export function ChatInterface() {
             <h2 id="chat-title" className="text-sm font-semibold">{chatData.assistantName}</h2>
             <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted">
               <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-              {chatData.status}
+              {isSending ? "Thinking..." : chatData.status}
             </p>
           </div>
         </div>
         <Sparkles size={17} className="text-muted" aria-hidden="true" />
       </div>
 
-      <div className="flex-1 space-y-5 p-5">
-        <div className="ml-auto max-w-[85%] rounded-xl rounded-br-sm bg-surface-raised px-4 py-3 text-sm">
-          Can you check the latest status of order ORD-77104?
-        </div>
-        <div className="flex max-w-[95%] gap-3">
-          <span className="mt-1 grid h-7 w-7 shrink-0 place-items-center rounded-md bg-surface-raised text-accent">
-            <Bot size={15} aria-hidden="true" />
-          </span>
-          <div className="min-w-0 space-y-3">
-            <div>
-              <p className="text-sm font-medium">{chatData.markdownTitle}</p>
-              <p className="mt-1 text-sm leading-6 text-muted">
-                Order <code className="rounded bg-surface-raised px-1.5 py-0.5 font-mono text-xs text-foreground">{chatData.orderId}</code>{" "}
-                {chatData.markdownBody}
-              </p>
+      <div className="flex-1 space-y-5 p-5" aria-live="polite">
+        {messages.map((entry, index) =>
+          entry.role === "user" ? (
+            <div key={`user-${index}`} className="ml-auto max-w-[85%] rounded-xl rounded-br-sm bg-surface-raised px-4 py-3 text-sm">
+              {entry.content}
             </div>
-            <div className="overflow-hidden rounded-lg border border-border">
-              <div className="border-b border-border px-3 py-2 text-xs font-medium text-muted">
-                Structured response · JSON
+          ) : (
+            <div key={`assistant-${index}`} className="flex max-w-[95%] gap-3">
+              <span className="mt-1 grid h-7 w-7 shrink-0 place-items-center rounded-md bg-surface-raised text-accent">
+                <Bot size={15} aria-hidden="true" />
+              </span>
+              <div className="min-w-0 space-y-3">
+                <div>
+                  <p className="text-sm font-medium">{entry.content}</p>
+                  {entry.response && (
+                    <p className="mt-1 text-sm leading-6 text-muted">
+                      Order{" "}
+                      <code className="rounded bg-surface-raised px-1.5 py-0.5 font-mono text-xs text-foreground">
+                        {entry.response.orderId}
+                      </code>{" "}
+                      {entry.response.markdownBody}
+                    </p>
+                  )}
+                </div>
+                {entry.response && (
+                  <div className="overflow-hidden rounded-lg border border-border">
+                    <div className="border-b border-border px-3 py-2 text-xs font-medium text-muted">
+                      Structured response · JSON
+                    </div>
+                    <pre className="overflow-x-auto bg-[#0c0f15] p-3 text-xs leading-5 text-[#b7c4d8]">
+                      <code>{entry.response.structuredJson}</code>
+                    </pre>
+                  </div>
+                )}
               </div>
-              <pre className="overflow-x-auto bg-[#0c0f15] p-3 text-xs leading-5 text-[#b7c4d8]">
-                <code>{chatData.structuredJson}</code>
-              </pre>
             </div>
-          </div>
-        </div>
+          ),
+        )}
+        {isSending && (
+          <p className="ml-10 text-sm text-muted" role="status">Waiting for assistant response...</p>
+        )}
       </div>
 
       <div className="border-t border-border p-4">
-        <div className="flex items-center gap-3 rounded-lg border border-border bg-[#0c0f15] px-3 py-2">
-          <span className="flex-1 px-1 text-sm text-muted">Message Biztek Assistant...</span>
+        <form onSubmit={handleSubmit} className="flex items-center gap-3 rounded-lg border border-border bg-[#0c0f15] px-3 py-2">
+          <input
+            value={message}
+            onChange={(event) => setMessage(event.target.value)}
+            placeholder="Message Biztek Assistant..."
+            aria-label="Message Biztek Assistant"
+            disabled={isSending}
+            className="min-w-0 flex-1 bg-transparent px-1 text-sm text-foreground outline-none placeholder:text-muted disabled:opacity-60"
+          />
           <button
-            type="button"
+            type="submit"
             aria-label="Send message"
-            className="grid h-8 w-8 place-items-center rounded-md bg-accent text-[#11150b]"
+            disabled={isSending || message.trim().length === 0}
+            className="grid h-8 w-8 place-items-center rounded-md bg-accent text-[#11150b] disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Send size={15} aria-hidden="true" />
           </button>
-        </div>
+        </form>
+        {errorMessage && <p className="mt-2 text-center text-xs text-red-400" role="alert">{errorMessage}</p>}
         <p className="mt-2 text-center text-[11px] text-muted">Presentation-only · responses use deterministic mock data</p>
       </div>
     </section>

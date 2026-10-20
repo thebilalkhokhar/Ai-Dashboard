@@ -1,3 +1,5 @@
+import type { SignalsReport } from "@/types/api";
+
 export const users = [
   {
     id: 134,
@@ -159,47 +161,77 @@ export const leads = [
   },
 ] as const;
 
-// Pre-calculated backend summaries
-export const mockDashboardMetrics = {
-  total_revenue: 8500,
-  active_leads_count: 4,
-  total_orders: 4,
-  total_quotes: 4,
-  total_payments: 4,
-} as const;
-
 export const mockDashboardCharts = [
   {
-    id: "revenue",
-    title: "Total revenue",
-    metric: mockDashboardMetrics.total_revenue,
-    currency: true,
-    period: "Revenue trend · mock series",
+    id: "stale_quotes",
+    title: "Stale quotes",
+    period: "Stale quote activity · simulated",
     labels: ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00"],
-    values: [1200, 2500, 2200, 4500, 4100, 6800, 8500],
+    values: [1, 2, 2, 3, 3, 4, 4],
     accent: "#a3e635",
   },
   {
-    id: "leads",
-    title: "Active leads",
-    metric: mockDashboardMetrics.active_leads_count,
-    currency: false,
-    period: "Lead trend · mock series",
+    id: "unpaid_invoices",
+    title: "Unpaid invoices",
+    period: "Invoice activity · simulated",
     labels: ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00"],
-    values: [0, 1, 1, 2, 2, 3, 4],
+    values: [1, 2, 1, 2, 3, 3, 4],
     accent: "#6ea8fe",
   },
   {
-    id: "orders",
-    title: "Orders",
-    metric: mockDashboardMetrics.total_orders,
-    currency: false,
-    period: "Order trend · mock series",
+    id: "stalled_orders",
+    title: "Stalled orders",
+    period: "Stalled order activity · simulated",
     labels: ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00"],
-    values: [0, 0, 1, 2, 2, 3, 4],
+    values: [0, 1, 1, 1, 2, 2, 2],
     accent: "#c084fc",
   },
 ] as const;
+
+export const mockSignalsReport = {
+  generated_at: "2026-10-20T15:00:00Z",
+  stale_quotes: [quotes[1], quotes[3]],
+  unpaid_invoices: [
+    {
+      id: orders[0].id,
+      inv_ref: orders[0].inv_ref,
+      status_label: orders[0].status_label,
+      payment_status_label: orders[0].payment_status_label,
+      total_amount: orders[0].total_amount,
+      amount_paid: orders[0].amount_paid,
+    },
+    {
+      id: orders[2].id,
+      inv_ref: orders[2].inv_ref,
+      status_label: orders[2].status_label,
+      payment_status_label: orders[2].payment_status_label,
+      total_amount: orders[2].total_amount,
+      amount_paid: orders[2].amount_paid,
+    },
+  ],
+  stalled_orders: [orders[2], orders[3]],
+  summary: {
+    quotes_scanned: 4,
+    orders_scanned: 4,
+    data_from: "2026-10-01",
+    data_to: "2026-10-20",
+    stale_quotes: {
+      count: 2,
+      total_amount: 15950,
+    },
+    unpaid_invoices: {
+      count: 2,
+      total_amount: 3790,
+      overdue_count: 1,
+      unpaid_count: 1,
+      partially_paid_count: 1,
+    },
+    stalled_orders: {
+      count: 2,
+      total_amount: 10100,
+    },
+  },
+} satisfies SignalsReport;
 
 export const dashboardData = {
   displayDate: "Tuesday, October 20",
