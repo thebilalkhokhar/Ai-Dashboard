@@ -20,7 +20,13 @@ import {
   quotes,
 } from "@/lib/mockData";
 import { fetchSignals } from "@/services/api";
-import type { SignalsReport, SignalsSummary } from "@/types/api";
+import type {
+  SignalsReport,
+  SignalsSummary,
+  StaleQuote,
+  StalledOrder,
+  UnpaidInvoice,
+} from "@/types/api";
 
 type ChartData = (typeof mockDashboardCharts)[number];
 type LiveChartData = Omit<ChartData, "labels" | "values"> & {
@@ -338,7 +344,7 @@ function AttentionNeeded({ report }: { report: SignalsReport }) {
     id: string;
     title: string;
     summary: SignalsSummary["stale_quotes"] | SignalsSummary["unpaid_invoices"] | SignalsSummary["stalled_orders"];
-    records: unknown[];
+    records: (StaleQuote | UnpaidInvoice | StalledOrder)[];
     icon: LucideIcon;
     details?: string;
   }[] = [
