@@ -1,65 +1,209 @@
-export const dashboardData = {
-  displayDate: "Tuesday, October 20",
-  metrics: [
-    { label: "Active conversations", value: "1,284", change: "+12.8%" },
-    { label: "Payments processed", value: "$284.6K", change: "+8.2%" },
-    { label: "Approval rate", value: "98.2%", change: "+1.4%" },
-  ],
-  charts: [
-    {
-      id: "conversations",
-      title: "Conversation volume",
-      period: "Last 24 hours",
-      value: "1,284",
-      labels: ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00"],
-      values: [42, 58, 51, 76, 68, 92, 84],
-      accent: "#a3e635",
-    },
-    {
-      id: "payments",
-      title: "Payment volume",
-      period: "Last 24 hours",
-      value: "$42,680",
-      labels: ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00"],
-      values: [24, 38, 33, 59, 48, 72, 65],
-      accent: "#6ea8fe",
-    },
-  ],
-} as const;
-
-export const approvalInboxData = {
-  pendingCount: "03",
-} as const;
-
-export const approvalRequests = [
+export const users = [
   {
-    id: "APR-2048",
-    title: "Enterprise renewal quote",
-    description: "Northstar Logistics · Annual plan · 120 seats",
-    amount: "$48,000.00",
-    requestedBy: "Sales Assistant",
-    submittedAt: "Today, 10:42 AM",
-    category: "Quote",
+    id: 134,
+    name: "Harry Brook",
+    zoho_id: "6374650000021728001",
+    is_active: 1,
+    company_id: 1,
+    e_com_user: 1,
   },
   {
-    id: "APR-2047",
-    title: "Vendor payment",
-    description: "Cloudline Infrastructure · Invoice CL-9082",
-    amount: "$12,450.00",
-    requestedBy: "Finance Agent",
-    submittedAt: "Today, 10:18 AM",
-    category: "Payment",
+    id: 84,
+    name: "Jessica Joe",
+    zoho_id: "6374650000001238001",
+    is_active: 1,
+    company_id: 1,
+    e_com_user: 1,
   },
   {
-    id: "APR-2046",
-    title: "Priority fulfillment order",
-    description: "Juniper Retail Group · Order ORD-77104",
-    amount: "$8,920.00",
-    requestedBy: "Operations Agent",
-    submittedAt: "Today, 9:56 AM",
-    category: "Order",
+    id: 48,
+    name: "Ella Jacob",
+    zoho_id: "6374650000000789055",
+    is_active: 1,
+    company_id: 1,
+    e_com_user: 1,
   },
 ] as const;
+
+export const payments = [
+  {
+    id: 7104,
+    amount: 1350,
+    payment_date: "2026-10-01",
+    customer: { company_name: "Highfallsextracts" },
+    users: { name: "Jessica Joe" },
+  },
+  {
+    id: 7105,
+    amount: 4200,
+    payment_date: "2026-10-15",
+    customer: { company_name: "Seltzer8" },
+    users: { name: "Harry Brook" },
+  },
+  {
+    id: 7106,
+    amount: 850,
+    payment_date: "2026-10-18",
+    customer: { company_name: "Balaika" },
+    users: { name: "Ella Jacob" },
+  },
+  {
+    id: 7107,
+    amount: 2100,
+    payment_date: "2026-10-20",
+    customer: { company_name: "TechNova" },
+    users: { name: "Harry Brook" },
+  },
+] as const;
+
+export const quotes = [
+  {
+    id: 20843,
+    ref: "20068-2026-10",
+    status: "Quote Created",
+    amount: 5310,
+    sale_rep: { name: "Harry Brook" },
+    customer: { company_name: "Balaika" },
+  },
+  {
+    id: 20844,
+    ref: "20069-2026-10",
+    status: "Sent",
+    amount: 12500,
+    sale_rep: { name: "Jessica Joe" },
+    customer: { company_name: "Seltzer8" },
+  },
+  {
+    id: 20845,
+    ref: "20070-2026-10",
+    status: "Negotiating",
+    amount: 800,
+    sale_rep: { name: "Ella Jacob" },
+    customer: { company_name: "Highfallsextracts" },
+  },
+  {
+    id: 20846,
+    ref: "20071-2026-10",
+    status: "Quote Created",
+    amount: 3450,
+    sale_rep: { name: "Harry Brook" },
+    customer: { company_name: "TechNova" },
+  },
+] as const;
+
+export const orders = [
+  {
+    id: 33516,
+    inv_ref: "33516-2026-10",
+    status_label: "Approved",
+    payment_status_label: "Partially Paid",
+    total_amount: 2590,
+    amount_paid: 1295,
+  },
+  {
+    id: 33517,
+    inv_ref: "33517-2026-10",
+    status_label: "Shipped",
+    payment_status_label: "Paid",
+    total_amount: 4500,
+    amount_paid: 4500,
+  },
+  {
+    id: 33518,
+    inv_ref: "33518-2026-10",
+    status_label: "Processing",
+    payment_status_label: "Unpaid",
+    total_amount: 1200,
+    amount_paid: 0,
+  },
+  {
+    id: 33519,
+    inv_ref: "33519-2026-10",
+    status_label: "Approved",
+    payment_status_label: "Partially Paid",
+    total_amount: 8900,
+    amount_paid: 4000,
+  },
+] as const;
+
+export const leads = [
+  {
+    _id: { $oid: "6a27422e7d68ce2685a0e807" },
+    aiIntelligence: { buyingIntentScore: 0, tags: ["Emails Only"] },
+    status: "New",
+    leadDesk: { stage: "open" },
+  },
+  {
+    _id: { $oid: "6b38533f8e79df3796b1f918" },
+    aiIntelligence: {
+      buyingIntentScore: 85,
+      tags: ["High Priority", "Website"],
+    },
+    status: "Contacted",
+    leadDesk: { stage: "in_progress" },
+  },
+  {
+    _id: { $oid: "6c49644g9f80eg4807c2g029" },
+    aiIntelligence: { buyingIntentScore: 40, tags: ["Newsletter"] },
+    status: "Follow Up",
+    leadDesk: { stage: "open" },
+  },
+  {
+    _id: { $oid: "6d50755h0g91fh5918d3h130" },
+    aiIntelligence: {
+      buyingIntentScore: 95,
+      tags: ["Direct Call", "Ready to Buy"],
+    },
+    status: "Qualified",
+    leadDesk: { stage: "closing" },
+  },
+] as const;
+
+// Pre-calculated backend summaries
+export const mockDashboardMetrics = {
+  total_revenue: 8500,
+  active_leads_count: 4,
+  total_orders: 4,
+  total_quotes: 4,
+  total_payments: 4,
+} as const;
+
+export const mockDashboardCharts = [
+  {
+    id: "revenue",
+    title: "Total revenue",
+    metric: mockDashboardMetrics.total_revenue,
+    currency: true,
+    period: "Revenue trend · mock series",
+    labels: ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00"],
+    values: [1200, 2500, 2200, 4500, 4100, 6800, 8500],
+    accent: "#a3e635",
+  },
+  {
+    id: "leads",
+    title: "Active leads",
+    metric: mockDashboardMetrics.active_leads_count,
+    currency: false,
+    period: "Lead trend · mock series",
+    labels: ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00"],
+    values: [0, 1, 1, 2, 2, 3, 4],
+    accent: "#6ea8fe",
+  },
+  {
+    id: "orders",
+    title: "Orders",
+    metric: mockDashboardMetrics.total_orders,
+    currency: false,
+    period: "Order trend · mock series",
+    labels: ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00"],
+    values: [0, 0, 1, 2, 2, 3, 4],
+    accent: "#c084fc",
+  },
+] as const;
+
+export const dashboardData = {
+  displayDate: "Tuesday, October 20",
+} as const;
 
 export const chatData = {
   assistantName: "Biztek Assistant",
