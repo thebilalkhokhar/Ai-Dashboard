@@ -51,12 +51,25 @@ class Settings(BaseSettings):
 
     # --- Business rules, in days ---
     STALE_QUOTE_DAYS: int = 3
+    STALE_QUOTE_MAX_AGE_DAYS: int = 30
     STALLED_ORDER_DAYS: int = 2
     OVERDUE_INVOICE_DAYS: int = 30
+
+    # --- Agents: how many top items each sub-agent processes per run ---
+    MAX_ITEMS_PER_AGENT: int = 10
 
     # --- Misc / tuning ---
     REDIS_URL: str = ""
     ERP_REQUEST_DELAY_SECONDS: float = 0.3
+
+    # --- LLM (OpenAI stack by default; only read from .env) ---
+    LLM_PROVIDER: str = ""
+    LLM_API_KEY: str = ""
+    MODEL_SUB: str = ""
+    MODEL_MASTER: str = ""
+    AGENT_CACHE_HOURS: int = 24
+    AGENT_CONCURRENCY: int = 5
+    CHAT_DAILY_TOKEN_CAP: int = Field(default=500_000, ge=1)
     ERP_LEAD_BATCH_SIZE: int = 25
     ERP_PAGE_LIMIT: int = 500
 

@@ -103,6 +103,42 @@ def test_stale_quotes_respects_threshold_argument():
     assert stale == []
 
 
+def test_stale_quotes_drops_converted_quotes():
+    """A quote that already has an order is not stale - it converted."""
+    stale = processors.stale_quotes(
+        [
+            quote(id=1, created_at=(NOW - timedelta(days=10)).isoformat()),
+            quote(id=2, created_at=(NOW - timedelta(days=10)).isoformat()),
+        ],
+        NOW,
+        order_quote_ids=[1],
+    )
+    assert [row["id"] for row in stale] == [2]
+
+
+def test_stale_quotes_respects_max_age():
+    """Quotes older than STALE_QUOTE_MAX_AGE_DAYS are dead history."""
+    stale = processors.stale_quotes(
+        [quote(created_at=(NOW - timedelta(days=40)).isoformat())], NOW
+    )
+    assert stale == []
+
+
+def test_stale_quotes_keeps_latest_per_customer_and_sorts_by_amount():
+    """One conversation per customer, biggest deals first."""
+    stale = processors.stale_quotes(
+        [
+            quote(id=1, amount=100.0, created_at=(NOW - timedelta(days=10)).isoformat()),
+            quote(id=2, amount=900.0, created_at=(NOW - timedelta(days=9)).isoformat()),  # newer, same customer
+            quote(id=3, amount=500.0, customer={"id": 11, "company_name": "BETA"}, created_at=(NOW - timedelta(days=8)).isoformat()),
+        ],
+        NOW,
+    )
+    # customer 10 keeps only quote 2 (newest of its two), customer 11 keeps 3;
+    # result sorted by amount descending
+    assert [(row["id"], row["amount"]) for row in stale] == [(2, 900.0), (3, 500.0)]
+
+
 # ----------------------------------------------------------- unpaid_invoices
 
 
@@ -128,6 +164,19 @@ def test_unpaid_invoices_balance_and_overdue_flag():
     assert rows[0]["overdue"] is False
     assert rows[1]["balance"] == 500.0
     assert rows[1]["overdue"] is True
+
+
+def test_unpaid_invoices_drops_zero_total_nulls_and_zero_balance():
+    """Empty invoices and paid-up invoices are not worth chasing."""
+    rows = processors.unpaid_invoices(
+        [
+            order(id=1, payment_status=None, total_amount=0.0),        # empty invoice
+            order(id=2, payment_status=0, total_amount=300.0, amount_paid=300.0),  # zero balance
+            order(id=3, payment_status=None, total_amount=250.0),      # must pass
+        ],
+        NOW,
+    )
+    assert [(row["id"], row["balance"]) for row in rows] == [(3, 250.0)]
 
 
 # ------------------------------------------------------------ stalled_orders

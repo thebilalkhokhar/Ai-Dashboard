@@ -1,0 +1,387 @@
+"""Read-only, tool-calling LangGraph chat agent."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+from datetime import datetime, time, timedelta, timezone
+from typing import Any, TypedDict
+from zoneinfo import ZoneInfo
+
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langgraph.graph import END, START, StateGraph
+from pydantic import ValidationError
+
+from app import db as app_db
+from app.agents.chat_tools import CHAT_TOOL_MAP, CHAT_TOOLS, invoke_tool
+from app.agents.graph import _walk_numbers, invented_amounts
+from app.agents.llm import add_usage, build_model, empty_usage, usage_of
+from app.config import settings
+
+log = logging.getLogger("chat_agent")
+MAX_TOOL_CALLS = 5
+MAX_STORED_TURNS = 10
+
+CHAT_SYSTEM = """You are the CEO's business assistant for Print247.
+Answer only from tool results returned during this turn. You may use prior
+conversation messages to understand references, but do not use their facts as
+current evidence. You must call tools to retrieve business numbers; Python
+tools do all math and counting, and you must copy their numbers without
+calculating or estimating. Write counts as numerals and format every money
+amount with a leading $ copied from a tool result. If the data does not contain the answer (including
+artwork, shipping, order notes, or line items), say so plainly instead of
+guessing. Be concise. Reply in the same language the user writes in: English,
+Urdu, or Roman Urdu. Never propose or perform ERP writes, approvals, messages,
+or other external actions. For questions about whether artwork, shipping,
+order notes, or line items are tracked, call get_signals_summary and state
+which requested fields are listed as unavailable. Do not offer a follow-up
+data pull or imply that missing fields can be retrieved. Match the user's
+language and script: English gets English, Urdu gets Urdu script, and Roman
+Urdu gets Roman Urdu, even when the business terms are English. Words such as
+"ka", "kya", and "hai" indicate Roman Urdu. For a named customer's status,
+first call find_customer,
+then call get_customer_context for the returned customer ID; never answer a
+customer-specific question from get_signals_summary. For a general customer
+status, report the quote and order counts, amounts, payment status, and
+received-payment total. Omit first_at/last_at fields and empty arrays unless
+the user asks for them."""
+
+
+class ChatState(TypedDict, total=False):
+    messages: list[Any]
+    pending_calls: list[dict]
+    tool_calls: int
+    tool_results: list[dict]
+    tools_used: list[str]
+    usage: dict
+    final_text: str
+    regen_count: int
+    retry: bool
+    database: Any
+    events: Any
+
+
+def trim_turns(turns: list[dict], limit: int = MAX_STORED_TURNS) -> list[dict]:
+    """Keep only the most recent complete user/assistant turns."""
+    return [turn for turn in turns if turn.get("question") is not None and turn.get("answer") is not None][-limit:]
+
+
+def validate_numeric_claims(text: str, tool_results: list[dict]) -> list[str]:
+    """Reject unsupported dollar amounts and other numeric claims in the answer."""
+    payload = {"tool_results": tool_results}
+    errors = [f"unsupported amount {amount:g}" for amount in invented_amounts(text, payload)]
+
+    allowed: set[float] = set()
+    _walk_numbers(payload, allowed)
+    # IDs and names may contain digits (for example, "Pure 7"); they still
+    # count as present in the tool result if the same digits appear in it.
+    for value in re.findall(r"(?<![\w])\d[\d,]*(?:\.\d+)?", json.dumps(payload, default=str)):
+        try:
+            allowed.add(float(value.replace(",", "")))
+        except ValueError:
+            pass
+
+    # Check every digit in the final response. This covers counts and bare
+    # money claims, and also prevents dates or IDs from being made up.
+    for raw_value in re.findall(r"(?<![\w])\d[\d,]*(?:\.\d+)?", text or ""):
+        value = float(raw_value.replace(",", ""))
+        if not any(abs(value - found) < 0.005 for found in allowed):
+            errors.append(f"unsupported number {value:g}")
+    return list(dict.fromkeys(errors))
+
+
+def _fallback_text(user_message: str) -> str:
+    if re.search(r"\bartwork\b", user_message, re.I):
+        return "The order data does not include artwork status, so I can't identify which orders are missing artwork."
+    if re.search(r"[\u0600-\u06ff]", user_message):
+        return "دستیاب ڈیٹا سے اس عدد کی تصدیق نہیں ہو سکی۔"
+    roman_markers = re.search(r"\b(kya|ka|ki|hai|hain|kitna|kitni|batao|status)\b", user_message, re.I)
+    if roman_markers:
+        return "Yeh figure available data se verify nahi ho saka."
+    return "I couldn't verify that figure from the available data."
+
+
+def _message_text(message: Any) -> str:
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return "".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content).strip()
+    return str(content or "").strip()
+
+
+def _tool_calls(message: Any) -> list[dict]:
+    calls = getattr(message, "tool_calls", None) or []
+    return [call for call in calls if isinstance(call, dict)]
+
+
+def build_chat_graph(model: Any = None, tools: list | None = None):
+    """Build a LangGraph node that runs the bounded tool-calling loop."""
+    llm = model or build_model("master")
+    registry = {tool.name: tool for tool in (CHAT_TOOLS if tools is None else tools)}
+    tool_schemas = [tool.model_schema() for tool in registry.values()]
+
+    async def chat_node(state: ChatState) -> dict:
+        messages = list(state["messages"])
+        results: list[dict] = []
+        used: list[str] = []
+        count = 0
+        regen_count = 0
+        usage = empty_usage()
+        final_text = ""
+
+        while True:
+            if count >= MAX_TOOL_CALLS:
+                bound = llm
+            else:
+                try:
+                    bound = llm.bind_tools(tool_schemas, parallel_tool_calls=False)
+                except TypeError:
+                    bound = llm.bind_tools(tool_schemas)
+            response = await bound.ainvoke(messages)
+            usage = add_usage(usage, usage_of(response))
+            messages.append(response)
+            calls = _tool_calls(response)
+
+            if calls and count < MAX_TOOL_CALLS:
+                remaining = MAX_TOOL_CALLS - count
+                for index, call in enumerate(calls):
+                    name = str(call.get("name") or "")
+                    call_id = str(call.get("id") or f"tool-{count + index + 1}")
+                    if index >= remaining:
+                        result = {"error": "The per-question tool-call limit has been reached."}
+                    else:
+                        count += 1
+                        used.append(name)
+                        events = state.get("events")
+                        if events is not None:
+                            events.put_nowait({"event": "tool", "data": {"name": name}})
+                        try:
+                            result = await invoke_tool(
+                                name,
+                                call.get("args") or {},
+                                database=state.get("database"),
+                                registry=registry,
+                            )
+                        except (ValidationError, KeyError, TypeError):
+                            result = {"error": "Tool arguments were invalid or the requested tool is unavailable."}
+                        except Exception:
+                            log.exception("chat tool %s failed", name)
+                            result = {"error": "The requested business data could not be loaded."}
+                        results.append({"tool": name, "result": result})
+                    messages.append(
+                        ToolMessage(
+                            content=json.dumps(result, ensure_ascii=False, default=str),
+                            tool_call_id=call_id,
+                            name=name or "unknown_tool",
+                        )
+                    )
+                continue
+
+            final_text = _message_text(response)
+            if calls and not final_text:
+                final_text = _fallback_text(_last_user_text(messages))
+            errors = validate_numeric_claims(final_text, results)
+            if not errors:
+                break
+            if regen_count == 0:
+                messages.append(
+                    SystemMessage(
+                        content=(
+                            "Regenerate your answer once. Remove any amount or count that is not copied from this turn's tool results. "
+                            "If the result is still unavailable, say the figure could not be verified. Reply in the user's language."
+                        )
+                    )
+                )
+                regen_count = 1
+                continue
+            final_text = _fallback_text(_last_user_text(messages))
+            break
+
+        return {
+            "messages": messages,
+            "tool_results": results,
+            "tools_used": used,
+            "usage": usage,
+            "final_text": final_text,
+        }
+
+    graph = StateGraph(ChatState)
+    graph.add_node("chat", chat_node)
+    graph.add_edge(START, "chat")
+    graph.add_edge("chat", END)
+    return graph.compile()
+
+
+def _last_user_text(messages: list[Any]) -> str:
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            return _message_text(message)
+    return ""
+
+
+async def execute_chat(
+    message: str,
+    history: list[dict] | None = None,
+    *,
+    model: Any = None,
+    tools: list | None = None,
+    database: Any = None,
+    events: Any = None,
+) -> dict:
+    today = datetime.now(ZoneInfo("Asia/Karachi")).date().isoformat()
+    system = (
+        f"{CHAT_SYSTEM}\nCurrent date in the user's timezone (Asia/Karachi): {today}. "
+        "Treat last week as the previous complete Monday through Sunday, and use inclusive date ranges."
+    )
+    messages: list[Any] = [SystemMessage(content=system)]
+    for turn in trim_turns(history or []):
+        messages.append(HumanMessage(content=str(turn["question"])))
+        messages.append(AIMessage(content=str(turn["answer"])))
+    messages.append(HumanMessage(content=message))
+    graph = build_chat_graph(model=model, tools=tools)
+    initial: ChatState = {
+        "messages": messages,
+        "pending_calls": [],
+        "tool_calls": 0,
+        "tool_results": [],
+        "tools_used": [],
+        "usage": empty_usage(),
+        "final_text": "",
+        "regen_count": 0,
+        "database": database,
+        "events": events,
+    }
+    result = await graph.ainvoke(initial)
+    return {
+        "text": result.get("final_text", ""),
+        "tools_used": result.get("tools_used", []),
+        "tool_results": result.get("tool_results", []),
+        "tokens": result.get("usage") or empty_usage(),
+    }
+
+
+async def daily_token_total(database: Any = None) -> int:
+    """Sum today's logged token usage in UTC."""
+    db = database if database is not None else app_db.get_db()
+    now = datetime.now(timezone.utc)
+    start = datetime.combine(now.date(), time.min, tzinfo=timezone.utc).isoformat()
+    end = (datetime.combine(now.date(), time.min, tzinfo=timezone.utc) + timedelta(days=1)).isoformat()
+    rows = await db.chat_logs.find(
+        {"created_at": {"$gte": start, "$lt": end}}, {"tokens.total_tokens": 1}
+    ).to_list(200_000)
+    return sum(int((row.get("tokens") or {}).get("total_tokens") or 0) for row in rows)
+
+
+async def log_rejected_turn(thread_id: str, message: str, status: str, database: Any = None) -> None:
+    db = database if database is not None else app_db.get_db()
+    await db.chat_logs.insert_one(
+        {
+            "thread_id": thread_id,
+            "question": message,
+            "tools_used": [],
+            "tokens": empty_usage(),
+            "status": status,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+
+async def run_chat(
+    thread_id: str,
+    message: str,
+    *,
+    database: Any = None,
+    model: Any = None,
+    tools: list | None = None,
+    events: Any = None,
+) -> dict:
+    """Run one chat turn, then persist its text history and token log."""
+    db = database if database is not None else app_db.get_db()
+    previous = await db.chat_threads.find_one({"thread_id": thread_id}) or {}
+    turns = trim_turns(previous.get("turns") or [])
+    started = datetime.now(timezone.utc).isoformat()
+    outcome: dict | None = None
+    status = "error"
+    try:
+        outcome = await execute_chat(
+            message,
+            turns,
+            model=model,
+            tools=tools,
+            database=db,
+            events=events,
+        )
+        updated_turns = trim_turns(
+            [*turns, {"question": message, "answer": outcome["text"], "created_at": started}]
+        )
+        await db.chat_threads.update_one(
+            {"thread_id": thread_id},
+            {"$set": {"turns": updated_turns, "updated_at": datetime.now(timezone.utc).isoformat()}},
+            upsert=True,
+        )
+        status = "complete"
+        return outcome
+    finally:
+        tokens = (outcome or {}).get("tokens") or empty_usage()
+        await db.chat_logs.insert_one(
+            {
+                "thread_id": thread_id,
+                "question": message,
+                "tools_used": (outcome or {}).get("tools_used", []),
+                "tokens": tokens,
+                "status": status,
+                "created_at": started,
+            }
+        )
+
+
+def _text_chunks(text: str, words_per_chunk: int = 4):
+    words = re.findall(r"\S+\s*", text or "")
+    for start in range(0, len(words), words_per_chunk):
+        yield "".join(words[start : start + words_per_chunk])
+
+
+async def stream_chat(
+    thread_id: str,
+    message: str,
+    database: Any = None,
+    *,
+    model: Any = None,
+    tools: list | None = None,
+):
+    """Yield tool progress, answer text chunks, and the final SSE payload."""
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def worker() -> None:
+        try:
+            outcome = await run_chat(
+                thread_id,
+                message,
+                database=database,
+                model=model,
+                tools=tools,
+                events=queue,
+            )
+            for chunk in _text_chunks(outcome["text"]):
+                await queue.put({"event": "token", "data": {"text": chunk}})
+            await queue.put({"event": "done", "data": {"text": outcome["text"], "thread_id": thread_id}})
+        except Exception:
+            log.exception("chat turn failed")
+            await queue.put({"event": "error", "data": {"message": "Chat could not complete this request."}})
+        finally:
+            await queue.put(None)
+
+    task = asyncio.create_task(worker())
+    try:
+        while True:
+            event = await queue.get()
+            if event is None:
+                break
+            yield event
+    finally:
+        if not task.done():
+            task.cancel()
+

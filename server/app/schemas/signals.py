@@ -86,7 +86,8 @@ class UnpaidSummary(TotalRow):
 
 
 class StalledOrderSummary(TotalRow):
-    pass
+    # the stalled list is unreliable (see processors.stalled_orders docstring)
+    reliable: bool = False
 
 
 class SignalsSummary(Base):
@@ -99,9 +100,16 @@ class SignalsSummary(Base):
     stalled_orders: StalledOrderSummary = Field(default_factory=StalledOrderSummary)
 
 
+class StalledOrderList(Base):
+    """Wrapper marking the stalled list as unreliable for its consumers."""
+
+    reliable: bool = False
+    items: list[StalledOrder] = Field(default_factory=list)
+
+
 class SignalsReport(Base):
     generated_at: str
     stale_quotes: list[StaleQuote] = Field(default_factory=list)
     unpaid_invoices: list[UnpaidInvoice] = Field(default_factory=list)
-    stalled_orders: list[StalledOrder] = Field(default_factory=list)
+    stalled_orders: StalledOrderList = Field(default_factory=StalledOrderList)
     summary: SignalsSummary = Field(default_factory=SignalsSummary)

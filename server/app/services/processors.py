@@ -98,13 +98,13 @@ def parse_date(value: Any) -> Optional[datetime]:
 
 
 def to_number(value: Any) -> float:
-    """Money/counts can arrive as numbers or strings like '1350.00'."""
+    """Money/counts can arrive as numbers or strings like '1350.00', '$2,000'."""
     if value is None or isinstance(value, bool):
         return 0.0
     if isinstance(value, (int, float)):
         return float(value)
     try:
-        return float(str(value).replace(",", "").strip())
+        return float(str(value).replace(",", "").replace("$", "").strip())
     except ValueError:
         return 0.0
 
@@ -183,43 +183,61 @@ def stale_quotes(
     now: Optional[datetime] = None,
     *,
     days: Optional[int] = None,
+    max_age_days: Optional[int] = None,
+    order_quote_ids: Optional[Iterable[int]] = None,
     closed_statuses: Optional[frozenset] = None,
 ) -> list[dict]:
-    """Quotes still open more than STALE_QUOTE_DAYS after they were created.
+    """Quotes worth chasing, tightened in v2 to stop flooding the agents:
 
-    Older than N days means the exact age in days is greater than N (a quote
-    from exactly 3 days ago is not stale on a 3-day rule).
+      * a quote that already has an order (orders.quote_id -> quotes.id) is
+        NOT stale - it converted;
+      * the age window matters: older than STALE_QUOTE_DAYS (3) but younger
+        than STALE_QUOTE_MAX_AGE_DAYS (30). Really old open quotes are
+        dead history, not sales opportunities;
+      * only the LATEST open quote per customer is kept (one conversation
+        per customer, not one per quote);
+      * sorted by amount descending so agents work the biggest deals first.
     """
     now = now or datetime.now(timezone.utc)
     threshold = settings.STALE_QUOTE_DAYS if days is None else days
+    max_age = settings.STALE_QUOTE_MAX_AGE_DAYS if max_age_days is None else max_age_days
     closed = (
         frozenset(CLOSED_QUOTE_STATUSES)
         if closed_statuses is None
         else frozenset(closed_statuses)
     )
-    result = []
+    converted_ids = set(order_quote_ids or ())
+
+    kept_by_customer: dict[Any, dict] = {}
     for quote in quotes:
         status = contact_to_s(quote.get("status"))
         if status in closed:
             continue
-        age = age_days(parse_date(quote.get("created_at")), now)
-        if age is None or age <= threshold:
+        if quote.get("id") in converted_ids:
             continue
-        result.append(
-            {
-                "id": quote.get("id"),
-                "ref": quote.get("ref") or quote.get("inv_ref"),
-                "status": status,
-                "status_order": quote.get("status_order"),
-                "amount": round(to_number(quote.get("amount")), 2),
-                "age_days": round(age, 2),
-                "days_stale": int(age),
-                "created_at": iso_or_none(quote.get("created_at")),
-                "customer": customer_ref(quote),
-                "sale_rep": sale_rep_ref(quote),
-            }
-        )
-    result.sort(key=lambda row: (row["age_days"], row["amount"]), reverse=True)
+        age = age_days(parse_date(quote.get("created_at")), now)
+        if age is None or age <= threshold or age > max_age:
+            continue
+        row = {
+            "id": quote.get("id"),
+            "ref": quote.get("ref") or quote.get("inv_ref"),
+            "status": status,
+            "status_order": quote.get("status_order"),
+            "amount": round(to_number(quote.get("amount")), 2),
+            "age_days": round(age, 2),
+            "days_stale": int(age),
+            "created_at": iso_or_none(quote.get("created_at")),
+            "customer": customer_ref(quote),
+            "sale_rep": sale_rep_ref(quote),
+        }
+        customer_key = quote.get("customer").get("id") if isinstance(quote.get("customer"), dict) else None
+        current = kept_by_customer.get(customer_key)
+        # keep the newest quote per customer (age_days: smaller = newer)
+        if current is None or row["age_days"] < current["age_days"]:
+            kept_by_customer[customer_key] = row
+
+    result = list(kept_by_customer.values())
+    result.sort(key=lambda row: row["amount"], reverse=True)
     return result
 
 
@@ -229,21 +247,27 @@ def unpaid_invoices(
     *,
     overdue_days: Optional[int] = None,
 ) -> list[dict]:
-    """Orders/invoices that are not fully paid (Not Paid + Partially Paid).
+    """Orders worth chasing for money, tightened in v2:
 
-    payment_status: 0 = Not Paid, 1 = Partially Paid, 2 = Paid,
-    null = no payment recorded yet (seen on zero-total invoices in the data).
-    `balance` = total_amount - amount_paid (`amount_paid` missing means 0).
+      * payment_status 0 (Not Paid), 1 (Partially Paid), or null WITH a
+        non-zero total (null on a zero-total invoice is nothing to chase);
+      * balance must be strictly greater than 0;
+      * sorted by balance descending (biggest debt first).
     """
     now = now or datetime.now(timezone.utc)
     threshold = settings.OVERDUE_INVOICE_DAYS if overdue_days is None else overdue_days
     result = []
     for order in orders:
-        if to_number(order.get("payment_status")) == PAYMENT_STATUS_PAID and order.get("payment_status") is not None:
+        payment_status = order.get("payment_status")
+        if payment_status == PAYMENT_STATUS_PAID:
             continue
         total = to_number(order.get("total_amount"))
+        if payment_status is None and total == 0:
+            continue  # nothing to collect on an empty invoice
         paid = to_number(order.get("amount_paid"))
         balance = round(total - paid, 2)
+        if balance <= 0:
+            continue  # paid up (or overpaid) already
         age = age_days(parse_date(order.get("invoice_date")), now)
         if age is None:
             continue
@@ -277,11 +301,12 @@ def stalled_orders(
     days: Optional[int] = None,
     final_statuses: Optional[frozenset] = None,
 ) -> list[dict]:
-    """Orders sitting in a non-final production status for longer than
-    STALLED_ORDER_DAYS.
+    """UNRELIABLE SIGNAL - do not build decisions on it.
 
-    Order records have no last-update timestamp (checked on real data), so the
-    age is taken from `invoice_date` - the only date field the ERP sends.
+    Kept for compatibility only (see /api/signals "reliable": false). The ERP
+    gives orders no last-update date and everything in the window sits in
+    'Approved', so every order older than STALLED_ORDER_DAYS is counted. That
+    is normal production flow, not a delay. Agents must ignore this signal.
     """
     now = now or datetime.now(timezone.utc)
     threshold = settings.STALLED_ORDER_DAYS if days is None else days
@@ -388,6 +413,41 @@ def summarize_payments(records: Iterable[Mapping[str, Any]]) -> dict:
         "total_amount": round(total, 2),
         "first_at": dates[0].isoformat() if dates else None,
         "last_at": dates[-1].isoformat() if dates else None,
+    }
+
+
+def payment_lateness_days(payments: Iterable[Mapping[str, Any]]) -> list[float]:
+    """How many days each paid invoice waited, in pure Python.
+
+    Payment records know the invoice date (payment_details[].invoice.date,
+    a naive US Central string) and the received date. The gap is the customer's
+    payment lateness. Deposits that arrive BEFORE the invoice date come out
+    negative and are kept as-is (real data - it means very fast payment)."""
+    gaps: list[float] = []
+    for payment in payments:
+        received = parse_date(payment.get("received_at"))
+        if received is None:
+            continue
+        for detail in payment.get("payment_details") or []:
+            invoice = detail.get("invoice") or {}
+            invoice_date = parse_date(invoice.get("date"))
+            if invoice_date is None:
+                continue
+            gaps.append((received - invoice_date).total_seconds() / 86400.0)
+    return gaps
+
+
+def summarize_payment_history(payments: Iterable[Mapping[str, Any]]) -> dict:
+    """Numbers-only payment summary for the collections agent."""
+    rows = list(payments)
+    gaps = [g for g in payment_lateness_days(rows) if g >= 0]
+    total_paid = sum(to_number(row.get("total_payment_used") or row.get("amount")) for row in rows)
+    return {
+        "count": len(rows),
+        "total_paid": round(total_paid, 2),
+        "lateness_avg_days": round(sum(gaps) / len(gaps), 1) if gaps else None,
+        "lateness_median_days": round(sorted(gaps)[len(gaps) // 2], 1) if gaps else None,
+        "lateness_samples": len(gaps),
     }
 
 
