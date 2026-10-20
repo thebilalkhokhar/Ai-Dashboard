@@ -61,18 +61,16 @@ export function SystemHealthBadge() {
 
   const label =
     healthState.status === "checking"
-      ? "Checking system health"
+      ? "Checking..."
       : healthState.status === "unavailable"
-        ? "API unavailable"
-        : healthState.status === "degraded"
-          ? "Database unavailable"
-          : "Systems operational";
+        ? "API Offline (Mock Mode)"
+        : "API Online";
   const indicatorClass =
-    healthState.status === "ok"
-      ? "bg-accent"
+    healthState.status === "unavailable"
+      ? "bg-amber-400"
       : healthState.status === "checking"
-        ? "bg-amber-400"
-        : "bg-red-400";
+        ? "bg-amber-300"
+        : "bg-emerald-400";
   const detail =
     healthState.status === "unavailable"
       ? healthState.error

@@ -152,16 +152,53 @@ export async function fetchCustomerContext(
   }
 
   const search = query.size > 0 ? `?${query.toString()}` : "";
-  const response = await fetch(
-    `http://localhost:8000/api/customers/${customerId}/context${search}`,
-    { cache: "no-store" },
-  );
+  try {
+    const response = await fetch(
+      `http://localhost:8000/api/customers/${customerId}/context${search}`,
+      { cache: "no-store" },
+    );
 
-  if (!response.ok) {
-    throw new Error(`Customer context request failed with status ${response.status}`);
+    if (!response.ok) {
+      throw new Error(`Customer context request failed with status ${response.status}`);
+    }
+
+    return (await response.json()) as CustomerContext;
+  } catch (error) {
+    console.warn("Unable to load customer context; using mock customer context.", error);
+    return {
+      customer_id: customerId,
+      company_name: `Mock Customer ${customerId}`,
+      contact: { email: null, phone: null },
+      quotes: {
+        count: 0,
+        total_amount: 0,
+        status_counts: {},
+        first_at: null,
+        last_at: null,
+      },
+      orders: {
+        count: 0,
+        total_amount: 0,
+        status_counts: {},
+        first_at: null,
+        last_at: null,
+        amount_paid: 0,
+        balance: 0,
+        unpaid_count: 0,
+        partially_paid_count: 0,
+        fully_paid_count: 0,
+        payment_status_counts: {},
+      },
+      payments: {
+        count: 0,
+        total_amount: 0,
+        first_at: null,
+        last_at: null,
+      },
+      leads: [],
+      notes: ["Mock context: the backend customer-context route is unavailable."],
+    };
   }
-
-  return (await response.json()) as CustomerContext;
 }
 
 export async function startAgentRun(): Promise<AgentRunStarted> {
