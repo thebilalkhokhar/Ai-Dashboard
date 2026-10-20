@@ -157,7 +157,7 @@ class FakeCollection:
     def __init__(self, docs: list[dict] | None = None):
         self.docs = list(docs or [])
 
-    def find(self, query: dict | None = None):
+    def find(self, query: dict | None = None, projection: dict | None = None):
         query = query or {}
         return FakeCursor([row for row in self.docs if _matches(row, query)])
 
@@ -200,11 +200,31 @@ class FakeDatabase:
             setattr(self, name, collections.get(name) or FakeCollection())
 
 
+def fixture_leads() -> list[dict]:
+    return [
+        {
+            "zohoLeadId": "L-1",
+            "firstName": "Keiwan",
+            "lastName": "Bentley",
+            "company": "Zaskii Boyz",
+            "status": "New",
+            "source": "Ecommerce",
+            "email": "keiwan@example.com",
+            "phone": "5551234567",
+            "description": '{"product": "mylar bag", "quantity": "500", "artwork": []}',
+            "createdAt": erp_time(5),
+            "lastActivityAt": erp_time(2),
+            "leadDesk": {"stage": "open", "flagReason": ""},
+        }
+    ]
+
+
 def scheduler_db() -> FakeDatabase:
     return FakeDatabase(
         quotes_flat=FakeCollection(fixture_quotes()),
         orders_flat=FakeCollection(fixture_orders()),
         payments_flat=FakeCollection(fixture_payments()),
+        leads=FakeCollection(fixture_leads()),
     )
 
 
@@ -358,14 +378,15 @@ def published_events(redis: FakeRedis) -> list[tuple[str, Any]]:
 
 async def seed_previous_run(database, scheduler: DashboardScheduler, now: datetime) -> None:
     """Store the current item hashes as if the agent had just finished a run."""
-    negotiation, collections = await scheduler._current_items(now)
-    assert negotiation and collections  # fixtures really do produce signals
+    negotiation, collections, leads = await scheduler._current_items(now)
+    assert negotiation and collections and leads  # fixtures produce all three signals
     database.agent_runs.docs.append(
         {
             "run_id": "previous-run",
             "finished_epoch": now.timestamp() - 60,
             "negotiation": negotiation,
             "collections": collections,
+            "lead_followup": leads,
         }
     )
 
@@ -464,11 +485,50 @@ async def test_unchanged_signals_make_zero_agent_calls():
 
     summary = await scheduler.run_cycle(NOW)
 
+    # unchanged includes the lead hashes: no new/changed item -> no LLM call
     assert pipeline.calls == []
     assert summary["agents"] == {"ok": True, "ran": False, "new_count": 0}
     assert summary["snapshot"]["ok"] is True
     assert [name for name, _ in published_events(redis)] == ["snapshot"]
     assert database.agent_triggers.docs == []  # no run, no trigger log
+
+
+@pytest.mark.asyncio
+async def test_new_stuck_lead_triggers_exactly_one_agent_call():
+    database = scheduler_db()
+    redis = FakeRedis()
+    pipeline = RecordingPipeline()
+    scheduler = make_scheduler(redis, database, pipeline)
+    await seed_previous_run(database, scheduler, NOW)
+
+    # a new stuck lead appears after the previous run
+    database.leads.docs.append(
+        {
+            "zohoLeadId": "L-99",
+            "firstName": "Valerie",
+            "lastName": "Eskelsen",
+            "company": "Balaika",
+            "status": "New",
+            "source": "Ecommerce",
+            "email": "valerie@example.com",
+            "phone": "17863917953",
+            "description": '{"product": "mylar", "quantity": "15000", "artwork": []}',
+            "createdAt": erp_time(4),
+            "lastActivityAt": erp_time(1),
+            "leadDesk": {"stage": "open", "flagReason": ""},
+        }
+    )
+
+    summary = await scheduler.run_cycle(NOW)
+
+    assert len(pipeline.calls) == 1
+    assert pipeline.calls[0]["ignore_cache"] is False
+    assert summary["agents"]["trigger"] == "new_lead"
+    assert summary["agents"]["new_count"] == 1
+    trigger_log = database.agent_triggers.docs[-1]
+    assert trigger_log["trigger"] == "new_lead"
+    assert trigger_log["new_leads"] == 1
+    assert trigger_log["ok"] is True
 
 
 @pytest.mark.asyncio
@@ -551,7 +611,7 @@ async def test_scheduler_survives_job_errors():
     # snapshot events are normal; only agent failures publish "error"
     assert [name for name, _ in events].count("error") == 2
     error_payload = next(data for name, data in events if name == "error")
-    assert error_payload["trigger"] == "new_quote_and_new_overdue_invoice"
+    assert error_payload["trigger"] == "new_quote_and_new_overdue_invoice_and_new_lead"
     assert database.agent_triggers.docs[-1]["ok"] is False
 
 

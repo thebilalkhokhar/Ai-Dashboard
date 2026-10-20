@@ -12,6 +12,7 @@ Run:  .venv/bin/python -m pytest tests -q
 from __future__ import annotations
 
 import copy
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -24,8 +25,13 @@ from app.agents.graph import (
     master_invented_amounts,
     run_pipeline,
 )
-from app.agents.master import group_by_customer
-from app.schemas.agents import CollectionsOutput, MasterOutput, NegotiationOutput
+from app.agents.master import group_by_customer, master_payload
+from app.schemas.agents import (
+    CollectionsOutput,
+    LeadFollowupOutput,
+    MasterOutput,
+    NegotiationOutput,
+)
 from app.services.processors import to_number  # parses "$2,000" style strings
 
 NOW = datetime.now(timezone.utc)
@@ -45,7 +51,7 @@ class FakeCollection:
         self._docs = docs
         self.saved: list[dict] = []
 
-    def find(self, query: dict | None = None):
+    def find(self, query: dict | None = None, projection: dict | None = None):
         docs = self._docs + self.saved
         if query and "finished_epoch" in query:
             gt = query["finished_epoch"].get("$gt")
@@ -57,11 +63,12 @@ class FakeCollection:
 
 
 class FakeDatabase:
-    def __init__(self, quotes, orders, payments, runs=None):
+    def __init__(self, quotes, orders, payments, runs=None, leads=None):
         self.quotes_flat = FakeCollection(quotes)
         self.orders_flat = FakeCollection(orders)
         self.payments_flat = FakeCollection(payments)
         self.agent_runs = FakeCollection(runs or [])
+        self.leads = FakeCollection(leads or [])
 
 
 def there_and_last_month(**over):
@@ -97,9 +104,57 @@ def order_row(**over):
     return row
 
 
+def lead_row(**over):
+    """A stuck-lead doc shaped like processors.stuck_leads output expects."""
+    row = {
+        "zohoLeadId": "L-1",
+        "firstName": "Keiwan",
+        "lastName": "Bentley",
+        "company": "Zaskii Boyz",
+        "email": "keiwan@example.com",
+        "phone": "5551234567",
+        "status": "New",
+        "source": "Ecommerce",
+        "description": json.dumps(
+            {"product": "mylar bag", "quantity": "500", "artwork": []}
+        ),
+        "createdAt": (NOW - timedelta(days=5)).isoformat(),
+        "lastActivityAt": (NOW - timedelta(days=3)).isoformat(),
+        "leadDesk": {"stage": "open", "flagReason": ""},
+    }
+    row.update(over)
+    return row
+
+
 def good_factory():
     """Fake LLM that copies every number it mentions from its own input."""
     def factory(k: str):
+        if k == "lead_followup":
+            def answer(payload: dict) -> dict:
+                lead = payload["lead"]
+                missing = list(lead.get("missing_fields") or [])
+                parsed_fields = lead.get("parsed") or {}
+                return {
+                    "lead_id": "",
+                    "contact_name": lead.get("contact_name"),
+                    "company": lead.get("company"),
+                    "product": parsed_fields.get("product") or parsed_fields.get("type"),
+                    "missing": missing,
+                    "blocker": (
+                        "Missing " + ", ".join(missing) + "."
+                        if missing
+                        else "Nothing specific is missing."
+                    ),
+                    "owner_team": "design" if "artwork" in missing else "sales",
+                    "action_plan": "A rep should follow up with the lead on the missing details.",
+                    "message_draft": (
+                        "Following up on your packaging request - let us know the missing "
+                        "details and we can help with the next step."
+                    ),
+                    "confidence": "medium",
+                    "evidence": "used the parsed fields and the Python-computed missing list",
+                }
+            return FakeCallerForTest(LeadFollowupOutput, answer)
         if k == "negotiation":
             def answer(payload: dict) -> dict:
                 q = payload["quote"]
@@ -201,6 +256,26 @@ def contact_bad_factory():
     return factory
 
 
+def lead_phone_bad_factory():
+    """Valid copies everywhere EXCEPT the lead draft invents a phone number."""
+    base = good_factory()
+
+    def factory(k: str):
+        caller = base(k)
+        if k == "lead_followup":
+            original_answer = caller._answer
+
+            def answer(payload: dict) -> dict:
+                data = original_answer(payload)
+                data["message_draft"] += " Or call 818-225-9999."
+                return data
+
+            return FakeCallerForTest(LeadFollowupOutput, answer)
+        return caller
+
+    return factory
+
+
 def first_name_factory():
     """Negotiation draft greets a person the ERP does not know."""
     base = good_factory()
@@ -264,6 +339,7 @@ def fresh_db() -> FakeDatabase:
                 ],
             }
         ],
+        leads=[lead_row()],
     )
 
 
@@ -328,6 +404,26 @@ def test_master_brief_cannot_invent_totals():
     assert master_invented_amounts(bad, {"grouped": grouped}) == [542154.0]
 
 
+def test_master_payload_keeps_leads_in_their_own_section():
+    """Leads are matched to customers only by email/phone - never merged."""
+    grouped = group_by_customer(
+        [{"customer_id": 10, "customer_name": "ACME", "kind": "negotiation"}]
+    )
+    leads = [
+        {
+            "lead_id": "L-1",
+            "contact_name": "Keiwan Bentley",
+            "company": "Zaskii Boyz",
+            "blocker": "no artwork",
+        }
+    ]
+    payload = master_payload(grouped, {"stale_quotes_count": 1}, leads)
+    assert payload["customers"][0]["customer_id"] == 10
+    assert payload["leads"][0]["lead_id"] == "L-1"
+    # without lead items the section is omitted entirely (old callers)
+    assert "leads" not in master_payload(grouped, {"stale_quotes_count": 1})
+
+
 # ------------------------------------------------------------ full pipeline
 
 
@@ -379,6 +475,37 @@ async def test_invented_phone_becomes_needs_review():
 
 
 @pytest.mark.asyncio
+async def test_pipeline_lead_items_are_saved_with_python_facts():
+    database = fresh_db()
+    await run_pipeline(
+        run_id="test-run-lead", database=database, caller_factory=good_factory(), now_epoch=EPOCH
+    )
+    doc = database.agent_runs.saved[0]
+    assert doc["counts"]["lead_followup_total"] == 1
+    lead = doc["lead_followup"][0]
+    assert lead["lead_id"] == "L-1"  # filled by Python, never by the model
+    assert lead["contact_name"] == "Keiwan Bentley"
+    assert lead["company"] == "Zaskii Boyz"
+    assert lead["status"] == "New"
+    assert lead["missing"] == ["artwork", "size", "material", "finish"]
+    assert lead["owner_team"] == "design"  # artwork is missing
+    assert "needs_review" not in lead["flags"]
+    assert lead["source"] == "agent"
+
+
+@pytest.mark.asyncio
+async def test_lead_draft_with_invented_phone_becomes_needs_review():
+    database = fresh_db()
+    await run_pipeline(
+        run_id="test-lead-phone", database=database, caller_factory=lead_phone_bad_factory(), now_epoch=EPOCH
+    )
+    item = database.agent_runs.saved[0]["lead_followup"][0]
+    assert "needs_review" in item["flags"]
+    assert item["message_draft"] is None
+    assert "818-225-9999" in item["rejected_reason"]
+
+
+@pytest.mark.asyncio
 async def test_unknown_greeting_name_becomes_company_greeting():
     database = fresh_db()
     await run_pipeline(
@@ -398,5 +525,13 @@ async def test_second_run_reuses_cache():
     second = await run_pipeline(
         run_id="run-b", database=database, caller_factory=good_factory(), now_epoch=EPOCH + 60
     )
-    assert second["counts"]["cached"] == first["counts"]["negotiation_total"] + first["counts"]["collections_total"]
+    assert second["counts"]["cached"] == (
+        first["counts"]["negotiation_total"]
+        + first["counts"]["collections_total"]
+        + first["counts"]["lead_followup_total"]
+    )
     assert second["usage"]["total_tokens"] < first["usage"]["total_tokens"]
+    # the cached lead copy keeps the Python-filled facts
+    cached_lead = second["lead_followup"][0]
+    assert cached_lead["source"] == "cache"
+    assert cached_lead["lead_id"] == "L-1"

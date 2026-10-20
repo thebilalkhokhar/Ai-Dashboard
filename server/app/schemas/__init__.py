@@ -5,6 +5,8 @@ from app.schemas.agents import (  # noqa: F401
     AgentOutputBase,
     NegotiationOutput,
     CollectionsOutput,
+    LeadFollowupOutput,
+    LeadMissing,
     Priority,
     MasterOutput,
 )
@@ -19,6 +21,8 @@ __all__ = [
     "AgentOutputBase",
     "NegotiationOutput",
     "CollectionsOutput",
+    "LeadFollowupOutput",
+    "LeadMissing",
     "Priority",
     "MasterOutput",
 ]

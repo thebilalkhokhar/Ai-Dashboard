@@ -49,7 +49,7 @@ def test_customer_context_route_returns_200(monkeypatch, fixture_customer_contex
     assert response.json()["company_name"] == "Fixture Customer"
 
 
-def test_all_five_expected_api_routes_are_registered():
+def test_all_expected_api_routes_are_registered():
     registered = {
         (method.upper(), path)
         for path, operations in app.openapi()["paths"].items()
@@ -61,6 +61,7 @@ def test_all_five_expected_api_routes_are_registered():
         ("GET", "/api/briefing/latest"),
         ("GET", "/api/customers/{customer_id}/context"),
         ("POST", "/api/chat"),
+        ("GET", "/api/leads/stuck"),
     } <= registered
 
 
@@ -81,9 +82,10 @@ class FakeCollection:
 
 
 class FakeSignalDatabase:
-    def __init__(self, quotes=(), orders=()):
+    def __init__(self, quotes=(), orders=(), leads=()):
         self.quotes_flat = FakeCollection(quotes)
         self.orders_flat = FakeCollection(orders)
+        self.leads = FakeCollection(leads)
 
 
 def prepare_test_client(monkeypatch):
@@ -123,6 +125,55 @@ def test_signals_can_omit_stalled_items_without_changing_summary(monkeypatch):
         "total_amount": 375.25,
         "reliable": False,
     }
+
+
+def test_stuck_leads_endpoint_parses_in_python_and_hides_contacts(monkeypatch):
+    now = datetime.now(timezone.utc)
+    database = FakeSignalDatabase(
+        leads=[
+            {
+                "zohoLeadId": "L-1",
+                "firstName": "Keiwan",
+                "lastName": "Bentley",
+                "company": "Zaskii Boyz",
+                "status": "New",
+                "source": "Ecommerce",
+                "email": "keiwan@example.com",
+                "phone": "5551234567",
+                "description": '{"product": "mylar bag", "quantity": "500", "artwork": []}',
+                "createdAt": (now - timedelta(days=5)).isoformat(),
+                "lastActivityAt": (now - timedelta(days=2)).isoformat(),
+                "leadDesk": {"stage": "open", "flagReason": ""},
+            },
+            {
+                "zohoLeadId": "L-2",
+                "status": "Junk Lead",
+                "description": "quantity: 10",
+                "lastActivityAt": (now - timedelta(days=2)).isoformat(),
+            },
+        ]
+    )
+    prepare_test_client(monkeypatch)
+    monkeypatch.setattr(routes, "get_db", lambda: database)
+
+    with TestClient(app) as client:
+        response = client.get("/api/leads/stuck")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["days"] == settings.LEAD_ACTIVE_DAYS
+    assert payload["total"] == 1  # the Junk Lead is filtered by Python
+    lead = payload["items"][0]
+    assert lead["lead_id"] == "L-1"
+    assert lead["contact_name"] == "Keiwan Bentley"
+    assert lead["company"] == "Zaskii Boyz"
+    assert lead["product"] == "mylar bag"
+    assert lead["quantity"] == "500"
+    assert lead["artwork_present"] is False
+    assert "artwork" in lead["missing"]
+    assert lead["days_since_activity"] == 2
+    # contact details must never leave this endpoint
+    assert "email" not in lead and "phone" not in lead
 
 
 def test_metrics_and_signals_open_quote_totals_match_for_same_fixture(monkeypatch):

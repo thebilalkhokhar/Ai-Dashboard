@@ -58,6 +58,15 @@ async def main() -> None:
         f"{dict.fromkeys(('price', 'no_response', 'new_customer_no_history', 'repeat_customer_slow', 'unclear'), 0) | reason_counts}"
     )
     show("COLLECTIONS", result.get("collections", []))
+    leads = result.get("lead_followup", [])
+    show("LEAD FOLLOW-UP", leads)
+    print("\n=== LEAD FOLLOW-UP DISTRIBUTION (all items in this run) ===")
+    team_counts = Counter(item.get("owner_team", "missing") for item in leads)
+    print(f"owner_team: {dict.fromkeys(('design', 'sales', 'unclear'), 0) | team_counts}")
+    missing_counts = Counter(
+        field for item in leads for field in (item.get("missing") or [])
+    )
+    print(f"missing: {dict(missing_counts)}")
     print("\n=== MASTER BRIEF ===")
     master = result.get("master") or {}
     for bullet in master.get("bullets", []):

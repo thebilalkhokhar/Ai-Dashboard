@@ -8,13 +8,13 @@ no extra service. Every REFRESH_MINUTES it does one cycle:
     3. decide whether the agents run      (hash comparison against the last run)
     4. daily safety net at AGENT_FULL_RUN_HOUR, with the cache bypassed
 
-Agent runs are event-triggered. After every refresh the current stale-quote
-and unpaid-invoice items are built with graph.load_signals_node (the graph's
-own code, so the hashes are identical to what the pipeline would compute) and
-compared with the hashes stored in the previous agent_runs document. Only when
-something is new or changed does the scheduler call the pipeline once; inside
-the pipeline the existing 24h cache skips every unchanged item. No changes ->
-zero LLM calls.
+Agent runs are event-triggered. After every refresh the current stale-quote,
+unpaid-invoice and stuck-lead items are built with graph.load_signals_node
+(the graph's own code, so the hashes are identical to what the pipeline would
+compute) and compared with the hashes stored in the previous agent_runs
+document. Only when something is new or changed does the scheduler call the
+pipeline once; inside the pipeline the existing 24h cache skips every
+unchanged item. No changes -> zero LLM calls.
 
 A Redis lock (`dashboard:scheduler:lock`) makes sure two cycles never overlap.
 Every job has its own try/except: one failure is logged and the loop keeps
@@ -208,19 +208,23 @@ class DashboardScheduler:
             if await self._daily_run_due(now):
                 return await self._run_agent("daily_run", now, ignore_cache=True)
 
-            new_quotes, new_invoices = await self._new_items(now)
-            if not new_quotes and not new_invoices:
+            new_quotes, new_invoices, new_leads = await self._new_items(now)
+            if not new_quotes and not new_invoices and not new_leads:
                 log.info("scheduler: no new or changed items - no agent run")
                 return {"ok": True, "ran": False, "new_count": 0}
 
-            if new_quotes and new_invoices:
-                trigger = "new_quote_and_new_overdue_invoice"
-            elif new_quotes:
-                trigger = "new_quote"
-            else:
-                trigger = "new_overdue_invoice"
+            trigger = "_and_".join(
+                part
+                for part, chosen in (
+                    ("new_quote", new_quotes),
+                    ("new_overdue_invoice", new_invoices),
+                    ("new_lead", new_leads),
+                )
+                if chosen
+            )
             return await self._run_agent(
-                trigger, now, new_quotes=new_quotes, new_invoices=new_invoices
+                trigger, now, new_quotes=new_quotes, new_invoices=new_invoices,
+                new_leads=new_leads,
             )
         except Exception as exc:  # trigger evaluation itself broke
             log.exception("agent trigger check failed")
@@ -249,7 +253,7 @@ class DashboardScheduler:
             return False
         return True
 
-    async def _current_items(self, now: datetime) -> tuple[list[dict], list[dict]]:
+    async def _current_items(self, now: datetime) -> tuple[list[dict], list[dict], list[dict]]:
         """Reuse the graph's own loading node so hashes match the pipeline.
 
         `_erp=None` on purpose: the lead-outcomes ERP calls add nothing to the
@@ -267,7 +271,11 @@ class DashboardScheduler:
                 "_use_cache": False,  # we only want the hashes, not cached output
             }
         )
-        return state.get("negotiation_input") or [], state.get("collections_input") or []
+        return (
+            state.get("negotiation_input") or [],
+            state.get("collections_input") or [],
+            state.get("lead_followup_input") or [],
+        )
 
     async def _previous_hashes(self) -> set[str]:
         """Every input hash from the most recent completed agent run."""
@@ -281,19 +289,20 @@ class DashboardScheduler:
             return set()
         run = docs[0]
         hashes: set[str] = set()
-        for kind in ("negotiation", "collections"):
+        for kind in ("negotiation", "collections", "lead_followup"):
             for item in run.get(kind) or []:
                 if item.get("input_hash"):
                     hashes.add(item["input_hash"])
         return hashes
 
-    async def _new_items(self, now: datetime) -> tuple[list[dict], list[dict]]:
+    async def _new_items(self, now: datetime) -> tuple[list[dict], list[dict], list[dict]]:
         """Items whose input hash the previous run has never seen."""
-        negotiation, collections = await self._current_items(now)
+        negotiation, collections, leads = await self._current_items(now)
         previous = await self._previous_hashes()
         new_quotes = [item for item in negotiation if item.get("input_hash") not in previous]
         new_invoices = [item for item in collections if item.get("input_hash") not in previous]
-        return new_quotes, new_invoices
+        new_leads = [item for item in leads if item.get("input_hash") not in previous]
+        return new_quotes, new_invoices, new_leads
 
     async def _run_agent(
         self,
@@ -302,10 +311,12 @@ class DashboardScheduler:
         ignore_cache: bool = False,
         new_quotes: Optional[list[dict]] = None,
         new_invoices: Optional[list[dict]] = None,
+        new_leads: Optional[list[dict]] = None,
     ) -> dict:
         """One pipeline call + the trigger log + the published briefing."""
         new_quotes = new_quotes or []
         new_invoices = new_invoices or []
+        new_leads = new_leads or []
         local_day = now.astimezone().date().isoformat()
         if trigger == "daily_run":
             self._last_daily_day = local_day
@@ -313,8 +324,8 @@ class DashboardScheduler:
         run_id = str(uuid.uuid4())
         started_at = datetime.now(timezone.utc)
         log.info(
-            "scheduler: agent run %s (%s, new_quotes=%d, new_invoices=%d, full=%s)",
-            run_id, trigger, len(new_quotes), len(new_invoices), ignore_cache,
+            "scheduler: agent run %s (%s, new_quotes=%d, new_invoices=%d, new_leads=%d, full=%s)",
+            run_id, trigger, len(new_quotes), len(new_invoices), len(new_leads), ignore_cache,
         )
 
         try:
@@ -327,7 +338,7 @@ class DashboardScheduler:
             log.exception("agent run %s failed", run_id)
             await self._log_trigger(
                 trigger, run_id, started_at, len(new_quotes), len(new_invoices),
-                ignore_cache, ok=False, error=f"{type(exc).__name__}: {exc}",
+                len(new_leads), ignore_cache, ok=False, error=f"{type(exc).__name__}: {exc}",
             )
             # only agent failures are worth an error event on the live stream
             await self._publish(
@@ -343,14 +354,14 @@ class DashboardScheduler:
 
         await self._log_trigger(
             trigger, run_id, started_at, len(new_quotes), len(new_invoices),
-            ignore_cache, ok=True, error=None,
+            len(new_leads), ignore_cache, ok=True, error=None,
         )
         await self._publish("briefing", await self._latest_briefing())
         return {
             "ok": True,
             "ran": True,
             "trigger": trigger,
-            "new_count": len(new_quotes) + len(new_invoices),
+            "new_count": len(new_quotes) + len(new_invoices) + len(new_leads),
             "run_id": run_id,
         }
 
@@ -361,6 +372,7 @@ class DashboardScheduler:
         started_at: datetime,
         new_quotes: int,
         new_invoices: int,
+        new_leads: int,
         full_run: bool,
         ok: bool,
         error: Optional[str],
@@ -369,9 +381,10 @@ class DashboardScheduler:
             "trigger": trigger,
             "day": started_at.astimezone().date().isoformat(),  # server-local day
             "run_id": run_id,
-            "new_count": new_quotes + new_invoices,
+            "new_count": new_quotes + new_invoices + new_leads,
             "new_quotes": new_quotes,
             "new_invoices": new_invoices,
+            "new_leads": new_leads,
             "full_run": bool(full_run),
             "started_at": started_at.isoformat(),
             "finished_at": datetime.now(timezone.utc).isoformat(),

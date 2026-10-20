@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     STALE_QUOTE_MAX_AGE_DAYS: int = 30
     STALLED_ORDER_DAYS: int = 2
     OVERDUE_INVOICE_DAYS: int = 30
+    LEAD_ACTIVE_DAYS: int = 14          # a lead is "stuck" if its last activity is newer than this
 
     # --- Agents: how many top items each sub-agent processes per run ---
     MAX_ITEMS_PER_AGENT: int = 10
@@ -76,7 +77,7 @@ class Settings(BaseSettings):
     MODEL_MASTER: str = ""
     AGENT_CACHE_HOURS: int = 24
     AGENT_CONCURRENCY: int = 5
-    CHAT_DAILY_TOKEN_CAP: int = Field(default=500_000, ge=1)
+    CHAT_DAILY_TOKEN_CAP: int = Field(default=1_000_000, ge=1)
     ERP_LEAD_BATCH_SIZE: int = 25
     ERP_PAGE_LIMIT: int = 500
 

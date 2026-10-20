@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from collections import deque
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk
 from pydantic import ValidationError
 
-from app.agents.chat import execute_chat, run_chat, stream_chat, trim_turns
+from app.agents.chat import CHAT_SYSTEM, execute_chat, run_chat, stream_chat, trim_turns
 from app.agents.chat_tools import (
     CHAT_TOOL_MAP,
     EmptyArgs,
@@ -17,6 +17,7 @@ from app.agents.chat_tools import (
     TopItemsArgs,
     ChatTool,
     get_dashboard_metrics,
+    get_customer_context,
     invoke_tool,
 )
 from app.services import metrics
@@ -177,6 +178,38 @@ async def test_revenue_tool_filters_dates_and_sums_in_python():
 
 
 @pytest.mark.asyncio
+async def test_stuck_leads_tool_parses_in_python_and_hides_contacts():
+    now = datetime.now(timezone.utc)
+    db = FakeDatabase(
+        leads=FakeCollection(
+            [
+                {
+                    "zohoLeadId": "L-1",
+                    "firstName": "Keiwan",
+                    "lastName": "Bentley",
+                    "company": "Zaskii Boyz",
+                    "status": "New",
+                    "email": "keiwan@example.com",
+                    "phone": "5551234567",
+                    "description": '{"product": "mylar bag", "quantity": "500", "artwork": []}',
+                    "createdAt": (now - timedelta(days=5)).isoformat(),
+                    "lastActivityAt": (now - timedelta(days=3)).isoformat(),
+                }
+            ]
+        )
+    )
+    result = await invoke_tool("get_stuck_leads", {}, database=db)
+    assert result["total_count"] == 1
+    item = result["items"][0]
+    assert item["product"] == "mylar bag"
+    assert item["quantity"] == "500"
+    assert item["artwork"] == "Missing"  # explicit empty JSON artwork list
+    assert "artwork" in item["missing"]
+    # contact details must never reach the model
+    assert "email" not in item and "phone" not in item
+
+
+@pytest.mark.asyncio
 async def test_graph_executes_no_more_than_five_tool_calls():
     async def read_tool(database=None):
         return {"count": 4}
@@ -297,6 +330,61 @@ def test_count_guard_only_accepts_counts_present_in_tool_results():
     assert validate_numeric_claims("There are 8 stale quotes.", results)
     assert validate_numeric_claims("Revenue is 900.00.", results)
     assert validate_numeric_claims("The order data does not include artwork status.", results) == []
+
+
+def test_numeric_guard_accepts_prior_numbers_and_rejects_new_numbers():
+    from app.agents.chat import validate_numeric_claims
+
+    prior = "Desert spore has invoice 4812, dated 2026-10-20, for $113,627."
+    assert validate_numeric_claims(
+        "Invoice 4812 is still unpaid for $113,627.", [], prior
+    ) == []
+    assert validate_numeric_claims(
+        "Invoice 4812 is still unpaid for $113,628.", [], prior
+    )
+
+
+@pytest.mark.asyncio
+async def test_customer_context_includes_true_unpaid_invoice_count():
+    now = datetime.now(timezone.utc)
+    orders = [
+        {
+            "id": index,
+            "inv_ref": f"INV-{index}",
+            "payment_status": 0,
+            "payment_status_label": "Not Paid",
+            "total_amount": 100 + index,
+            "amount_paid": 0,
+            "invoice_date": (now - timedelta(days=40)).isoformat(),
+            "customer": {"id": 12, "company_name": "Desert spore"},
+        }
+        for index in range(30)
+    ]
+    db = FakeDatabase(
+        quotes_flat=FakeCollection(),
+        orders_flat=FakeCollection(orders),
+        payments_flat=FakeCollection(),
+    )
+
+    context = await get_customer_context(12, database=db)
+
+    assert context["unpaid_invoice_count"] == 30
+    assert len(context["unpaid_invoices"]) == 25
+    assert context["unpaid_invoices_truncated"] is True
+    assert context["unpaid_invoices"][0]["due_date"] is None
+    assert context["unpaid_invoices"][0]["days_invoice_age"] >= 40
+    description = CHAT_TOOL_MAP["get_customer_context"].description
+    assert "unpaid_invoice_count" in description
+    assert "invoice references, ages, invoice and due dates" in description
+
+
+def test_receivables_prompt_has_follow_up_and_number_rules():
+    assert "ignore the one-sentence format" in CHAT_SYSTEM
+    assert "Copy dates, invoice references, and IDs exactly" in CHAT_SYSTEM
+    assert "Preserve names, counts, dates, and $ amounts as written." in CHAT_SYSTEM
+    assert "Likely: payment is not yet due." in CHAT_SYSTEM
+    assert "Do not repeat monetary amounts" not in CHAT_SYSTEM
+    assert "Do not invent a cause" not in CHAT_SYSTEM
 
 
 @pytest.mark.asyncio

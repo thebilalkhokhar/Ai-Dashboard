@@ -31,6 +31,8 @@ from app.schemas.signals import (
     SignalsSummary,
     StaleQuoteSummary,
     StalledOrderSummary,
+    StuckLead,
+    StuckLeadsResponse,
     UnpaidSummary,
 )
 from app.schemas.customer import CustomerContext
@@ -157,6 +159,29 @@ async def run_agents() -> dict:
     _running_tasks.add(task)
     task.add_done_callback(_running_tasks.discard)
     return {"run_id": run_id, "status": "started"}
+
+
+@router.get("/leads/stuck", response_model=StuckLeadsResponse)
+async def get_stuck_leads(
+    days: Annotated[int | None, Query(ge=1, le=90)] = None,
+    limit: Annotated[int | None, Query(ge=1, le=500)] = None,
+) -> StuckLeadsResponse:
+    """Leads that are stuck before becoming an order. Pure Python, no AI.
+
+    Same filter as the lead follow-up agent: status New / Attempted to
+    Contact, last activity within LEAD_ACTIVE_DAYS, a description present,
+    not flagged by the lead desk. Read-only: nothing is sent or written.
+    """
+    db = get_db()
+    now = datetime.now(timezone.utc)
+    rows = await db.leads.find(processors.LEAD_STATUS_QUERY, processors.LEAD_FIELDS).to_list(50_000)
+    stuck = processors.stuck_leads(rows, now, days=days)
+    return StuckLeadsResponse(
+        generated_at=now.isoformat(),
+        days=days or settings.LEAD_ACTIVE_DAYS,
+        total=len(stuck),
+        items=stuck[: limit or 100],
+    )
 
 
 @router.get("/briefing/latest")

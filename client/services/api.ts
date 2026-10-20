@@ -15,6 +15,7 @@ import type {
   LatestBriefingResponse,
   SignalsQuery,
   SignalsReport,
+  StuckLeadsResponse,
 } from "@/types/api";
 
 export const API_BASE_URL = (
@@ -141,6 +142,30 @@ export function fetchCustomerContext(
   return apiFetch<CustomerContext>(
     `/api/customers/${customerId}/context${search}`,
   );
+}
+
+// GET /api/leads/stuck - parsed by backend Python only, no AI involved.
+// Deduped in flight so StrictMode's double effect mount makes one request.
+const inFlightStuckLeads = new Map<string, Promise<StuckLeadsResponse>>();
+
+export function fetchStuckLeads(
+  query: { days?: number; limit?: number } = {},
+): Promise<StuckLeadsResponse> {
+  const params = new URLSearchParams();
+  if (query.days !== undefined) params.set("days", String(query.days));
+  if (query.limit !== undefined) params.set("limit", String(query.limit));
+  const search = params.size > 0 ? `?${params.toString()}` : "";
+  const path = `/api/leads/stuck${search}`;
+  const pending = inFlightStuckLeads.get(path);
+  if (pending) return pending;
+
+  const request = apiFetch<StuckLeadsResponse>(path);
+  inFlightStuckLeads.set(path, request);
+  const clearRequest = () => {
+    if (inFlightStuckLeads.get(path) === request) inFlightStuckLeads.delete(path);
+  };
+  void request.then(clearRequest, clearRequest);
+  return request;
 }
 
 export function startAgentRun(): Promise<AgentRunStarted> {

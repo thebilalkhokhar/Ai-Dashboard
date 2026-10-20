@@ -105,6 +105,45 @@ export interface SignalsQuery {
   includeStalled?: boolean;
 }
 
+// GET /api/leads/stuck (server/app/schemas/signals.py: StuckLead)
+// Parsed entirely by backend Python. artwork_present is null when the lead
+// description never stated it - the backend never guesses.
+export type LeadMissingField =
+  | "artwork"
+  | "quantity"
+  | "size"
+  | "material"
+  | "finish"
+  | "contact_info";
+
+export interface StuckLead {
+  lead_id: string;
+  contact_name: string | null;
+  company: string | null;
+  status: string;
+  source: string | null;
+  days_since_activity: number;
+  last_activity_at: string | null;
+  created_at: string | null;
+  product: string | null;
+  type: string | null;
+  quantity: string | null;
+  size: string | null;
+  material: string | null;
+  finish: string | null;
+  artwork_present: boolean | null;
+  description_shape: string | null;
+  missing: LeadMissingField[];
+  has_contact_details: boolean;
+}
+
+export interface StuckLeadsResponse {
+  generated_at: string;
+  days: number;
+  total: number;
+  items: StuckLead[];
+}
+
 // GET /api/metrics and the `snapshot` event from GET /api/live
 // (server/app/services/metrics.py: build_snapshot_from_docs)
 export interface RepMetric {
@@ -295,6 +334,31 @@ export interface CollectionsOutput {
   error?: string;
 }
 
+// Sub-agent 3 output (server/app/schemas/agents.py: LeadFollowupOutput).
+// Read-only: drafts are stored text for a human rep, nothing is sent.
+export interface LeadFollowupOutput {
+  kind?: "lead_followup";
+  input_hash?: string;
+  lead_id?: string;
+  contact_name?: string | null;
+  company?: string | null;
+  product?: string | null;
+  missing?: LeadMissingField[];
+  blocker?: string;
+  owner_team?: "design" | "sales" | "unclear";
+  action_plan?: string;
+  message_draft?: string | null;
+  status?: string;
+  days_since_activity?: number;
+  note?: string | null;
+  confidence?: AgentConfidence;
+  evidence?: string;
+  flags?: string[];
+  source?: "agent" | "cache";
+  rejected_reason?: string;
+  error?: string;
+}
+
 export interface AgentPriority {
   customer_name: string;
   why: string;
@@ -313,6 +377,8 @@ export interface MasterBriefing {
 export interface AgentRunCounts {
   negotiation_total: number;
   collections_total: number;
+  // optional: briefings saved before the lead follow-up agent existed
+  lead_followup_total?: number;
   unclear: number;
   needs_review: number;
   cached: number;
@@ -337,6 +403,8 @@ export interface AgentRunBriefing {
   counts: AgentRunCounts;
   negotiation: NegotiationOutput[];
   collections: CollectionsOutput[];
+  // optional: briefings saved before the lead follow-up agent existed
+  lead_followup?: LeadFollowupOutput[];
   master: MasterBriefing | null;
   usage: AgentUsage | null;
   errors: string[];

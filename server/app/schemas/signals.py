@@ -113,3 +113,39 @@ class SignalsReport(Base):
     unpaid_invoices: list[UnpaidInvoice] = Field(default_factory=list)
     stalled_orders: StalledOrderList = Field(default_factory=StalledOrderList)
     summary: SignalsSummary = Field(default_factory=SignalsSummary)
+
+
+class StuckLead(Base):
+    """One stuck lead from GET /api/leads/stuck (parsed by pure Python).
+
+    artwork_present is True/False only when the description stated it
+    explicitly; None means "not stated" - the backend never guesses.
+    Email and phone are intentionally absent: the UI never needs them and the
+    agent never sends anything.
+    """
+
+    lead_id: str = ""
+    contact_name: Optional[str] = None
+    company: Optional[str] = None
+    status: str = ""
+    source: Optional[str] = None
+    days_since_activity: int = 0
+    last_activity_at: Optional[str] = None
+    created_at: Optional[str] = None
+    product: Optional[str] = None
+    type: Optional[str] = None
+    quantity: Optional[str] = None
+    size: Optional[str] = None
+    material: Optional[str] = None
+    finish: Optional[str] = None
+    artwork_present: Optional[bool] = None
+    description_shape: Optional[str] = None
+    missing: list[str] = Field(default_factory=list)
+    has_contact_details: bool = False
+
+
+class StuckLeadsResponse(Base):
+    generated_at: str
+    days: int
+    total: int                       # matched rows before the limit was applied
+    items: list[StuckLead] = Field(default_factory=list)

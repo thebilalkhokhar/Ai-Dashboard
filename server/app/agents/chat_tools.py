@@ -16,6 +16,7 @@ from typing import Any, Callable, Type
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app import db as app_db
+from app.config import settings
 from app.services import metrics, processors
 
 _CURRENCY_TEXT = re.compile(r"\$\s*(-?[\d,]+(?:\.\d+)?)")
@@ -80,6 +81,11 @@ class RevenueArgs(DateRangeArgs):
 
 class TopItemsArgs(ToolArgs):
     limit: int = Field(default=5, ge=1, le=10)
+
+
+class StuckLeadsArgs(ToolArgs):
+    days: int | None = Field(default=None, ge=1, le=90)
+    limit: int | None = Field(default=None, ge=1, le=25)
 
 
 class RepSummaryArgs(DateRangeArgs):
@@ -237,6 +243,18 @@ async def get_customer_context(customer_id: int, database: Any = None) -> dict:
     payments = await db.payments_flat.find(query).to_list(200_000)
     # This pure join intentionally receives no ERP lead outcomes.
     context = processors.customer_context(args.customer_id, quotes, orders, payments)
+    now = datetime.now(timezone.utc)
+    unpaid = processors.unpaid_invoices(orders, now)
+    invoice_fields = (
+        "id", "inv_ref", "payment_status", "payment_status_label", "overdue",
+        "days_invoice_age", "invoice_date", "due_date",
+    )
+    context["unpaid_invoices"] = [
+        {key: row.get(key) for key in invoice_fields}
+        for row in unpaid[:25]
+    ]
+    context["unpaid_invoice_count"] = len(unpaid)
+    context["unpaid_invoices_truncated"] = len(unpaid) > 25
     context.pop("contact", None)
     context["notes"] = ["Lead outcomes are not included in read-only chat context."]
     return _bounded(context)
@@ -342,13 +360,51 @@ async def get_top_unpaid(limit: int = 5, database: Any = None) -> dict:
         }
     fields = (
         "id", "inv_ref", "status_label", "payment_status_label", "total_amount",
-        "amount_paid", "balance", "overdue", "invoice_date", "customer", "sale_rep",
+        "amount_paid", "balance", "overdue", "invoice_date", "due_date", "customer", "sale_rep",
     )
     return {
         "total_count": len(rows),
         "largest_owing_customer": largest_customer_debt,
         "items": [{key: row.get(key) for key in fields} for row in rows[: args.limit]],
         "order_fields_not_available": list(processors.ORDER_MISSING_FIELDS),
+    }
+
+
+async def get_stuck_leads(
+    days: int | None = None, limit: int | None = None, database: Any = None
+) -> dict:
+    """Leads stuck before becoming an order. Read-only, Python-parsed.
+
+    Same filter as GET /api/leads/stuck and the lead follow-up agent. No
+    email or phone numbers are ever returned to the model.
+    """
+    args = StuckLeadsArgs.model_validate({"days": days, "limit": limit})
+    db = _database(database)
+    now = datetime.now(timezone.utc)
+    rows = await db.leads.find(processors.LEAD_STATUS_QUERY, processors.LEAD_FIELDS).to_list(50_000)
+    stuck = processors.stuck_leads(rows, now, days=args.days)
+    artwork_labels = {True: "Provided", False: "Missing", None: "Not stated"}
+    items = [
+        {
+            "lead_id": row["lead_id"],
+            "contact_name": row["contact_name"],
+            "company": row["company"],
+            "status": row["status"],
+            "days_since_activity": row["days_since_activity"],
+            "product": row.get("product") or row.get("type"),
+            "quantity": row.get("quantity"),
+            "size": row.get("size"),
+            "material": row.get("material"),
+            "finish": row.get("finish"),
+            "artwork": artwork_labels[row["artwork_present"]],
+            "missing": row["missing"],
+        }
+        for row in stuck[: args.limit or 10]
+    ]
+    return {
+        "days": args.days or settings.LEAD_ACTIVE_DAYS,
+        "total_count": len(stuck),
+        "items": items,
     }
 
 
@@ -437,11 +493,17 @@ CHAT_TOOLS = [
     ),
     ChatTool("get_signals_summary", "Get Python-computed counts and totals for stale quotes, unpaid invoices, and overdue invoices. Also use it to check whether artwork, shipping, order notes, or line-item fields are available; it lists order fields missing from the source data.", EmptyArgs, get_signals_summary),
     ChatTool("find_customer", "Fuzzy-search company names in quotes, orders, and payments. Returns up to five customer IDs and names.", CustomerSearchArgs, find_customer),
-    ChatTool("get_customer_context", "Get aggregate quote, order, and payment context for one customer ID.", CustomerContextArgs, get_customer_context),
+    ChatTool("get_customer_context", "Get aggregate quote, order, and payment context for one customer ID, plus the total unpaid_invoice_count and up to 25 unpaid invoice references, ages, invoice and due dates, overdue flags, and payment statuses.", CustomerContextArgs, get_customer_context),
     ChatTool("get_revenue", "Sum payments and count payment records in an inclusive received-date range; may filter by rep ID.", RevenueArgs, get_revenue),
     ChatTool("get_top_unpaid", "Get the customer with the largest total unpaid balance and the largest unpaid invoice rows (maximum ten).", TopItemsArgs, get_top_unpaid),
     ChatTool("get_top_open_quotes", "Get the largest unconverted open quotes, with a maximum of ten rows.", TopItemsArgs, get_top_open_quotes),
     ChatTool("get_rep_summary", "Get Python-computed quote, order, and payment counts and totals for one rep and date range.", RepSummaryArgs, get_rep_summary),
+    ChatTool(
+        "get_stuck_leads",
+        "Get leads that are stuck before becoming an order: status New or Attempted to Contact, recent activity, a description present, not flagged by the lead desk. Returns Python-parsed product/quantity/size/material/finish, the missing-field list and artwork state (Provided/Missing/Not stated). No email or phone numbers are returned.",
+        StuckLeadsArgs,
+        get_stuck_leads,
+    ),
 ]
 
 CHAT_TOOL_MAP = {tool.name: tool for tool in CHAT_TOOLS}

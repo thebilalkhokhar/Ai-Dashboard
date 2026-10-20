@@ -1,4 +1,4 @@
-"""Structured output models for the three agents.
+"""Structured output models for the agents.
 
 The LLM may only use numbers that appear in the input JSON; every money field
 below is COPIED from the input by the agent prompt and verified again by the
@@ -7,7 +7,7 @@ pipeline's own validation (app/agents/graph.py).
 
 from __future__ import annotations
 
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -44,6 +44,34 @@ class CollectionsOutput(AgentOutputBase):
     approach: Literal["soft_reminder", "firm_nudge", "hold_off", "escalate_to_human"]
     reason: str
     message_draft: str = Field(max_length=600, description="max 80 words")
+
+
+LeadMissing = Literal["artwork", "quantity", "size", "material", "finish", "contact_info"]
+
+
+class LeadFollowupOutput(BaseModel):
+    """Sub-agent 3 output for one stuck lead (AgentOutputBase-like: a lead is
+    not a customer yet, so there is no customer_id).
+
+    `missing` is computed by Python from the parsed description - the model
+    must copy it, never extend it. `lead_id` is filled in by the pipeline from
+    the input, never trusted from the model.
+    """
+
+    lead_id: str = ""
+    contact_name: Optional[str] = None
+    company: Optional[str] = None
+    product: Optional[str] = None
+    missing: List[LeadMissing] = Field(
+        default_factory=list,
+        description="Copied from the input missing_fields, computed by Python",
+    )
+    blocker: str = Field(description="What is stopping this lead from becoming an order")
+    owner_team: Literal["design", "sales", "unclear"]
+    action_plan: str = Field(description="What a human rep should do next")
+    message_draft: str = Field(max_length=600, description="max 80 words, for a human rep to send")
+    confidence: Confidence
+    evidence: str = Field(description="Which input facts the judgment used, one sentence")
 
 
 class Priority(BaseModel):

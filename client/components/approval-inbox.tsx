@@ -14,6 +14,7 @@ import { useLiveData } from "@/hooks/use-live-data";
 import type {
   AgentRunBriefing,
   CollectionsOutput,
+  LeadFollowupOutput,
   NegotiationOutput,
 } from "@/types/api";
 
@@ -22,9 +23,15 @@ const RUN_POLL_TIMEOUT_MS = 5 * 60 * 1000;
 
 type Recommendation =
   | { id: string; kind: "negotiation"; item: NegotiationOutput }
-  | { id: string; kind: "collections"; item: CollectionsOutput };
+  | { id: string; kind: "collections"; item: CollectionsOutput }
+  | { id: string; kind: "lead_followup"; item: LeadFollowupOutput };
 
-type ReviewFilter = "all" | "negotiation" | "collections" | "needs_review";
+type ReviewFilter =
+  | "all"
+  | "negotiation"
+  | "collections"
+  | "lead_followup"
+  | "needs_review";
 
 function formatMoney(value: number | undefined): string {
   if (value === undefined || Number.isNaN(value)) return "—";
@@ -63,6 +70,12 @@ function buildRecommendations(briefing: AgentRunBriefing): Recommendation[] {
     ...briefing.collections.map((item, index) => ({
       id: `collections-${item.input_hash ?? item.invoice_id ?? index}`,
       kind: "collections" as const,
+      item,
+    })),
+    // optional: briefings saved before the lead agent existed have no section
+    ...(briefing.lead_followup ?? []).map((item, index) => ({
+      id: `lead_followup-${item.input_hash ?? item.lead_id ?? index}`,
+      kind: "lead_followup" as const,
       item,
     })),
   ];
@@ -273,6 +286,7 @@ export function AgentReview() {
               <span>Finished {formatTime(briefing.finished_at)}</span>
               <span>{briefing.counts.negotiation_total} negotiation items</span>
               <span>{briefing.counts.collections_total} collections items</span>
+              <span>{briefing.counts.lead_followup_total ?? 0} lead follow-up items</span>
               <span>{briefing.counts.cached} reused from cache</span>
               <span
                 className={
@@ -352,11 +366,12 @@ export function AgentReview() {
                   Recommendations
                 </h3>
                 <div className="flex flex-wrap gap-1.5">
-                  {(
+                  {                  (
                     [
                       ["all", `All ${recommendations.length}`],
                       ["negotiation", "Negotiation"],
                       ["collections", "Collections"],
+                      ["lead_followup", "Lead follow-up"],
                       ["needs_review", "Needs review"],
                     ] as [ReviewFilter, string][]
                   ).map(([value, label]) => (
@@ -378,7 +393,7 @@ export function AgentReview() {
 
               {recommendations.length === 0 ? (
                 <p className="mt-3 rounded-lg border border-border px-4 py-6 text-center text-sm text-muted">
-                  This run produced no negotiation or collections recommendations.
+                  This run produced no negotiation, collections or lead follow-up recommendations.
                 </p>
               ) : visibleRecommendations.length === 0 ? (
                 <p className="mt-3 rounded-lg border border-border px-4 py-6 text-center text-sm text-muted">
@@ -421,24 +436,33 @@ function RecommendationCard({
 }) {
   const { id, kind, item } = recommendation;
   const isNegotiation = kind === "negotiation";
+  const isLead = kind === "lead_followup";
   const negotiation = isNegotiation ? (item as NegotiationOutput) : null;
-  const collections = !isNegotiation ? (item as CollectionsOutput) : null;
+  const collections = kind === "collections" ? (item as CollectionsOutput) : null;
+  const lead = isLead ? (item as LeadFollowupOutput) : null;
   const amount = negotiation ? negotiation.quote_amount : collections?.balance;
   const flags = item.flags ?? [];
   const needsReview = flags.includes("needs_review") || flags.includes("error");
+  const heading = isLead
+    ? lead?.contact_name || lead?.company || "Lead unavailable"
+    : item.customer_name || "Customer unavailable";
+  const subheading = isLead
+    ? [lead?.company, lead?.status, `${lead?.days_since_activity ?? "—"}d since activity`]
+        .filter(Boolean)
+        .join(" · ")
+    : isNegotiation
+      ? `Quote ${negotiation?.quote_id ?? "—"}${amount !== undefined ? ` · ${formatMoney(amount)}` : ""}`
+      : `Invoice ${collections?.invoice_id ?? "—"}${amount !== undefined ? ` · ${formatMoney(amount)}` : ""}`;
 
   return (
     <article className="rounded-lg border border-border bg-background p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-xs font-medium uppercase tracking-wide text-accent">
-            {isNegotiation ? "Negotiation" : "Collections"}
+            {isLead ? "Lead follow-up" : isNegotiation ? "Negotiation" : "Collections"}
           </p>
-          <h4 className="mt-1 font-medium">{item.customer_name || "Customer unavailable"}</h4>
-          <p className="mt-1 text-xs text-muted">
-            {isNegotiation ? `Quote ${negotiation?.quote_id ?? "—"}` : `Invoice ${collections?.invoice_id ?? "—"}`}
-            {amount !== undefined && ` · ${formatMoney(amount)}`}
-          </p>
+          <h4 className="mt-1 font-medium">{heading}</h4>
+          <p className="mt-1 text-xs text-muted">{subheading}</p>
         </div>
         <div className="flex flex-wrap gap-2 text-[11px]">
           {item.confidence && (
@@ -463,18 +487,53 @@ function RecommendationCard({
         </div>
       </div>
 
-      <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
-        <p>
-          <span className="text-muted">Recommended tactic: </span>
-          {humanise(negotiation?.tactic ?? collections?.approach)}
-        </p>
-        <p>
-          <span className="text-muted">
-            {isNegotiation ? "Likely reason: " : "Confidence evidence: "}
-          </span>
-          {isNegotiation ? humanise(negotiation?.likely_reason) : item.evidence || "—"}
-        </p>
-      </div>
+      {isLead ? (
+        <>
+          {lead?.missing && lead.missing.length > 0 && (
+            <div className="mt-3 flex flex-wrap items-center gap-1.5">
+              <span className="text-[11px] uppercase tracking-wide text-muted">Missing:</span>
+              {lead.missing.map((field) => (
+                <span
+                  key={field}
+                  className="rounded-md bg-amber-400/10 px-2 py-0.5 text-[11px] text-amber-300"
+                >
+                  {field.replaceAll("_", " ")}
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
+            <p>
+              <span className="text-muted">Blocker: </span>
+              {lead?.blocker || "Not provided"}
+            </p>
+            <p>
+              <span className="text-muted">Owner team: </span>
+              {humanise(lead?.owner_team)}
+            </p>
+          </div>
+          {lead?.action_plan && (
+            <p className="mt-2 text-sm leading-5">
+              <span className="text-muted">Action plan: </span>
+              {lead.action_plan}
+            </p>
+          )}
+          {lead?.note && <p className="mt-2 text-xs leading-5 text-muted">Note: {lead.note}</p>}
+        </>
+      ) : (
+        <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
+          <p>
+            <span className="text-muted">Recommended tactic: </span>
+            {humanise(negotiation?.tactic ?? collections?.approach)}
+          </p>
+          <p>
+            <span className="text-muted">
+              {isNegotiation ? "Likely reason: " : "Confidence evidence: "}
+            </span>
+            {isNegotiation ? humanise(negotiation?.likely_reason) : item.evidence || "—"}
+          </p>
+        </div>
+      )}
 
       {collections?.reason && (
         <p className="mt-2 text-sm leading-5">

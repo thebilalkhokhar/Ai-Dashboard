@@ -20,19 +20,24 @@ for a printing company.
 
 Input: the sub-agents' outputs, already grouped by customer by CODE. Each item
 is a negotiation output (stale quote) or a collections output (unpaid invoice),
-plus its pre-computed numbers. All math was done by Python - do not compute or
-change any number; copy numbers exactly when you mention them.
+plus its pre-computed numbers. A separate "leads" section holds lead-followup
+outputs: those leads are NOT customers yet and must never be merged into a
+customer's conflict entry, even when a note says their contact details match a
+customer. All math was done by Python - do not compute or change any number;
+copy numbers exactly when you mention them.
 
 Your job:
 1. bullets: EXACTLY 3 short strings for the executive brief. Mention real
-   customers from the input (with company names, not "a customer").
+   customers from the input (with company names, not "a customer"). You may
+   dedicate a bullet to the stuck leads when the input contains any.
 2. priorities: up to 5, most important first: {customer_name, why,
    suggested_action}. Only customers that appear in the input.
 3. conflicts_resolved: list of strings. A conflict exists ONLY when the same
    customer_id appears in more than one sub-agent output (e.g. we owe them a
    nudge about a paid quote AND are chasing their unpaid invoice). Say what
    the combined move is. If every customer appears only once, write (in the
-   list) one entry saying exactly that - no invented conflicts.
+   list) one entry saying exactly that - no invented conflicts. A lead whose
+   contact details match a customer is a NOTE for that list, not a conflict.
 4. Never suggest sending emails/calls as AUTOMATED actions - suggested_action
    describes what a HUMAN sales rep should do next.
 5. Mention ONLY dollar amounts that appear verbatim in the input. You may name
@@ -52,8 +57,13 @@ def group_by_customer(outputs: list[dict]) -> dict:
     return grouped
 
 
-def master_payload(grouped: dict, signals_summary: dict) -> dict:
-    """The master sees the same formatted money as the sub-agents."""
+def master_payload(grouped: dict, signals_summary: dict, lead_items: list[dict] | None = None) -> dict:
+    """The master sees the same formatted money as the sub-agents.
+
+    Lead-follow-up outputs arrive as their own section: leads are matched to
+    customers only by email/phone, so they are never force-merged into the
+    customer groups (a note carries the match when one exists).
+    """
     payload = {
         "task": "executive brief: what the sales team should do next",
         "signal_summary": signals_summary,
@@ -67,11 +77,28 @@ def master_payload(grouped: dict, signals_summary: dict) -> dict:
             for cid, group in grouped.items()
         ],
     }
+    if lead_items:
+        payload["leads"] = [
+            {
+                key: lead.get(key)
+                for key in (
+                    "lead_id", "contact_name", "company", "status",
+                    "days_since_activity", "missing", "blocker", "owner_team",
+                    "action_plan", "confidence", "note",
+                )
+            }
+            for lead in lead_items
+        ]
     return format_money_tree(payload)
 
 
-async def run_master(grouped: dict, signals_summary: dict, caller: StructuredCaller) -> Tuple[MasterOutput, dict, dict]:
-    payload = master_payload(grouped, signals_summary)
+async def run_master(
+    grouped: dict,
+    signals_summary: dict,
+    caller: StructuredCaller,
+    lead_items: list[dict] | None = None,
+) -> Tuple[MasterOutput, dict, dict]:
+    payload = master_payload(grouped, signals_summary, lead_items)
     messages = [
         {"role": "system", "content": MASTER_SYSTEM},
         {"role": "user", "content": json.dumps(payload, default=str)},

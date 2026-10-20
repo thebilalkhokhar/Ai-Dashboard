@@ -6,6 +6,7 @@ No Mongo and no network are touched: every test feeds plain dicts in.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from app.services import processors
@@ -276,3 +277,177 @@ def test_customer_context_date_bounds_use_parsed_datetimes():
         assert processors.parse_date(summary["first_at"]) <= processors.parse_date(
             summary["last_at"]
         )
+
+
+# ------------------------------------------------------- lead descriptions
+
+
+def test_parse_lead_description_json_shape():
+    text = json.dumps(
+        {
+            "product": "Pouch",
+            "product_type": "Pinch Bottom Pouch",
+            "quantity": ["5000"],
+            "dimensions": {"width": "4", "height": "6", "gusset": "0", "unit": "In"},
+            "attributeOptions": {
+                "material": "Foil",
+                "finishes": ["Softouch Lamination", "Spot Gloss"],
+            },
+            "artwork": [{"url": "https://example.com/a.pdf"}],
+        }
+    )
+    parsed = processors.parse_lead_description(text)
+    assert parsed["shape"] == "json"
+    assert parsed["product"] == "Pouch"
+    assert parsed["type"] == "Pinch Bottom Pouch"
+    assert parsed["quantity"] == "5000"
+    assert parsed["size"] == "4 x 6 In"
+    assert parsed["material"] == "Foil"
+    assert parsed["finish"] == "Softouch Lamination, Spot Gloss"
+    assert parsed["artwork_present"] is True
+    assert processors.missing_lead_fields(parsed) == []
+
+
+def test_parse_lead_description_json_empty_artwork_is_missing():
+    text = json.dumps({"product": "mylar bag", "quantity": "1000", "artwork": []})
+    parsed = processors.parse_lead_description(text)
+    assert parsed["shape"] == "json"
+    assert parsed["artwork_present"] is False
+    assert parsed["quantity"] == "1000"
+    # size/material/finish are enumerable in JSON but were not provided
+    assert processors.missing_lead_fields(parsed) == ["artwork", "size", "material", "finish"]
+
+
+def test_parse_lead_description_key_value_lines():
+    text = "type: mylar bag\nmaterial: soft touch\nquantity: 500\nphone_no: 5551234567"
+    parsed = processors.parse_lead_description(text)
+    assert parsed["shape"] == "key_value"
+    assert parsed["type"] == "mylar bag"
+    assert parsed["material"] == "soft touch"
+    assert parsed["quantity"] == "500"
+    missing = processors.missing_lead_fields(parsed)
+    assert "quantity" not in missing and "material" not in missing
+    assert "size" in missing and "finish" in missing
+    assert parsed["artwork_present"] is None
+    assert "artwork" not in missing  # never guessed from key:value text
+
+
+def test_parse_lead_description_not_given_values_are_missing():
+    text = "Product: mylar bag\nMaterial: \u2014 not given\nQuantity: not given\nSizes: \u2014 not given"
+    parsed = processors.parse_lead_description(text)
+    assert parsed["shape"] == "key_value"
+    assert parsed["product"] == "mylar bag"
+    assert parsed["material"] is None
+    assert parsed["quantity"] is None
+    assert parsed["size"] is None
+    assert processors.missing_lead_fields(parsed) == ["quantity", "size", "material", "finish"]
+
+
+def test_parse_lead_description_not_specified_is_treated_as_missing():
+    """The website-chat summaries write 'Quantity: not specified' - that is a
+    missing value, not a literal quantity."""
+    text = "Product: Die Cut Business cards\nMaterial: not specified\nQuantity: not specified"
+    parsed = processors.parse_lead_description(text)
+    assert parsed["material"] is None
+    assert parsed["quantity"] is None
+    assert "quantity" in processors.missing_lead_fields(parsed)
+    assert "material" in processors.missing_lead_fields(parsed)
+
+
+def test_parse_lead_description_inline_key_value_pairs():
+    text = "Product: mylar bag Material: soft touch Quantity: not given"
+    parsed = processors.parse_lead_description(text)
+    assert parsed["shape"] == "key_value"
+    assert parsed["product"] == "mylar bag"
+    assert parsed["material"] == "soft touch"
+    assert parsed["quantity"] is None
+
+
+def test_parse_lead_description_pure_prose_extracts_nothing():
+    text = "We need custom printed boxes for our bakery, please call me."
+    parsed = processors.parse_lead_description(text)
+    assert parsed["shape"] == "prose"
+    assert parsed["product"] is None
+    assert parsed["artwork_present"] is None
+    # prose tells us nothing, so nothing is called missing
+    assert processors.missing_lead_fields(parsed) == []
+
+
+def test_parse_lead_description_key_value_artwork_line_is_never_missing():
+    """'Artwork Files: No files uploaded' is key:value text - the strict rule
+    only allows an explicit empty JSON artwork list to mean Missing."""
+    text = "Product: 3.5g Mylar Bags\nQuantity: 500\nArtwork Files: No files uploaded"
+    parsed = processors.parse_lead_description(text)
+    assert parsed["shape"] == "key_value"
+    assert parsed["artwork_present"] is None
+    assert "artwork" not in processors.missing_lead_fields(parsed)
+
+
+# -------------------------------------------------------------- stuck_leads
+
+
+def lead(**over):
+    row = {
+        "zohoLeadId": "L-1",
+        "firstName": "Keiwan",
+        "lastName": "Bentley",
+        "company": "Zaskii Boyz",
+        "email": "keiwan@example.com",
+        "phone": "5551234567",
+        "status": "New",
+        "source": "Ecommerce",
+        "description": json.dumps(
+            {"product": "mylar bag", "quantity": "500", "artwork": []}
+        ),
+        "createdAt": (NOW - timedelta(days=5)).isoformat(),
+        "lastActivityAt": (NOW - timedelta(days=3)).isoformat(),
+        "leadDesk": {"stage": "open", "flagReason": ""},
+    }
+    row.update(over)
+    return row
+
+
+def test_stuck_leads_filters_status_recency_flag_stage_and_junk():
+    rows = processors.stuck_leads(
+        [
+            lead(),  # selected
+            lead(zohoLeadId="L-2", status="Converted"),  # wrong status
+            lead(zohoLeadId="L-3", status="Attempted to Contact"),  # selected
+            lead(zohoLeadId="L-4", lastActivityAt=(NOW - timedelta(days=20)).isoformat()),  # too old
+            lead(zohoLeadId="L-5", leadDesk={"stage": "open", "flagReason": "duplicate"}),  # flagged
+            lead(zohoLeadId="L-6", leadDesk={"stage": "closed", "flagReason": ""}),  # stage not open
+            lead(zohoLeadId="L-7", description=""),  # junk: no description
+            lead(zohoLeadId="L-8", lastActivityAt=None, createdAt=(NOW - timedelta(days=2)).isoformat()),  # createdAt fallback
+            lead(zohoLeadId="L-9", lastActivityAt="not a date", createdAt=None),  # no usable date
+        ],
+        NOW,
+    )
+    # newest activity first; leads without a leadDesk stay in (nothing to exclude them)
+    assert [row["lead_id"] for row in rows] == ["L-8", "L-1", "L-3"]
+    assert rows[0]["days_since_activity"] == 2
+
+
+def test_stuck_leads_row_carries_parsed_fields_and_missing():
+    rows = processors.stuck_leads([lead()], NOW)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["contact_name"] == "Keiwan Bentley"
+    assert row["company"] == "Zaskii Boyz"
+    assert row["product"] == "mylar bag"
+    assert row["quantity"] == "500"
+    assert row["artwork_present"] is False
+    assert row["missing"] == ["artwork", "size", "material", "finish"]
+    assert row["has_contact_details"] is True
+    assert row["days_since_activity"] == 3
+
+
+def test_stuck_leads_days_argument_and_contact_info_missing():
+    rows = processors.stuck_leads(
+        [lead(email="", phone="", lastActivityAt=(NOW - timedelta(days=10)).isoformat())],
+        NOW,
+        days=7,
+    )
+    assert rows == []  # 10 days old is outside a 7-day window
+    row = processors.stuck_leads([lead(email="", phone="")], NOW)[0]
+    assert "contact_info" in row["missing"]
+    assert row["has_contact_details"] is False

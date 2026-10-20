@@ -2,6 +2,7 @@
 
     load_signals (code)  ->  negotiation (LLM, <=5 concurrent)
                          ->  collections (LLM, <=5 concurrent)
+                         ->  lead_followup (LLM, <=5 concurrent)
                          ->  group_by_customer (code)
                          ->  master (LLM)
                          ->  save (code)
@@ -14,6 +15,9 @@ Rules encoded here, never left to the LLM:
   * 24-hour cache: identical input hash -> reuse the stored output, no new
     LLM call (so a 24/7 loop does not re-bill identical work);
   * the stalled-orders signal is NEVER fed to agents (unreliable);
+  * lead follow-up (sub-agent 3) reuses the same guardrails: its drafts may
+    not invent contacts or amounts, its `missing` list is Python-computed and
+    copied, and its lead_id is always filled in by code, never by the model;
   * nothing is ever sent to customers - drafts are stored text only.
 Everything lands in the Mongo collection `agent_runs`.
 """
@@ -44,12 +48,20 @@ from app.agents.llm import (
 )
 from app.agents.negotiation import negotiation_payload, NEGOTIATION_SYSTEM
 from app.agents.collections import collections_payload, COLLECTIONS_SYSTEM
+from app.agents.lead_followup import lead_followup_payload, LEAD_FOLLOWUP_SYSTEM
 from app.agents.master import group_by_customer, run_master
-from app.schemas.agents import MasterOutput, NegotiationOutput, CollectionsOutput
+from app.schemas.agents import (
+    MasterOutput,
+    NegotiationOutput,
+    CollectionsOutput,
+    LeadFollowupOutput,
+)
 
 CONCURRENCY = int(settings.AGENT_CONCURRENCY)
 CACHE_HOURS = int(settings.AGENT_CACHE_HOURS)
 MAX_ITEMS = int(settings.MAX_ITEMS_PER_AGENT)
+
+AGENT_KINDS = ("negotiation", "collections", "lead_followup")
 
 
 class RunState(TypedDict, total=False):
@@ -57,11 +69,14 @@ class RunState(TypedDict, total=False):
     started_at: str
     negotiation_input: list[dict]
     collections_input: list[dict]
+    lead_followup_input: list[dict]
     cached_hashes: dict
     signals_summary: dict
     negotiation_out: list[dict]
     collections_out: list[dict]
+    lead_followup_out: list[dict]
     grouped: dict
+    leads_grouped: list[dict]
     master: dict
     usage: dict
     calls: int
@@ -247,10 +262,16 @@ def sanitise_greeting(draft: str, payload: dict) -> str:
     if not match:
         return draft
     name = match.group(3)
-    history = payload.get("customer_history") or {}
-    contact = history.get("contact") or {}
-    contact_blob = " ".join(str(value) for value in contact.values() if value)
-    company = str(history.get("company_name") or "").strip()
+    lead = payload.get("lead")
+    if isinstance(lead, dict):
+        # lead payloads carry no contact blob - only the parsed name/company
+        contact_blob = str(lead.get("contact_name") or "")
+        company = str(lead.get("company") or "").strip()
+    else:
+        history = payload.get("customer_history") or {}
+        contact = history.get("contact") or {}
+        contact_blob = " ".join(str(value) for value in contact.values() if value)
+        company = str(history.get("company_name") or "").strip()
     first_word = company.split()[0] if company else ""
     # 'Hello Polkadot team' greets the company, not a person - leave it
     if first_word and name.lower() == first_word.lower():
@@ -320,7 +341,7 @@ def cache_lookup(recent_runs: list[dict], items: list[dict], cutoff_epoch: float
     for run in sorted(recent_runs, key=lambda r: float(r.get("finished_epoch") or 0)):
         if float(run.get("finished_epoch") or 0) < cutoff_epoch:
             continue
-        for kind in ("negotiation", "collections"):
+        for kind in AGENT_KINDS:
             for item in run.get(kind, []):
                 item_hash = item.get("input_hash")
                 if not item_hash or item.get("source") != "agent":
@@ -390,6 +411,20 @@ def stable_cache_key(kind: str, payload: dict) -> str:
                 "orders": history.get("open_orders_value"),
                 "payments": history.get("payments"),
             },
+        }
+    elif kind == "lead_followup":
+        lead = payload.get("lead", {})
+        stable = {
+            "contact_name": lead.get("contact_name"),
+            "company": lead.get("company"),
+            "status": lead.get("status"),
+            # days_since_activity is deliberately excluded: it ticks over
+            # daily and would re-bill the same judgment every 24 hours
+            "parsed": lead.get("parsed"),
+            "missing_fields": lead.get("missing_fields"),
+            "artwork_present": lead.get("artwork_present"),
+            "description": lead.get("description"),
+            "note": lead.get("note"),
         }
     else:
         stable = payload
@@ -461,6 +496,53 @@ async def load_signals_node(state: RunState) -> RunState:
             {"kind": "collections", "item": row, "context": contexts.get(cid, {}), "payment_history": history, "payload": payload, "input_hash": stable_cache_key("collections", payload)}
         )
 
+    # --- leads: stuck before becoming an order (sub-agent 3, pure Python) ---
+    lead_rows = await database.leads.find(
+        processors.LEAD_STATUS_QUERY, processors.LEAD_FIELDS
+    ).to_list(50_000)
+    stuck = processors.stuck_leads(lead_rows, now)[:MAX_ITEMS]
+
+    # A lead is matched to a customer only by email/phone. When a stuck lead's
+    # contact details belong to a customer already in this run, that is a NOTE
+    # on the lead - never a forced merge into the customer groups.
+    known_contacts = [
+        (
+            str(context.get("company_name") or ""),
+            processors.norm_email((context.get("contact") or {}).get("email")),
+            processors.norm_phone((context.get("contact") or {}).get("phone")),
+        )
+        for context in contexts.values()
+    ]
+    contact_by_lead = {
+        (processors.contact_to_s(row.get("zohoLeadId")) or str(row.get("_id") or "")): (
+            processors.norm_email(row.get("email")),
+            processors.norm_phone(row.get("phone")),
+        )
+        for row in lead_rows
+    }
+    lead_notes: dict[str, str] = {}
+    for row in stuck:
+        email, phone = contact_by_lead.get(row["lead_id"], ("", ""))
+        for company, known_email, known_phone in known_contacts:
+            matched_by = (
+                "email" if email and email == known_email
+                else "phone" if len(phone) >= 7 and phone == known_phone
+                else None
+            )
+            if matched_by and company:
+                lead_notes[row["lead_id"]] = (
+                    f"contact details match customer {company} already in this run ({matched_by})"
+                )
+                break
+
+    lead_items: list[dict] = []
+    for row in stuck:
+        note = lead_notes.get(row["lead_id"])
+        payload = lead_followup_payload(row, note)  # the exact LLM input
+        lead_items.append(
+            {"kind": "lead_followup", "item": row, "note": note, "payload": payload, "input_hash": stable_cache_key("lead_followup", payload)}
+        )
+
     # --- cache: reuse outputs from the last CACHE_HOURS hours -------------
     cutoff_epoch = state["now_epoch"] - CACHE_HOURS * 3600
     cached: dict = {}
@@ -468,19 +550,22 @@ async def load_signals_node(state: RunState) -> RunState:
         recent = await database.agent_runs.find(
             {"finished_epoch": {"$gt": cutoff_epoch}}
         ).to_list(50)
-        cached = cache_lookup(recent, negotiation_items + collections_items, cutoff_epoch)
+        cached = cache_lookup(recent, negotiation_items + collections_items + lead_items, cutoff_epoch)
 
     signals_summary = {
         "quotes_scanned": len(quotes),
         "orders_scanned": len(orders),
+        "leads_scanned": len(lead_rows),
         "stale_quotes_count": len(stale),
         "unpaid_invoices_count": len(unpaid),
+        "stuck_leads_count": len(stuck),
         "unpaid_balance_total": round(sum(r.get("balance", 0.0) for r in unpaid), 2),
         "stalled_orders": "signal unavailable - unreliable by design (no status timestamps)",
     }
     return {
         "negotiation_input": negotiation_items,
         "collections_input": collections_items,
+        "lead_followup_input": lead_items,
         "cached_hashes": cached,
         "signals_summary": signals_summary,
     }
@@ -493,6 +578,17 @@ async def load_signals_node(state: RunState) -> RunState:
 
 def _item_skeleton(kind: str, entry: dict) -> dict:
     row = entry.get("item") or {}
+    if kind == "lead_followup":
+        return {
+            "kind": kind,
+            "input_hash": entry.get("input_hash"),
+            "lead_id": row.get("lead_id"),
+            "contact_name": row.get("contact_name"),
+            "company": row.get("company"),
+            "status": row.get("status"),
+            "days_since_activity": row.get("days_since_activity"),
+            "note": entry.get("note"),
+        }
     customer = row.get("customer") or {}
     return {
         "kind": kind,
@@ -555,7 +651,11 @@ async def _run_one(
     async def one_pass() -> Tuple[Any, dict, list[str]]:
         # send the EXACT payload that the input hash covers (no rebuilds)
         caller = caller_factory(kind)
-        system = NEGOTIATION_SYSTEM if kind == "negotiation" else COLLECTIONS_SYSTEM
+        system = {
+            "negotiation": NEGOTIATION_SYSTEM,
+            "collections": COLLECTIONS_SYSTEM,
+            "lead_followup": LEAD_FOLLOWUP_SYSTEM,
+        }[kind]
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": json.dumps(payload, default=str)},
@@ -598,6 +698,10 @@ async def _run_one(
                     bad.append(
                         f"balance {getattr(parsed, 'balance', 0.0)} does not match the input"
                     )
+                if kind == "lead_followup" and list(getattr(parsed, "missing", []) or []) != list(
+                    (payload.get("lead") or {}).get("missing_fields") or []
+                ):
+                    bad.append("the missing list does not match the input missing_fields")
                 regen = 0
                 while bad:
                     if regen >= 1:
@@ -627,7 +731,8 @@ async def _run_one(
                             for key in (
                                 "confidence", "evidence", "likely_reason", "tactic",
                                 "approach", "quote_id", "quote_amount", "invoice_id",
-                                "balance", "reason",
+                                "balance", "reason", "blocker", "owner_team",
+                                "action_plan", "missing", "product",
                             )
                             if hasattr(parsed, key)
                         }
@@ -635,7 +740,19 @@ async def _run_one(
                 else:
                     model_dump = parsed.model_dump()
                     result.update(model_dump)
-                    result["flags"] = ["unclear"] if getattr(parsed, "likely_reason", None) == "unclear" else []
+                    unclear = (
+                        getattr(parsed, "likely_reason", None) == "unclear"
+                        or getattr(parsed, "owner_team", None) == "unclear"
+                    )
+                    result["flags"] = ["unclear"] if unclear else []
+                if kind == "lead_followup":
+                    # ids and names are facts Python extracted, never model text
+                    lead_row = entry.get("item") or {}
+                    result["lead_id"] = str(lead_row.get("lead_id") or "")
+                    result["contact_name"] = lead_row.get("contact_name")
+                    result["company"] = lead_row.get("company")
+                    result["status"] = lead_row.get("status")
+                    result["days_since_activity"] = lead_row.get("days_since_activity")
                 async with usage_lock:
                     usage_total.update(add_usage(usage_total, usage))
                     usage_total["sub_call"] = usage_total.get("sub_call", 0) + 1
@@ -710,16 +827,53 @@ async def collections_node(state: RunState) -> RunState:
     }
 
 
+async def lead_followup_node(state: RunState) -> RunState:
+    """One structured LLM call per fresh stuck lead (cached ones skipped)."""
+    fresh = [entry for entry in state["lead_followup_input"] if entry["input_hash"] not in (state["cached_hashes"] or {})]
+    cached_items = []
+    for entry in state["lead_followup_input"]:
+        if entry["input_hash"] in (state["cached_hashes"] or {}):
+            cached = dict(_item_skeleton("lead_followup", entry))
+            cached.update(state["cached_hashes"][entry["input_hash"]])
+            cached["source"] = "cache"
+            cached_items.append(cached)
+
+    caller_factory = state["_caller_factory"]
+    usage_total = state.get("usage") or empty_usage()
+    usage_lock = asyncio.Lock()
+    errors: list[str] = list(state.get("errors") or [])
+    regen_count = dict(state.get("regen_counts") or {})
+    regen_count.setdefault("lead_followup", 0)
+    _run_one._sema = asyncio.Semaphore(CONCURRENCY)
+
+    done = await asyncio.gather(
+        *(_run_one(entry, "lead_followup", caller_factory, usage_total, usage_lock, errors, regen_count) for entry in fresh)
+    )
+    return {
+        "lead_followup_out": cached_items + list(done),
+        "usage": usage_total,
+        "errors": errors,
+        "regen_counts": regen_count,
+    }
+
+
 async def group_by_customer_node(state: RunState) -> RunState:
     outputs = list(state["negotiation_out"]) + list(state["collections_out"])
     outputs = [o for o in outputs if "needs_review" not in (o.get("flags") or []) and "error" not in (o.get("flags") or [])]
-    return {"grouped": group_by_customer(outputs)}
+    # Leads are NOT customers: they travel to the master as their own section
+    # (matched only by email/phone, never force-merged into customer groups).
+    lead_outputs = [
+        o for o in state["lead_followup_out"]
+        if "needs_review" not in (o.get("flags") or []) and "error" not in (o.get("flags") or [])
+    ]
+    return {"grouped": group_by_customer(outputs), "leads_grouped": lead_outputs}
 
 
 async def master_node(state: RunState) -> RunState:
     payload_hint = {
         "stale_quote_count": len(state["negotiation_out"]),
         "unpaid_count": len(state["collections_out"]),
+        "stuck_lead_count": len(state["lead_followup_out"]),
     }
     grouped = state["grouped"]
     # raw numbers only - the LLM may copy but never compute totals
@@ -732,7 +886,9 @@ async def master_node(state: RunState) -> RunState:
         attempt += 1
         try:
             caller = state["_caller_factory"]("master")
-            parsed, master_payload_used, usage = await run_master(grouped, master_input, caller)
+            parsed, master_payload_used, usage = await run_master(
+                grouped, master_input, caller, state.get("leads_grouped") or []
+            )
             # same money format in bullets / priorities / conflicts
             parsed = normalise_master_output(parsed, master_payload_used)
             # numbers-only rule extends to the whole brief: no invented totals
@@ -765,14 +921,17 @@ async def save_node(state: RunState) -> RunState:
     database = state["_database"]
     negotiation = state["negotiation_out"]
     collections = state["collections_out"]
+    lead_followup = state["lead_followup_out"]
+    all_outputs = negotiation + collections + lead_followup
     counts = {
         "negotiation_total": len(negotiation),
         "collections_total": len(collections),
-        "unclear": sum(1 for o in negotiation + collections if "unclear" in (o.get("flags") or [])),
+        "lead_followup_total": len(lead_followup),
+        "unclear": sum(1 for o in all_outputs if "unclear" in (o.get("flags") or [])),
         "needs_review": sum(
-            1 for o in negotiation + collections if "needs_review" in (o.get("flags") or []) or "error" in (o.get("flags") or [])
+            1 for o in all_outputs if "needs_review" in (o.get("flags") or []) or "error" in (o.get("flags") or [])
         ),
-        "cached": sum(1 for o in negotiation + collections if o.get("source") == "cache"),
+        "cached": sum(1 for o in all_outputs if o.get("source") == "cache"),
     }
     doc = {
         "run_id": state["run_id"],
@@ -782,6 +941,7 @@ async def save_node(state: RunState) -> RunState:
         "counts": counts,
         "negotiation": negotiation,
         "collections": collections,
+        "lead_followup": lead_followup,
         "master": state.get("master"),
         "usage": state.get("usage"),
         "errors": state.get("errors", []),
@@ -800,13 +960,15 @@ def build_graph() -> Any:
     graph.add_node("load_signals", load_signals_node)
     graph.add_node("negotiation", negotiation_node)
     graph.add_node("collections", collections_node)
+    graph.add_node("lead_followup", lead_followup_node)
     graph.add_node("group_by_customer", group_by_customer_node)
     graph.add_node("master", master_node)
     graph.add_node("save", save_node)
     graph.add_edge(START, "load_signals")
     graph.add_edge("load_signals", "negotiation")
     graph.add_edge("negotiation", "collections")
-    graph.add_edge("collections", "group_by_customer")
+    graph.add_edge("collections", "lead_followup")
+    graph.add_edge("lead_followup", "group_by_customer")
     graph.add_edge("group_by_customer", "master")
     graph.add_edge("master", "save")
     graph.add_edge("save", END)
@@ -815,7 +977,12 @@ def build_graph() -> Any:
 
 def default_caller_factory(kind: str):
     """Fresh caller per call; 'master' uses MODEL_MASTER, else MODEL_SUB."""
-    schema = MasterOutput if kind == "master" else (NegotiationOutput if kind == "negotiation" else CollectionsOutput)
+    schema = {
+        "master": MasterOutput,
+        "negotiation": NegotiationOutput,
+        "collections": CollectionsOutput,
+        "lead_followup": LeadFollowupOutput,
+    }[kind]
     return make_caller(build_model("master" if kind == "master" else "sub"), schema)
 
 
@@ -858,6 +1025,7 @@ async def run_pipeline(
             "master": final.get("master"),
             "negotiation": final.get("negotiation_out", []),
             "collections": final.get("collections_out", []),
+            "lead_followup": final.get("lead_followup_out", []),
             "usage": final.get("usage"),
             "errors": final.get("errors", []),
         }

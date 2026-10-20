@@ -15,6 +15,7 @@ inspection script output in the project report). Values in the data sets:
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -334,6 +335,7 @@ def unpaid_invoices(
                 "overdue": age > threshold,
                 "days_invoice_age": int(age),
                 "invoice_date": iso_or_none(order.get("invoice_date")),
+                "due_date": iso_or_none(order.get("due_date")),
                 "customer": customer_ref(order),
                 "sale_rep": sale_rep_ref(order),
             }
@@ -391,6 +393,273 @@ def stalled_orders(
             }
         )
     result.sort(key=lambda row: (row["age_days"], row["total_amount"]), reverse=True)
+    return result
+
+
+# --------------------------------------------------------------------------
+# leads (Zoho lead documents already mirrored in the Mongo `leads` collection)
+# --------------------------------------------------------------------------
+
+# Lead statuses that mean the lead is still sitting at the top of the funnel.
+STUCK_LEAD_STATUSES = frozenset({"New", "Attempted to Contact"})
+
+# The Mongo query + projection both the pipeline and GET /api/leads/stuck use
+# to fetch stuck-lead candidates (everything else is filtered in Python).
+LEAD_STATUS_QUERY = {"status": {"$in": sorted(STUCK_LEAD_STATUSES)}}
+LEAD_FIELDS = {
+    "zohoLeadId": 1, "firstName": 1, "lastName": 1, "company": 1,
+    "email": 1, "phone": 1, "status": 1, "source": 1, "description": 1,
+    "createdAt": 1, "lastActivityAt": 1, "leadDesk": 1, "_id": 0,
+}
+
+# Values in a free-text lead description that mean "the lead did not say".
+_LEAD_EMPTY_VALUES = frozenset(
+    {
+        "", "-", "\u2014", "n/a", "na", "none", "no",
+        "not given", "not provided", "not stated", "not specified",
+        "unspecified", "unknown",
+    }
+)
+
+# The description keys Python can extract (everything else is ignored).
+_LEAD_KEY_MAP = {
+    "product": "product",
+    "product name": "product",
+    "item": "product",
+    "type": "type",
+    "product type": "type",
+    "box type": "type",
+    "quantity": "quantity",
+    "qty": "quantity",
+    "quantities": "quantity",
+    "size": "size",
+    "sizes": "size",
+    "dimension": "size",
+    "dimensions": "size",
+    "material": "material",
+    "finish": "finish",
+    "finishes": "finish",
+    "lamination": "finish",
+}
+
+_LEAD_KEY_RE = re.compile(
+    r"(?i)(product\s*name|product\s*type|box\s*type|product|item|quantities|quantity|qty|"
+    r"dimensions|dimension|sizes|size|materials|material|finishes|finish|lamination|type)\s*:\s*"
+)
+
+
+def _lead_clean(value: Any) -> Optional[str]:
+    """Trimmed description value, or None when it means 'not given'."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    # strip em-dash / hyphen prefixes used by the chat summaries ("— not given")
+    while text[:1] in {"-", "\u2014"}:
+        text = text[1:].strip()
+    return None if text.casefold() in _LEAD_EMPTY_VALUES else text
+
+
+def _lead_join(value: Any) -> Optional[str]:
+    """Flatten scalars / lists from JSON descriptions into one clean string."""
+    if isinstance(value, (list, tuple)):
+        parts = [_lead_clean(item) for item in value]
+        return ", ".join(part for part in parts if part) or None
+    return _lead_clean(value)
+
+
+def _lead_dimensions_text(value: Any) -> Optional[str]:
+    """'width x height (x gusset) unit' from a dimensions dict or string."""
+    if isinstance(value, dict):
+        width = _lead_clean(value.get("width"))
+        height = _lead_clean(value.get("height"))
+        gusset = _lead_clean(value.get("gusset"))
+        unit = _lead_clean(value.get("unit"))
+        parts = [part for part in (width, height) if part]
+        if gusset and gusset not in {"0", "0.0"}:
+            parts.append(gusset)
+        text = " x ".join(parts)
+        if text and unit:
+            text = f"{text} {unit}"
+        return text or None
+    return _lead_clean(value)
+
+
+def parse_lead_description(text: Any) -> dict:
+    """Parse one lead's free-text description into fixed fields. Pure Python.
+
+    Descriptions come in three shapes and only these are read:
+      (a) a JSON string such as {"quantity":"1000","description":"square 6x6 inch",
+          "artwork":[{url...}],...},
+      (b) "key: value" lines / inline pairs (type, material, phone_no, email),
+      (c) prose - nothing structured is extracted.
+
+    Returns a dict with:
+      shape            "json" | "key_value" | "prose"
+      product/type/quantity/size/material/finish   str or None
+      artwork_present   True / False / None
+
+    RULE: artwork_present is False ONLY when the description is JSON with an
+    explicit empty "artwork" list; True when it has a non-empty list; None
+    (unknown) for prose or key:value text. Never guess.
+    """
+    result = {
+        "shape": "prose",
+        "product": None,
+        "type": None,
+        "quantity": None,
+        "size": None,
+        "material": None,
+        "finish": None,
+        "artwork_present": None,
+    }
+    raw = str(text or "").strip()
+    if not raw:
+        return result
+
+    data: Optional[dict] = None
+    try:
+        loaded = json.loads(raw)
+        if isinstance(loaded, dict):
+            data = loaded
+    except (ValueError, TypeError):
+        data = None
+
+    if data is not None:
+        result["shape"] = "json"
+        options = data.get("attributeOptions") if isinstance(data.get("attributeOptions"), dict) else {}
+        result["product"] = _lead_join(data.get("product"))
+        result["type"] = _lead_join(data.get("product_type") or data.get("type"))
+        result["quantity"] = _lead_join(data.get("quantity"))
+        result["size"] = (
+            _lead_dimensions_text(data.get("dimensions"))
+            or _lead_join(data.get("size"))
+            or _lead_dimensions_text((options or {}).get("dimensions"))
+        )
+        result["material"] = _lead_join(data.get("material")) or _lead_join((options or {}).get("material"))
+        result["finish"] = _lead_join(data.get("finishes") or data.get("finish")) or _lead_join(
+            (options or {}).get("finishes") or (options or {}).get("finish")
+        )
+        artwork = data.get("artwork")
+        if isinstance(artwork, list):
+            result["artwork_present"] = bool(artwork)
+        return result
+
+    pairs: list[tuple[str, str, int, int]] = []  # (canonical key, value, start, end)
+    matches = list(_LEAD_KEY_RE.finditer(raw))
+    for index, match in enumerate(matches):
+        canonical = _LEAD_KEY_MAP.get(" ".join(match.group(1).lower().split()))
+        if canonical is None:
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
+        # a value runs to the next known key, but never past its first line
+        value = raw[match.end() : end].split("\n", 1)[0].strip()
+        pairs.append((canonical, value, match.start(), match.end()))
+
+    if pairs:
+        result["shape"] = "key_value"
+        for canonical, value, _start, _end in pairs:
+            if result[canonical] is None:
+                result[canonical] = _lead_clean(value)
+    return result
+
+
+def missing_lead_fields(parsed: Mapping[str, Any]) -> list[str]:
+    """Fields the lead did not provide - computed in Python, never by the AI.
+
+    A field is missing only when we can actually tell:
+      * json / key_value descriptions enumerate what the lead gave, so an
+        absent quantity/size/material/finish was not provided;
+      * artwork counts as missing ONLY when the JSON "artwork" list is
+        explicitly empty (None means unknown, not missing);
+      * prose tells us nothing, so nothing is called missing.
+    """
+    missing: list[str] = []
+    if parsed.get("artwork_present") is False:
+        missing.append("artwork")
+    if parsed.get("shape") in {"json", "key_value"}:
+        for field in ("quantity", "size", "material", "finish"):
+            if not parsed.get(field):
+                missing.append(field)
+    return missing
+
+
+def stuck_leads(
+    leads: Iterable[Mapping[str, Any]],
+    now: Optional[datetime] = None,
+    *,
+    days: Optional[int] = None,
+    statuses: Optional[frozenset] = None,
+) -> list[dict]:
+    """Leads that are stuck before becoming an order. Pure Python.
+
+    A lead counts when:
+      * its status is "New" or "Attempted to Contact" (still top-of-funnel);
+      * its last activity is within the last `days` days (LEAD_ACTIVE_DAYS by
+        default) - recent activity means the lead is alive, not dead history;
+      * it has a description (nothing to interpret without one);
+      * leadDesk has not flagged it (flagReason) and its stage is still "open".
+
+    Rows are sorted by newest activity first. The caller caps the list.
+    """
+    now = now or datetime.now(timezone.utc)
+    window = settings.LEAD_ACTIVE_DAYS if days is None else days
+    allowed = frozenset(STUCK_LEAD_STATUSES) if statuses is None else frozenset(statuses)
+
+    result: list[dict] = []
+    for lead in leads:
+        status = contact_to_s(lead.get("status"))
+        if status not in allowed:
+            continue
+        description = str(lead.get("description") or "").strip()
+        if not description:
+            continue  # nothing for the agent to interpret
+        desk = lead.get("leadDesk") if isinstance(lead.get("leadDesk"), Mapping) else {}
+        if contact_to_s(desk.get("flagReason")):
+            continue  # a human already flagged this lead
+        stage = contact_to_s(desk.get("stage"))
+        if stage and stage != "open":
+            continue  # the desk already moved it out of the open stage
+        activity = parse_date(lead.get("lastActivityAt")) or parse_date(lead.get("createdAt"))
+        if activity is None:
+            continue
+        age = age_days(activity, now)
+        if age is None or age < 0 or age > window:
+            continue  # too old to be an alive-but-stuck lead
+
+        parsed = parse_lead_description(description)
+        email = contact_to_s(lead.get("email"))
+        phone = contact_to_s(lead.get("phone"))
+        missing = missing_lead_fields(parsed)
+        if not email and not phone:
+            missing.append("contact_info")
+        first = contact_to_s(lead.get("firstName"))
+        last = contact_to_s(lead.get("lastName"))
+        contact_name = " ".join(part for part in (first, last) if part) or None
+        result.append(
+            {
+                "lead_id": contact_to_s(lead.get("zohoLeadId")) or str(lead.get("_id") or ""),
+                "contact_name": contact_name,
+                "company": contact_to_s(lead.get("company")) or None,
+                "status": status,
+                "source": contact_to_s(lead.get("source")) or None,
+                "days_since_activity": int(age),
+                "last_activity_at": iso_or_none(lead.get("lastActivityAt")),
+                "created_at": iso_or_none(lead.get("createdAt")),
+                "product": parsed.get("product"),
+                "type": parsed.get("type"),
+                "quantity": parsed.get("quantity"),
+                "size": parsed.get("size"),
+                "material": parsed.get("material"),
+                "finish": parsed.get("finish"),
+                "artwork_present": parsed.get("artwork_present"),
+                "description_shape": parsed.get("shape"),
+                "missing": missing,
+                "has_contact_details": bool(email or phone),
+                "description": description,
+            }
+        )
+    # newest activity first
+    result.sort(key=lambda row: row["days_since_activity"])
     return result
 
 

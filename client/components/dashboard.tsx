@@ -10,11 +10,12 @@ import {
   DollarSign,
   FileText,
   RefreshCw,
+  UserX,
   Users,
   type LucideIcon,
 } from "lucide-react";
 import { useLiveData } from "@/hooks/use-live-data";
-import { fetchSignals } from "@/services/api";
+import { fetchSignals, fetchStuckLeads } from "@/services/api";
 import {
   QuoteVolumeChart,
   RevenueTrendChart,
@@ -27,6 +28,8 @@ import type {
   SignalsReport,
   StaleQuote,
   StalledOrder,
+  StuckLead,
+  StuckLeadsResponse,
   UnpaidInvoice,
 } from "@/types/api";
 
@@ -97,6 +100,12 @@ export function Dashboard({
   const [stalledOrders, setStalledOrders] = useState<StalledOrder[] | null>(null);
   const [stalledOrdersError, setStalledOrdersError] = useState("");
   const [isLoadingStalledOrders, setIsLoadingStalledOrders] = useState(false);
+  const [stuckLeads, setStuckLeads] = useState<StuckLeadsResponse | null>(null);
+  const [stuckLeadsError, setStuckLeadsError] = useState("");
+  const [isLoadingStuckLeads, setIsLoadingStuckLeads] = useState(true);
+  const [leadRowLimit, setLeadRowLimit] = useState(ROW_PAGE_SIZE);
+  const stuckLeadsRequestRef = useRef<Promise<StuckLeadsResponse> | null>(null);
+  const stuckLeadsLoadedForReloadRef = useRef<number | null>(null);
   const hasRequestedSignalsRef = useRef(false);
   const previousFilterKeyRef = useRef(JSON.stringify(filters));
   const previousReloadKeyRef = useRef(reloadKey);
@@ -187,6 +196,46 @@ export function Dashboard({
     };
   }, [activeTab, filters, reloadKey, snapshot?.generated_at]);
 
+  // Stuck leads feed the Overview card and the Leads tab. Fetched once per
+  // reload generation (StrictMode's double effect mount shares one in-flight
+  // request); all state is written only after the request settles.
+  useEffect(() => {
+    if (activeTab !== "leads" && activeTab !== "overview") return undefined;
+    const alreadyLoaded =
+      stuckLeadsLoadedForReloadRef.current === reloadKey &&
+      (stuckLeads !== null || stuckLeadsError !== "");
+    const inFlight = stuckLeadsRequestRef.current;
+    if (alreadyLoaded && !inFlight) return undefined;
+
+    let isActive = true;
+    const request = inFlight ?? fetchStuckLeads();
+    stuckLeadsRequestRef.current = request;
+    request
+      .then((result) => {
+        stuckLeadsLoadedForReloadRef.current = reloadKey;
+        if (!isActive) return;
+        setStuckLeads(result);
+        setStuckLeadsError("");
+      })
+      .catch((error: unknown) => {
+        stuckLeadsLoadedForReloadRef.current = reloadKey;
+        if (!isActive) return;
+        setStuckLeadsError(
+          error instanceof Error ? error.message : "Could not load stuck leads.",
+        );
+      })
+      .finally(() => {
+        if (stuckLeadsRequestRef.current === request) {
+          stuckLeadsRequestRef.current = null;
+        }
+        if (isActive) setIsLoadingStuckLeads(false);
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [activeTab, reloadKey, stuckLeads, stuckLeadsError]);
+
   function applyFilter(patch: SignalsQuery) {
     setIsLoadingSignals(true);
     setRowLimit(ROW_PAGE_SIZE);
@@ -205,6 +254,12 @@ export function Dashboard({
       setStalledOrdersError("");
       setIsLoadingStalledOrders(true);
     }
+    setReloadKey((current) => current + 1);
+  }
+
+  function retryStuckLeads() {
+    setIsLoadingStuckLeads(true);
+    setStuckLeadsError("");
     setReloadKey((current) => current + 1);
   }
 
@@ -285,6 +340,7 @@ export function Dashboard({
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="receivables">Receivables</TabsTrigger>
           <TabsTrigger value="pipeline">Pipeline</TabsTrigger>
+          <TabsTrigger value="leads">Leads</TabsTrigger>
           <TabsTrigger value="ai-review">AI review</TabsTrigger>
         </TabsList>
 
@@ -362,6 +418,20 @@ export function Dashboard({
                   label="Records scanned"
                   value={`${snapshot.scanned.quotes.toLocaleString("en-US")} quotes`}
                   detail={`${snapshot.scanned.orders.toLocaleString("en-US")} orders · ${snapshot.scanned.payments.toLocaleString("en-US")} payments`}
+                />
+                <KpiCard
+                  icon={UserX}
+                  label="Stuck leads"
+                  value={stuckLeads ? stuckLeads.total.toLocaleString("en-US") : "—"}
+                  detail={
+                    stuckLeads
+                      ? `Active in the last ${stuckLeads.days} days with a description · open the Leads tab`
+                      : "Waiting for stuck leads"
+                  }
+                  onActivate={() => {
+                    setActiveTab("leads");
+                    setLeadRowLimit(ROW_PAGE_SIZE);
+                  }}
                 />
               </div>
 
@@ -523,6 +593,35 @@ export function Dashboard({
           )}
         </TabsContent>
 
+        <TabsContent value="leads" className="space-y-4">
+          <div className="flex flex-wrap items-end justify-between gap-4 rounded-xl border border-border bg-surface px-5 py-4">
+            <div className="max-w-2xl">
+              <h2 className="font-semibold">Leads</h2>
+              <p className="mt-1 text-xs text-muted">
+                Leads stuck before becoming an order: status New or Attempted to Contact, activity
+                within the last {stuckLeads?.days ?? 14} days, a description present, not flagged
+                by the lead desk. The filter and every parsed field come from the backend
+                (`GET /api/leads/stuck`) - this table only renders them.
+              </p>
+            </div>
+          </div>
+          {isLoadingStuckLeads && !stuckLeads ? (
+            <LoadingNote />
+          ) : stuckLeads ? (
+            <StuckLeadsTable
+              rows={stuckLeads.items}
+              totalCount={stuckLeads.total}
+              rowLimit={leadRowLimit}
+              onShowMore={() => setLeadRowLimit((current) => current + ROW_PAGE_SIZE)}
+            />
+          ) : (
+            <ErrorNote
+              message={stuckLeadsError || "Stuck leads are unavailable."}
+              onRetry={retryStuckLeads}
+            />
+          )}
+        </TabsContent>
+
         <TabsContent value="ai-review">{actionCenter}</TabsContent>
       </Tabs>
 
@@ -538,11 +637,13 @@ function KpiCard({
   label,
   value,
   detail,
+  onActivate,
 }: {
   icon: LucideIcon;
   label: string;
   value: string;
   detail: string;
+  onActivate?: () => void;
 }) {
   return (
     <article className="rounded-xl border border-border bg-surface p-5">
@@ -550,7 +651,18 @@ function KpiCard({
         <p className="text-sm text-muted">{label}</p>
         <Icon size={16} className="text-muted" aria-hidden="true" />
       </div>
-      <p className="mt-3 text-2xl font-semibold tracking-tight">{value}</p>
+      {onActivate ? (
+        <button
+          type="button"
+          onClick={onActivate}
+          title={`Open the ${label} tab`}
+          className="mt-3 block text-left text-2xl font-semibold tracking-tight transition-colors hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        >
+          {value}
+        </button>
+      ) : (
+        <p className="mt-3 text-2xl font-semibold tracking-tight">{value}</p>
+      )}
       <p className="mt-1 text-xs text-muted">{detail}</p>
     </article>
   );
@@ -951,6 +1063,100 @@ function StalledOrderTable({
                   </td>
                   <td className="px-4 py-3 text-muted">{formatDate(order.invoice_date)}</td>
                   <td className="px-4 py-3 text-muted">{order.sale_rep?.name || "Unassigned"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <ShowMore shown={visible.length} total={totalCount} onShowMore={onShowMore} />
+        </>
+      )}
+    </TableShell>
+  );
+}
+
+function artworkLabel(present: boolean | null): string {
+  if (present === true) return "Provided";
+  if (present === false) return "Missing";
+  return "Not stated";
+}
+
+function StuckLeadsTable({
+  rows,
+  totalCount,
+  rowLimit,
+  onShowMore,
+}: {
+  rows: StuckLead[];
+  totalCount: number;
+  rowLimit: number;
+  onShowMore: () => void;
+}) {
+  const visible = rows.slice(0, rowLimit);
+  return (
+    <TableShell
+      title="Stuck leads"
+      icon={UserX}
+      count={visible.length}
+      totalCount={totalCount}
+    >
+      {rows.length === 0 ? (
+        <EmptyNote>No leads match the stuck-lead filter right now.</EmptyNote>
+      ) : (
+        <>
+          <table className="w-full min-w-[900px] text-left text-sm">
+            <thead>
+              <tr className="border-b border-border text-xs text-muted">
+                <th className="px-4 py-3 font-medium">Lead</th>
+                <th className="px-4 py-3 font-medium">Company</th>
+                <th className="px-4 py-3 font-medium">Status</th>
+                <th className="px-4 py-3 text-right font-medium">Last activity</th>
+                <th className="px-4 py-3 font-medium">Product</th>
+                <th className="px-4 py-3 font-medium">Missing</th>
+                <th className="px-4 py-3 font-medium">Artwork</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {visible.map((lead) => (
+                <tr key={lead.lead_id}>
+                  <td className="px-4 py-3">
+                    <p className="font-medium">{lead.contact_name || "Name not provided"}</p>
+                    <p className="mt-1 text-xs text-muted">{lead.source || "Unknown source"}</p>
+                  </td>
+                  <td className="px-4 py-3 text-muted">{lead.company || "—"}</td>
+                  <td className="px-4 py-3 text-muted">{lead.status}</td>
+                  <td className="px-4 py-3 text-right tabular-nums text-muted">
+                    {lead.days_since_activity}d
+                  </td>
+                  <td className="px-4 py-3">{lead.product || lead.type || "—"}</td>
+                  <td className="px-4 py-3">
+                    {lead.missing.length === 0 ? (
+                      <span className="text-xs text-muted">Nothing stated missing</span>
+                    ) : (
+                      <div className="flex flex-wrap gap-1">
+                        {lead.missing.map((field) => (
+                          <span
+                            key={field}
+                            className="rounded-md bg-amber-400/10 px-2 py-0.5 text-[11px] text-amber-300"
+                          >
+                            {field.replaceAll("_", " ")}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span
+                      className={`rounded-md px-2 py-1 text-[11px] ${
+                        lead.artwork_present === true
+                          ? "bg-emerald-400/10 text-emerald-300"
+                          : lead.artwork_present === false
+                            ? "bg-amber-400/10 text-amber-300"
+                            : "bg-surface-raised text-muted"
+                      }`}
+                    >
+                      {artworkLabel(lead.artwork_present)}
+                    </span>
+                  </td>
                 </tr>
               ))}
             </tbody>
