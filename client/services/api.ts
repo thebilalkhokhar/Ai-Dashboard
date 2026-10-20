@@ -1,20 +1,142 @@
-import {
-  mockSignalsReport,
-  voiceConsoleData,
-} from "@/lib/mockData";
+// Thin client for the FastAPI backend (server/app).
+//
+// Only endpoints that actually exist are called. There is deliberately no mock
+// fallback: if the backend is down the UI shows the error instead of pretending
+// to have data.
+
 import type {
+  AgentRunStarted,
   ChatDoneEvent,
   ChatRequest,
   ChatStreamEvent,
   CustomerContext,
+  DashboardSnapshot,
   HealthResponse,
-  AgentRunStarted,
   LatestBriefingResponse,
+  SignalsQuery,
   SignalsReport,
 } from "@/types/api";
 
-const wait = (milliseconds: number) =>
-  new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+export const API_BASE_URL = (
+  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
+).replace(/\/+$/, "");
+
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status = 0) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+function describeDetail(detail: unknown): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((entry) => {
+        if (entry && typeof entry === "object" && "msg" in entry) {
+          const path = Array.isArray((entry as { loc?: unknown }).loc)
+            ? ((entry as { loc: unknown[] }).loc.join("."))
+            : "";
+          return `${path ? `${path}: ` : ""}${String((entry as { msg: unknown }).msg)}`;
+        }
+        return JSON.stringify(entry);
+      })
+      .join("; ");
+  }
+  if (detail && typeof detail === "object") return JSON.stringify(detail);
+  return "";
+}
+
+async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      cache: "no-store",
+      ...init,
+    });
+  } catch {
+    throw new ApiError(
+      `Cannot reach the backend at ${API_BASE_URL}. Start FastAPI and try again.`,
+      0,
+    );
+  }
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const payload: unknown = await response.json();
+      if (payload && typeof payload === "object" && "detail" in payload) {
+        detail = describeDetail((payload as { detail: unknown }).detail);
+      }
+    } catch {
+      // non-JSON error body: fall back to the status code
+    }
+    throw new ApiError(
+      detail || `Backend request failed (HTTP ${response.status}).`,
+      response.status,
+    );
+  }
+
+  return (await response.json()) as T;
+}
+
+export function fetchHealth(): Promise<HealthResponse> {
+  return apiFetch<HealthResponse>("/health");
+}
+
+export function fetchMetrics(): Promise<DashboardSnapshot> {
+  return apiFetch<DashboardSnapshot>("/api/metrics");
+}
+
+export function fetchSignals(query: SignalsQuery = {}): Promise<SignalsReport> {
+  const params = new URLSearchParams();
+  if (query.staleDays !== undefined) params.set("stale_days", String(query.staleDays));
+  if (query.stalledDays !== undefined) params.set("stalled_days", String(query.stalledDays));
+  if (query.overdueDays !== undefined) params.set("overdue_days", String(query.overdueDays));
+  const search = params.size > 0 ? `?${params.toString()}` : "";
+  return apiFetch<SignalsReport>(`/api/signals${search}`);
+}
+
+export function fetchCustomerContext(
+  customerId: number,
+  options: { leadLimit?: number } = {},
+): Promise<CustomerContext> {
+  if (!Number.isInteger(customerId) || customerId < 1) {
+    return Promise.reject(new RangeError("Customer ID must be a positive integer."));
+  }
+
+  const query = new URLSearchParams();
+  if (options.leadLimit !== undefined) {
+    if (
+      !Number.isInteger(options.leadLimit) ||
+      options.leadLimit < 1 ||
+      options.leadLimit > 500
+    ) {
+      return Promise.reject(
+        new RangeError("Lead limit must be an integer between 1 and 500."),
+      );
+    }
+    query.set("lead_limit", String(options.leadLimit));
+  }
+
+  const search = query.size > 0 ? `?${query.toString()}` : "";
+  return apiFetch<CustomerContext>(
+    `/api/customers/${customerId}/context${search}`,
+  );
+}
+
+export function startAgentRun(): Promise<AgentRunStarted> {
+  return apiFetch<AgentRunStarted>("/api/agents/run", { method: "POST" });
+}
+
+export function fetchLatestBriefing(): Promise<LatestBriefingResponse> {
+  return apiFetch<LatestBriefingResponse>("/api/briefing/latest");
+}
+
+// ---------------------------------------------------------------- chat (SSE)
 
 const CHAT_THREAD_STORAGE_KEY = "biztek-chat-thread-id";
 let inMemoryChatThreadId: string | null = null;
@@ -26,7 +148,7 @@ function createThreadId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function getChatThreadId(): string {
+export function getChatThreadId(): string {
   if (inMemoryChatThreadId) return inMemoryChatThreadId;
 
   try {
@@ -81,6 +203,8 @@ function parseChatEvent(block: string): ChatStreamEvent | null {
         return { event: "token", data: { text: data.text } };
       }
       break;
+    case "reset":
+      return { event: "reset", data: {} };
     case "done":
       if (
         "text" in data &&
@@ -106,126 +230,6 @@ function parseChatEvent(block: string): ChatStreamEvent | null {
   throw new Error(`Chat server sent invalid ${eventName} event data.`);
 }
 
-export async function fetchSignals(): Promise<SignalsReport> {
-  try {
-    const response = await fetch("http://localhost:8000/api/signals", {
-      cache: "no-store",
-    });
-
-    if (!response.ok) {
-      throw new Error(`Signals request failed with status ${response.status}`);
-    }
-
-    return (await response.json()) as SignalsReport;
-  } catch (error) {
-    console.warn("Unable to load live signals; using mock signals report.", error);
-    return mockSignalsReport;
-  }
-}
-
-export async function fetchHealth(): Promise<HealthResponse> {
-  const response = await fetch("http://localhost:8000/health", {
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    throw new Error(`Health request failed with status ${response.status}`);
-  }
-
-  return (await response.json()) as HealthResponse;
-}
-
-export async function fetchCustomerContext(
-  customerId: number,
-  options: { leadLimit?: number } = {},
-): Promise<CustomerContext> {
-  if (!Number.isInteger(customerId) || customerId < 1) {
-    throw new RangeError("Customer ID must be a positive integer.");
-  }
-
-  const query = new URLSearchParams();
-  if (options.leadLimit !== undefined) {
-    if (!Number.isInteger(options.leadLimit) || options.leadLimit < 1 || options.leadLimit > 500) {
-      throw new RangeError("Lead limit must be an integer between 1 and 500.");
-    }
-    query.set("lead_limit", String(options.leadLimit));
-  }
-
-  const search = query.size > 0 ? `?${query.toString()}` : "";
-  try {
-    const response = await fetch(
-      `http://localhost:8000/api/customers/${customerId}/context${search}`,
-      { cache: "no-store" },
-    );
-
-    if (!response.ok) {
-      throw new Error(`Customer context request failed with status ${response.status}`);
-    }
-
-    return (await response.json()) as CustomerContext;
-  } catch (error) {
-    console.warn("Unable to load customer context; using mock customer context.", error);
-    return {
-      customer_id: customerId,
-      company_name: `Mock Customer ${customerId}`,
-      contact: { email: null, phone: null },
-      quotes: {
-        count: 0,
-        total_amount: 0,
-        status_counts: {},
-        first_at: null,
-        last_at: null,
-      },
-      orders: {
-        count: 0,
-        total_amount: 0,
-        status_counts: {},
-        first_at: null,
-        last_at: null,
-        amount_paid: 0,
-        balance: 0,
-        unpaid_count: 0,
-        partially_paid_count: 0,
-        fully_paid_count: 0,
-        payment_status_counts: {},
-      },
-      payments: {
-        count: 0,
-        total_amount: 0,
-        first_at: null,
-        last_at: null,
-      },
-      leads: [],
-      notes: ["Mock context: the backend customer-context route is unavailable."],
-    };
-  }
-}
-
-export async function startAgentRun(): Promise<AgentRunStarted> {
-  const response = await fetch("http://localhost:8000/api/agents/run", {
-    method: "POST",
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    throw new Error(`Agent run request failed with status ${response.status}`);
-  }
-
-  return (await response.json()) as AgentRunStarted;
-}
-
-export async function fetchLatestBriefing(): Promise<LatestBriefingResponse> {
-  const response = await fetch("http://localhost:8000/api/briefing/latest", {
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    throw new Error(`Latest briefing request failed with status ${response.status}`);
-  }
-
-  return (await response.json()) as LatestBriefingResponse;
-}
-
 export async function sendMessage(
   message: string,
   onEvent: (event: ChatStreamEvent) => void,
@@ -234,17 +238,29 @@ export async function sendMessage(
     thread_id: getChatThreadId(),
     message,
   };
-  const response = await fetch("http://localhost:8000/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-  });
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+  } catch {
+    throw new ApiError(
+      `Cannot reach the backend at ${API_BASE_URL}. Start FastAPI and try again.`,
+      0,
+    );
+  }
 
   if (!response.ok) {
-    throw new Error(`Chat request failed with status ${response.status}`);
+    throw new ApiError(
+      `Chat request failed (HTTP ${response.status}).`,
+      response.status,
+    );
   }
   if (!response.body) {
-    throw new Error("Chat response did not include a readable event stream.");
+    throw new ApiError("Chat response did not include a readable event stream.");
   }
 
   const reader = response.body.getReader();
@@ -288,49 +304,4 @@ export async function sendMessage(
     throw new Error("Chat stream ended before the assistant completed its response.");
   }
   return completed;
-}
-
-export async function submitApproval(
-  threadId: string,
-  approved: boolean,
-): Promise<{ status: "success" }> {
-  try {
-    const response = await fetch("http://localhost:8000/api/approve", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ thread_id: threadId, approved }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Approval request failed with status ${response.status}`);
-    }
-
-    return { status: "success" };
-  } catch (error) {
-    console.warn("Unable to submit approval; simulating successful response.", error);
-    await wait(500);
-    return { status: "success" };
-  }
-}
-
-export async function sendVoiceAction(audioBlob: Blob): Promise<typeof voiceConsoleData> {
-  try {
-    const formData = new FormData();
-    formData.append("audio", audioBlob, "voice-input.webm");
-
-    const response = await fetch("http://localhost:8000/api/voice", {
-      method: "POST",
-      body: formData,
-    });
-
-    if (!response.ok) {
-      throw new Error(`Voice request failed with status ${response.status}`);
-    }
-
-    return (await response.json()) as typeof voiceConsoleData;
-  } catch (error) {
-    console.warn("Unable to submit voice input; using mock response.", error);
-    await wait(2000);
-    return voiceConsoleData;
-  }
 }

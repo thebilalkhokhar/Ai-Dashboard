@@ -1,118 +1,77 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import * as echarts from "echarts";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Activity,
   AlertTriangle,
   Boxes,
+  ChevronRight,
+  Clock,
+  DollarSign,
   FileText,
+  RefreshCw,
   Users,
   type LucideIcon,
 } from "lucide-react";
-import type { ReactNode } from "react";
-import {
-  dashboardData,
-  leads,
-  mockDashboardCharts,
-  mockSignalsReport,
-  orders,
-  quotes,
-} from "@/lib/mockData";
+import { useLiveData } from "@/hooks/use-live-data";
 import { fetchSignals } from "@/services/api";
-import { SystemHealthBadge } from "@/components/system-health";
+import {
+  QuoteVolumeChart,
+  RevenueTrendChart,
+  TopRepsChart,
+} from "@/components/charts";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import type { SignalsReport, StaleQuote } from "@/types/api";
+import type {
+  CustomerRef,
+  SignalsQuery,
+  SignalsReport,
+  StaleQuote,
+  StalledOrder,
+  UnpaidInvoice,
+} from "@/types/api";
 
-type ChartData = (typeof mockDashboardCharts)[number];
-type LiveChartData = Omit<ChartData, "labels" | "values"> & {
-  labels: string[];
-  values: number[];
-};
+const ROW_PAGE_SIZE = 25;
 
-const mockLiveChartEvents = [
-  { label: "15:05", values: { stale_quotes: 4, unpaid_invoices: 4, stalled_orders: 2 } },
-  { label: "15:10", values: { stale_quotes: 5, unpaid_invoices: 4, stalled_orders: 3 } },
-  { label: "15:15", values: { stale_quotes: 5, unpaid_invoices: 5, stalled_orders: 3 } },
-  { label: "15:20", values: { stale_quotes: 6, unpaid_invoices: 5, stalled_orders: 4 } },
-] as const;
+const STALE_DAY_OPTIONS = [3, 5, 7, 14, 30];
+const STALLED_DAY_OPTIONS = [2, 3, 5, 7, 14];
+const OVERDUE_DAY_OPTIONS = [7, 14, 30, 60, 90];
 
-function ChartTile({
-  chart,
-  summary,
-}: {
-  chart: LiveChartData;
-  summary: { count: number; total_amount: number };
-}) {
-  const chartRef = useRef<HTMLDivElement>(null);
-  const chartInstanceRef = useRef<echarts.ECharts | null>(null);
+function formatMoney(value: number): string {
+  const whole = Number.isInteger(value);
+  return value.toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: whole ? 0 : 2,
+    maximumFractionDigits: whole ? 0 : 2,
+  });
+}
 
-  useEffect(() => {
-    const element = chartRef.current;
-    if (!element) return;
+function formatDateTime(value: string | null): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
 
-    const instance = echarts.init(element);
-    chartInstanceRef.current = instance;
-    const resizeObserver = new ResizeObserver(() => instance.resize());
-    resizeObserver.observe(element);
+function formatDate(value: string | null): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
 
-    return () => {
-      resizeObserver.disconnect();
-      instance.dispose();
-      chartInstanceRef.current = null;
-    };
-  }, []);
-
-  useEffect(() => {
-    const instance = chartInstanceRef.current;
-    if (!instance) return;
-
-    instance.setOption({
-      animation: false,
-      grid: { left: 0, right: 0, top: 10, bottom: 4, containLabel: false },
-      tooltip: { trigger: "axis" },
-      xAxis: {
-        type: "category",
-        boundaryGap: false,
-        data: chart.labels,
-        axisLabel: { color: "#737d8f", fontSize: 10 },
-        axisLine: { show: false },
-        axisTick: { show: false },
-      },
-      yAxis: {
-        type: "value",
-        show: false,
-        splitLine: { lineStyle: { color: "#252b38" } },
-      },
-      series: [
-        {
-          type: "line",
-          data: chart.values,
-          smooth: true,
-          symbol: "none",
-          lineStyle: { color: chart.accent, width: 2 },
-          areaStyle: { color: `${chart.accent}20` },
-        },
-      ],
-    });
-  }, [chart.accent, chart.labels, chart.values]);
-
-  return (
-    <article className="rounded-xl border border-border bg-surface p-5">
-      <div className="flex items-start justify-between">
-        <div>
-          <p className="text-sm text-muted">{chart.title}</p>
-          <p className="mt-3 text-2xl font-semibold tracking-tight">{summary.count}</p>
-          <p className="mt-1 text-xs text-muted">Total amount: {summary.total_amount}</p>
-        </div>
-        <span className="rounded-lg border border-border p-2 text-muted" aria-hidden="true">
-          <Activity size={17} />
-        </span>
-      </div>
-      <div ref={chartRef} className="mt-5 h-36 w-full" role="img" aria-label={`${chart.title}, ${chart.period}`} />
-      <p className="mt-2 text-xs text-muted">{chart.period}</p>
-    </article>
-  );
+function selectableCustomerId(customer: CustomerRef | null): number | null {
+  const id = customer?.id ?? null;
+  return id !== null && id > 0 ? id : null;
 }
 
 export function Dashboard({
@@ -122,437 +81,822 @@ export function Dashboard({
   actionCenter: ReactNode;
   onSelectCustomer: (customerId: number | null) => void;
 }) {
-  const [charts, setCharts] = useState<LiveChartData[]>(() =>
-    mockDashboardCharts.map((chart) => ({
-      ...chart,
-      labels: [...chart.labels],
-      values: [...chart.values],
-    })),
-  );
-  const [signalsReport, setSignalsReport] = useState<SignalsReport>(mockSignalsReport);
-  const liveEventIndexRef = useRef(0);
+  const { snapshot, status, error: liveError, lastEventAt, refresh } = useLiveData();
 
+  const [signals, setSignals] = useState<SignalsReport | null>(null);
+  const [signalsError, setSignalsError] = useState("");
+  const [isLoadingSignals, setIsLoadingSignals] = useState(true);
+  const [filters, setFilters] = useState<SignalsQuery>({
+    staleDays: 3,
+    stalledDays: 2,
+    overdueDays: 30,
+  });
+  const [activeTab, setActiveTab] = useState("overview");
+  const [rowLimit, setRowLimit] = useState(ROW_PAGE_SIZE);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  // Refetch whenever a filter changes, on manual retry, or when the scheduler
+  // publishes a new snapshot. State is only written after the request settles.
   useEffect(() => {
     let isActive = true;
 
-    fetchSignals().then((report) => {
-      if (isActive) {
-        setSignalsReport(report);
-      }
-    });
+    fetchSignals(filters)
+      .then((report) => {
+        if (!isActive) return;
+        setSignals(report);
+        setSignalsError("");
+      })
+      .catch((error: unknown) => {
+        if (!isActive) return;
+        setSignalsError(
+          error instanceof Error ? error.message : "Could not load the signals report.",
+        );
+      })
+      .finally(() => {
+        if (isActive) setIsLoadingSignals(false);
+      });
 
     return () => {
       isActive = false;
     };
-  }, []);
+  }, [filters, reloadKey, snapshot?.generated_at]);
 
-  useEffect(() => {
-    const intervalId = window.setInterval(() => {
-      const event = mockLiveChartEvents[liveEventIndexRef.current];
-      liveEventIndexRef.current = (liveEventIndexRef.current + 1) % mockLiveChartEvents.length;
+  function applyFilter(patch: SignalsQuery) {
+    setIsLoadingSignals(true);
+    setRowLimit(ROW_PAGE_SIZE);
+    setFilters((current) => ({ ...current, ...patch }));
+  }
 
-      setCharts((currentCharts) =>
-        currentCharts.map((chart) => ({
-          ...chart,
-          labels: [...chart.labels.slice(1), event.label],
-          values: [...chart.values.slice(1), event.values[chart.id]],
-        })),
-      );
-    }, 4000);
+  function retrySignals() {
+    setIsLoadingSignals(true);
+    setSignalsError("");
+    setReloadKey((current) => current + 1);
+  }
 
-    return () => window.clearInterval(intervalId);
-  }, []);
+  const liveLabel =
+    status === "live"
+      ? "Live stream connected"
+      : status === "connecting"
+        ? "Connecting to live stream..."
+        : status === "reconnecting"
+          ? "Live stream reconnecting..."
+          : "Live stream offline";
+  const liveDot =
+    status === "live"
+      ? "bg-emerald-400"
+      : status === "offline"
+        ? "bg-red-400"
+        : "bg-amber-300";
 
   return (
     <section aria-labelledby="dashboard-title" className="space-y-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="text-sm text-muted">{dashboardData.displayDate}</p>
+          <p className="text-sm text-muted">
+            {snapshot ? formatDateTime(snapshot.generated_at) : "Loading live data"}
+          </p>
           <h1 id="dashboard-title" className="mt-1 text-2xl font-semibold tracking-tight">
             Command center
           </h1>
         </div>
-        <SystemHealthBadge />
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            className="inline-flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1.5 text-xs text-muted"
+            role="status"
+            title={liveError || liveLabel}
+          >
+            <span className={`h-2 w-2 rounded-full ${liveDot}`} aria-hidden="true" />
+            {liveLabel}
+          </span>
+          {lastEventAt && (
+            <span className="text-xs text-muted">Updated {formatDateTime(lastEventAt)}</span>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              void refresh();
+              retrySignals();
+            }}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs text-muted transition-colors hover:bg-surface-raised hover:text-foreground"
+          >
+            <RefreshCw size={13} aria-hidden="true" />
+            Refresh
+          </button>
+        </div>
       </div>
 
-      <Tabs defaultValue="overview">
-        <TabsList aria-label="Dashboard sections">
+      {(liveError || signalsError) && (
+        <div className="rounded-xl border border-red-400/30 bg-red-400/5 px-4 py-3 text-sm text-red-300" role="alert">
+          {liveError && <p>{liveError}</p>}
+          {signalsError && <p className={liveError ? "mt-1" : ""}>{signalsError}</p>}
+        </div>
+      )}
+
+      <Tabs
+        value={activeTab}
+        onValueChange={(value) => {
+          setActiveTab(String(value));
+          setRowLimit(ROW_PAGE_SIZE);
+        }}
+      >
+        <TabsList aria-label="Dashboard sections" className="max-w-full flex-wrap">
           <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="operations">Operations</TabsTrigger>
-          <TabsTrigger value="action-center">Action Center</TabsTrigger>
+          <TabsTrigger value="receivables">Receivables</TabsTrigger>
+          <TabsTrigger value="pipeline">Pipeline</TabsTrigger>
+          <TabsTrigger value="ai-review">AI review</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview" className="space-y-5">
-          <div className="grid gap-4 sm:grid-cols-3 2xl:grid-cols-3">
-            <MetricCard
-              label="Unpaid balance"
-              value={signalsReport.summary.unpaid_invoices.total_amount}
-              icon={AlertTriangle}
-            />
-            <MetricCard
-              label="Unpaid invoices"
-              value={signalsReport.summary.unpaid_invoices.count}
-              icon={FileText}
-            />
-            <MetricCard
-              label="Partially paid"
-              value={signalsReport.summary.unpaid_invoices.partially_paid_count}
-              icon={Boxes}
-            />
-          </div>
+          {!snapshot ? (
+            <section className="rounded-xl border border-border bg-surface p-8 text-center">
+              <Activity size={22} className="mx-auto text-accent" aria-hidden="true" />
+              <p className="mt-3 text-sm font-medium">Waiting for the first dashboard snapshot</p>
+              <p className="mt-1 text-xs text-muted">
+                The backend builds one on its scheduler cycle (`GET /api/metrics` returns 503 until then).
+              </p>
+              <button
+                type="button"
+                onClick={() => void refresh()}
+                className="mt-4 inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-2 text-xs text-muted hover:bg-surface-raised hover:text-foreground"
+              >
+                <RefreshCw size={13} aria-hidden="true" />
+                Try again
+              </button>
+            </section>
+          ) : (
+            <>
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                <KpiCard
+                  icon={DollarSign}
+                  label="Revenue today"
+                  value={snapshot.revenue_today_display}
+                  detail={`${snapshot.payments_count_today} payments received`}
+                />
+                <KpiCard
+                  icon={Activity}
+                  label="Month to date"
+                  value={snapshot.revenue_month_to_date_display}
+                  detail="Payments received this month"
+                />
+                <KpiCard
+                  icon={Clock}
+                  label="Last 7 days"
+                  value={snapshot.revenue_last_7_days_display}
+                  detail="Today plus the previous 6 days"
+                />
+                <KpiCard
+                  icon={FileText}
+                  label="Open quotes"
+                  value={`${snapshot.open_quotes_count}`}
+                  detail={`${snapshot.open_quotes_value_display} in open value`}
+                />
+              </div>
 
-          <div className="grid gap-4 sm:grid-cols-3 2xl:grid-cols-3">
-            {charts.map((chart) => {
-              const summary = signalsReport.summary[chart.id];
-              return <ChartTile key={chart.id} chart={chart} summary={summary} />;
-            })}
-          </div>
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                <KpiCard
+                  icon={AlertTriangle}
+                  label="Unpaid balance"
+                  value={snapshot.unpaid_total_display}
+                  detail={`${snapshot.unpaid_count} invoices with a balance`}
+                />
+                <KpiCard
+                  icon={Boxes}
+                  label="Overdue balance"
+                  value={snapshot.overdue_total_display}
+                  detail={`${snapshot.overdue_count} invoices past the overdue threshold`}
+                />
+                <KpiCard
+                  icon={FileText}
+                  label="Stale quotes"
+                  value={`${signals?.summary.stale_quotes.count ?? "—"}`}
+                  detail={
+                    signals
+                      ? `${formatMoney(signals.summary.stale_quotes.total_amount)} in stalled value`
+                      : "Waiting for signals"
+                  }
+                />
+                <KpiCard
+                  icon={Users}
+                  label="Records scanned"
+                  value={`${snapshot.scanned.quotes.toLocaleString("en-US")} quotes`}
+                  detail={`${snapshot.scanned.orders.toLocaleString("en-US")} orders · ${snapshot.scanned.payments.toLocaleString("en-US")} payments`}
+                />
+              </div>
 
-          <AttentionNeeded report={signalsReport} onSelectCustomer={onSelectCustomer} />
-        </TabsContent>
+              <div className="grid gap-5 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+                <ChartCard title="Revenue received" subtitle="Last 14 days · from payments">
+                  <RevenueTrendChart data={snapshot.revenue_per_day} />
+                </ChartCard>
+                <ChartCard title="Quotes created" subtitle="Last 14 days · from quotes">
+                  <QuoteVolumeChart data={snapshot.quotes_per_day} />
+                </ChartCard>
+              </div>
 
-        <TabsContent value="operations">
-          <div className="grid gap-5 xl:grid-cols-2 2xl:grid-cols-3">
-        <DataTable title="Orders" icon={Boxes}>
-          <table className="w-full min-w-[620px] text-left text-sm">
-            <thead>
-              <tr className="border-b border-border text-xs text-muted">
-                <th className="px-4 py-3 font-medium">Order</th>
-                <th className="px-4 py-3 font-medium">Status</th>
-                <th className="px-4 py-3 font-medium">Payment</th>
-                <th className="px-4 py-3 text-right font-medium">Total</th>
-                <th className="px-4 py-3 text-right font-medium">Paid</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {orders.map((order) => (
-                <tr key={order.id}>
-                  <td className="px-4 py-3">
-                    <p className="font-medium">{order.inv_ref}</p>
-                    <p className="mt-1 text-xs text-muted">ID {order.id}</p>
-                  </td>
-                  <td className="px-4 py-3 text-muted">{order.status_label}</td>
-                  <td className="px-4 py-3 text-muted">{order.payment_status_label}</td>
-                  <td className="px-4 py-3 text-right tabular-nums">{order.total_amount}</td>
-                  <td className="px-4 py-3 text-right tabular-nums">{order.amount_paid}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </DataTable>
+              <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                <ChartCard title="Top reps this month" subtitle="Ranked by payments received">
+                  {snapshot.top_reps_this_month.length > 0 ? (
+                    <TopRepsChart reps={snapshot.top_reps_this_month} />
+                  ) : (
+                    <EmptyNote>No payments have been recorded this month.</EmptyNote>
+                  )}
+                </ChartCard>
 
-        <DataTable title="Quotes" icon={FileText}>
-          <table className="w-full min-w-[580px] text-left text-sm">
-            <thead>
-              <tr className="border-b border-border text-xs text-muted">
-                <th className="px-4 py-3 font-medium">Quote</th>
-                <th className="px-4 py-3 font-medium">Customer</th>
-                <th className="px-4 py-3 font-medium">Sales rep</th>
-                <th className="px-4 py-3 font-medium">Status</th>
-                <th className="px-4 py-3 text-right font-medium">Amount</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {quotes.map((quote) => (
-                <tr key={quote.id}>
-                  <td className="px-4 py-3">
-                    <p className="font-medium">{quote.ref}</p>
-                    <p className="mt-1 text-xs text-muted">ID {quote.id}</p>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <span>{quote.customer.company_name}</span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const customerId = [
-                            ...signalsReport.stale_quotes,
-                            ...signalsReport.unpaid_invoices,
-                            ...signalsReport.stalled_orders.items,
-                          ].find(
-                            (signal) =>
-                              signal.customer?.company_name === quote.customer.company_name &&
-                              signal.customer.id !== null &&
-                              signal.customer.id > 0,
-                          )?.customer?.id;
-                          onSelectCustomer(customerId ?? null);
-                        }}
-                        className="whitespace-nowrap text-xs text-accent transition-colors hover:text-accent/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-                      >
-                        View context
-                      </button>
+                <section className="rounded-xl border border-border bg-surface">
+                  <div className="flex items-center gap-3 border-b border-border px-5 py-4">
+                    <AlertTriangle size={17} className="text-accent" aria-hidden="true" />
+                    <div>
+                      <h2 className="font-semibold">Needs attention</h2>
+                      <p className="mt-1 text-xs text-muted">
+                        Deterministic counts from `GET /api/signals`
+                      </p>
                     </div>
-                  </td>
-                  <td className="px-4 py-3 text-muted">{quote.sale_rep.name}</td>
-                  <td className="px-4 py-3 text-muted">{quote.status}</td>
-                  <td className="px-4 py-3 text-right tabular-nums">{quote.amount}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </DataTable>
-
-        <DataTable title="Leads" icon={Users}>
-          <table className="w-full min-w-[600px] text-left text-sm">
-            <thead>
-              <tr className="border-b border-border text-xs text-muted">
-                <th className="px-4 py-3 font-medium">Mongo ID</th>
-                <th className="px-4 py-3 font-medium">Status</th>
-                <th className="px-4 py-3 font-medium">Stage</th>
-                <th className="px-4 py-3 text-right font-medium">Intent score</th>
-                <th className="px-4 py-3 font-medium">Tags</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {leads.map((lead) => (
-                <tr key={lead._id.$oid}>
-                  <td className="px-4 py-3 font-mono text-xs text-muted">{lead._id.$oid}</td>
-                  <td className="px-4 py-3">{lead.status}</td>
-                  <td className="px-4 py-3 text-muted">{lead.leadDesk.stage}</td>
-                  <td className="px-4 py-3 text-right tabular-nums">
-                    {lead.aiIntelligence.buyingIntentScore}
-                  </td>
-                  <td className="px-4 py-3">
-                    {lead.aiIntelligence.tags.map((tag) => (
-                      <span key={tag} className="rounded-md bg-surface-raised px-2 py-1 text-xs text-muted">
-                        {tag}
-                      </span>
-                    ))}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </DataTable>
-          </div>
+                  </div>
+                  <div className="space-y-3 p-4">
+                    <AttentionRow
+                      label="Stale quotes"
+                      count={signals?.summary.stale_quotes.count}
+                      amount={
+                        signals ? formatMoney(signals.summary.stale_quotes.total_amount) : undefined
+                      }
+                      onClick={() => {
+                        setActiveTab("pipeline");
+                        setRowLimit(ROW_PAGE_SIZE);
+                      }}
+                    />
+                    <AttentionRow
+                      label="Unpaid invoices"
+                      count={signals?.summary.unpaid_invoices.count}
+                      amount={
+                        signals
+                          ? formatMoney(signals.summary.unpaid_invoices.total_amount)
+                          : undefined
+                      }
+                      detail={
+                        signals
+                          ? `${signals.summary.unpaid_invoices.overdue_count} overdue · ${signals.summary.unpaid_invoices.partially_paid_count} partially paid`
+                          : undefined
+                      }
+                      onClick={() => {
+                        setActiveTab("receivables");
+                        setRowLimit(ROW_PAGE_SIZE);
+                      }}
+                    />
+                    <AttentionRow
+                      label="Stalled orders"
+                      count={signals?.summary.stalled_orders.count}
+                      amount={
+                        signals ? formatMoney(signals.summary.stalled_orders.total_amount) : undefined
+                      }
+                      detail="Signal is marked unreliable by the backend"
+                      onClick={() => {
+                        setActiveTab("pipeline");
+                        setRowLimit(ROW_PAGE_SIZE);
+                      }}
+                    />
+                  </div>
+                </section>
+              </div>
+            </>
+          )}
         </TabsContent>
 
-        <TabsContent value="action-center">
-          {actionCenter}
+        <TabsContent value="receivables">
+          <FilterBar
+            title="Receivables"
+            description="Every invoice with a balance greater than zero. The overdue threshold changes which rows are flagged, not which rows are returned."
+            filters={[
+              {
+                label: "Overdue after",
+                value: filters.overdueDays ?? 30,
+                options: OVERDUE_DAY_OPTIONS,
+                suffix: "days",
+                onChange: (days) => applyFilter({ overdueDays: days }),
+              },
+            ]}
+          />
+          {isLoadingSignals && !signals ? (
+            <LoadingNote />
+          ) : signals ? (
+            <UnpaidTable
+              rows={signals.unpaid_invoices}
+              totalCount={signals.summary.unpaid_invoices.count}
+              rowLimit={rowLimit}
+              onShowMore={() => setRowLimit((current) => current + ROW_PAGE_SIZE)}
+              onSelectCustomer={onSelectCustomer}
+            />
+          ) : (
+            <ErrorNote message={signalsError || "Signals are unavailable."} onRetry={retrySignals} />
+          )}
         </TabsContent>
+
+        <TabsContent value="pipeline">
+          <FilterBar
+            title="Pipeline"
+            description="Open quotes and stalled orders. Both lists are computed by the backend; stalled orders are explicitly unreliable because the ERP has no status timestamps."
+            filters={[
+              {
+                label: "Quotes stale after",
+                value: filters.staleDays ?? 3,
+                options: STALE_DAY_OPTIONS,
+                suffix: "days",
+                onChange: (days) => applyFilter({ staleDays: days }),
+              },
+              {
+                label: "Orders stalled after",
+                value: filters.stalledDays ?? 2,
+                options: STALLED_DAY_OPTIONS,
+                suffix: "days",
+                onChange: (days) => applyFilter({ stalledDays: days }),
+              },
+            ]}
+          />
+          {isLoadingSignals && !signals ? (
+            <LoadingNote />
+          ) : signals ? (
+            <div className="space-y-5">
+              <StaleQuoteTable
+                rows={signals.stale_quotes}
+                totalCount={signals.summary.stale_quotes.count}
+                rowLimit={rowLimit}
+                onShowMore={() => setRowLimit((current) => current + ROW_PAGE_SIZE)}
+                onSelectCustomer={onSelectCustomer}
+              />
+              <StalledOrderTable
+                rows={signals.stalled_orders.items}
+                totalCount={signals.summary.stalled_orders.count}
+                reliable={signals.stalled_orders.reliable}
+                rowLimit={rowLimit}
+                onShowMore={() => setRowLimit((current) => current + ROW_PAGE_SIZE)}
+                onSelectCustomer={onSelectCustomer}
+              />
+            </div>
+          ) : (
+            <ErrorNote message={signalsError || "Signals are unavailable."} onRetry={retrySignals} />
+          )}
+        </TabsContent>
+
+        <TabsContent value="ai-review">{actionCenter}</TabsContent>
       </Tabs>
+
+      <p className="text-[11px] text-muted">
+        All totals are computed by the backend. This UI only formats and renders them.
+      </p>
     </section>
   );
 }
 
-function MetricCard({
+function KpiCard({
+  icon: Icon,
   label,
   value,
-  icon: Icon,
+  detail,
 }: {
-  label: string;
-  value: number;
   icon: LucideIcon;
+  label: string;
+  value: string;
+  detail: string;
 }) {
   return (
-    <article className="flex items-center justify-between rounded-xl border border-border bg-surface p-5">
-      <div>
+    <article className="rounded-xl border border-border bg-surface p-5">
+      <div className="flex items-start justify-between gap-3">
         <p className="text-sm text-muted">{label}</p>
-        <p className="mt-3 text-2xl font-semibold tracking-tight">{value}</p>
+        <Icon size={16} className="text-muted" aria-hidden="true" />
       </div>
-      <span className="rounded-lg border border-border p-2 text-muted" aria-hidden="true">
-        <Icon size={17} />
-      </span>
+      <p className="mt-3 text-2xl font-semibold tracking-tight">{value}</p>
+      <p className="mt-1 text-xs text-muted">{detail}</p>
     </article>
   );
 }
 
-function DataTable({
+function ChartCard({
   title,
-  icon: Icon,
+  subtitle,
   children,
 }: {
   title: string;
-  icon: LucideIcon;
+  subtitle: string;
   children: ReactNode;
 }) {
   return (
-    <section className="overflow-hidden rounded-xl border border-border bg-surface" aria-label={`${title} data`}>
-      <div className="flex items-center gap-2 border-b border-border px-4 py-3">
-        <Icon size={16} className="text-muted" aria-hidden="true" />
+    <section className="min-w-0 overflow-hidden rounded-xl border border-border bg-surface p-5">
+      <div>
         <h2 className="text-sm font-semibold">{title}</h2>
+        <p className="mt-1 text-xs text-muted">{subtitle}</p>
       </div>
-      <div className="overflow-x-auto">{children}</div>
+      <div className="mt-4">{children}</div>
     </section>
   );
 }
 
-function AttentionNeeded({
-  report,
-  onSelectCustomer,
+function AttentionRow({
+  label,
+  count,
+  amount,
+  detail,
+  onClick,
 }: {
-  report: SignalsReport;
-  onSelectCustomer: (customerId: number | null) => void;
+  label: string;
+  count?: number;
+  amount?: string;
+  detail?: string;
+  onClick: () => void;
 }) {
   return (
-    <section aria-labelledby="attention-title" className="rounded-xl border border-border bg-surface">
-      <div className="flex items-center gap-3 border-b border-border px-5 py-4">
-        <AlertTriangle size={17} className="text-accent" aria-hidden="true" />
-        <div>
-          <h2 id="attention-title" className="font-semibold">Attention needed</h2>
-          <p className="mt-1 text-xs text-muted">
-            Generated {report.generated_at} · Data range: {report.summary.data_from || "—"} to {report.summary.data_to || "—"}
-          </p>
-        </div>
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex w-full items-center justify-between gap-3 rounded-lg border border-border bg-background px-4 py-3 text-left transition-colors hover:border-accent/40"
+    >
+      <div>
+        <p className="text-sm font-medium">{label}</p>
+        <p className="mt-1 text-xs text-muted">
+          {count === undefined ? "Loading..." : `${count} items`}
+          {amount ? ` · ${amount}` : ""}
+        </p>
+        {detail && <p className="mt-1 text-[11px] text-muted">{detail}</p>}
       </div>
-      <div className="grid gap-4 p-4 lg:grid-cols-3 2xl:grid-cols-3">
-        <SignalGroupCard
-          title="Stale quotes"
-          icon={FileText}
-          count={report.summary.stale_quotes.count}
-          total={report.summary.stale_quotes.total_amount}
-          empty={report.stale_quotes.length === 0}
-        >
-          {report.stale_quotes.map((quote, index) => (
-            <article key={quote.id ?? `${quote.ref ?? "quote"}-${index}`} className="rounded-md border border-border bg-surface p-3">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h4 className="text-sm font-medium">{quote.ref || "Quote reference unavailable"}</h4>
-                  <p className="mt-1 text-xs text-muted">{quote.status || "Status unavailable"}</p>
-                </div>
-                <p className="text-sm font-semibold tabular-nums">{formatAmount(quote.amount)}</p>
-              </div>
-              <p className="mt-3 text-xs text-muted">
-                Stale for {quote.days_stale} days
-                {quote.age_days !== null && ` · Age ${quote.age_days.toFixed(1)} days`}
-              </p>
-              <SignalPeople customer={quote.customer} saleRep={quote.sale_rep} onSelectCustomer={onSelectCustomer} />
-            </article>
-          ))}
-        </SignalGroupCard>
-
-        <SignalGroupCard
-          title="Unpaid invoices"
-          icon={AlertTriangle}
-          count={report.summary.unpaid_invoices.count}
-          total={report.summary.unpaid_invoices.total_amount}
-          empty={report.unpaid_invoices.length === 0}
-          details={`Overdue: ${report.summary.unpaid_invoices.overdue_count} · Unpaid: ${report.summary.unpaid_invoices.unpaid_count} · Partially paid: ${report.summary.unpaid_invoices.partially_paid_count}`}
-        >
-          {report.unpaid_invoices.map((invoice, index) => (
-            <article key={invoice.id ?? `${invoice.inv_ref ?? "invoice"}-${index}`} className="rounded-md border border-border bg-surface p-3">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h4 className="text-sm font-medium">{invoice.inv_ref || "Invoice reference unavailable"}</h4>
-                  <p className="mt-1 text-xs text-muted">
-                    {invoice.status_label || "Status unavailable"} · {invoice.payment_status_label || "Payment status unavailable"}
-                  </p>
-                </div>
-                <span className={`rounded-md px-2 py-1 text-[11px] ${invoice.overdue ? "bg-red-400/10 text-red-300" : "bg-surface-raised text-muted"}`}>
-                  {invoice.overdue ? "Overdue" : "Not overdue"}
-                </span>
-              </div>
-              <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-muted">
-                <p>Balance <span className="text-foreground">{formatAmount(invoice.balance)}</span></p>
-                <p>Age <span className="text-foreground">{invoice.days_invoice_age} days</span></p>
-                <p>Total <span className="text-foreground">{formatAmount(invoice.total_amount)}</span></p>
-                <p>Paid <span className="text-foreground">{formatAmount(invoice.amount_paid)}</span></p>
-              </div>
-              <p className="mt-2 text-xs text-muted">Invoice date: {invoice.invoice_date || "—"}</p>
-              <SignalPeople customer={invoice.customer} saleRep={invoice.sale_rep} onSelectCustomer={onSelectCustomer} />
-            </article>
-          ))}
-        </SignalGroupCard>
-
-        <SignalGroupCard
-          title="Stalled orders"
-          icon={Boxes}
-          count={report.summary.stalled_orders.count}
-          total={report.summary.stalled_orders.total_amount}
-          empty={report.stalled_orders.items.length === 0}
-        >
-          {report.stalled_orders.items.map((order, index) => (
-            <article key={order.id ?? `${order.inv_ref ?? "order"}-${index}`} className="rounded-md border border-border bg-surface p-3">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h4 className="text-sm font-medium">{order.inv_ref || "Order reference unavailable"}</h4>
-                  <p className="mt-1 text-xs text-muted">
-                    {order.status_label || "Status unavailable"} · {order.payment_status_label || "Payment status unavailable"}
-                  </p>
-                </div>
-                <p className="text-sm font-semibold tabular-nums">{formatAmount(order.total_amount)}</p>
-              </div>
-              <p className="mt-3 text-xs text-muted">
-                Stalled for {order.days_invoice_age} days
-                {order.age_days !== null && ` · Age ${order.age_days.toFixed(1)} days`}
-                {" · "}Invoice {order.invoice_date || "date unavailable"}
-              </p>
-              <SignalPeople customer={order.customer} saleRep={order.sale_rep} onSelectCustomer={onSelectCustomer} />
-            </article>
-          ))}
-        </SignalGroupCard>
-      </div>
-    </section>
+      <ChevronRight size={15} className="text-muted" aria-hidden="true" />
+    </button>
   );
 }
 
-function SignalGroupCard({
+function FilterBar({
+  title,
+  description,
+  filters,
+}: {
+  title: string;
+  description: string;
+  filters: {
+    label: string;
+    value: number;
+    options: number[];
+    suffix: string;
+    onChange: (value: number) => void;
+  }[];
+}) {
+  return (
+    <div className="mb-4 flex flex-wrap items-end justify-between gap-4 rounded-xl border border-border bg-surface px-5 py-4">
+      <div className="max-w-2xl">
+        <h2 className="font-semibold">{title}</h2>
+        <p className="mt-1 text-xs text-muted">{description}</p>
+      </div>
+      <div className="flex flex-wrap gap-3">
+        {filters.map((filter) => (
+          <label key={filter.label} className="flex items-center gap-2 text-xs text-muted">
+            {filter.label}
+            <select
+              value={filter.value}
+              onChange={(event) => filter.onChange(Number(event.target.value))}
+              className="rounded-md border border-border bg-background px-2 py-1.5 text-xs text-foreground outline-none focus-visible:border-ring"
+            >
+              {filter.options.map((option) => (
+                <option key={option} value={option}>
+                  {option} {filter.suffix}
+                </option>
+              ))}
+            </select>
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TableShell({
   title,
   icon: Icon,
   count,
-  total,
-  empty,
-  details,
+  totalCount,
+  warning,
   children,
 }: {
   title: string;
   icon: LucideIcon;
   count: number;
-  total: number;
-  empty: boolean;
-  details?: string;
+  totalCount: number;
+  warning?: string;
   children: ReactNode;
 }) {
   return (
-    <article className="rounded-lg border border-border bg-[#0c0f15] p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h3 className="text-sm font-medium">{title}</h3>
-          <p className="mt-2 text-xs text-muted">
-            {count} items · Total amount: {formatAmount(total)}
-          </p>
-          {details && <p className="mt-1 text-xs text-muted">{details}</p>}
+    <section className="overflow-hidden rounded-xl border border-border bg-surface">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
+        <div className="flex items-center gap-2">
+          <Icon size={16} className="text-muted" aria-hidden="true" />
+          <h2 className="text-sm font-semibold">{title}</h2>
         </div>
-        <Icon size={16} className="text-muted" aria-hidden="true" />
+        <span className="text-xs text-muted">
+          Showing {Math.min(count, totalCount).toLocaleString("en-US")} of{" "}
+          {totalCount.toLocaleString("en-US")}
+        </span>
       </div>
-      <div className="mt-4 space-y-2">
-        {empty ? <p className="text-xs text-muted">No records in this signal.</p> : children}
-      </div>
-    </article>
+      {warning && (
+        <p className="border-b border-amber-400/20 bg-amber-400/5 px-4 py-2 text-xs text-amber-300">
+          {warning}
+        </p>
+      )}
+      <div className="overflow-x-auto">{children}</div>
+    </section>
   );
 }
 
-function SignalPeople({
+function ShowMore({
+  shown,
+  total,
+  onShowMore,
+}: {
+  shown: number;
+  total: number;
+  onShowMore: () => void;
+}) {
+  if (shown >= total) return null;
+  return (
+    <div className="flex justify-center border-t border-border px-4 py-3">
+      <button
+        type="button"
+        onClick={onShowMore}
+        className="rounded-md border border-border px-3 py-1.5 text-xs text-muted transition-colors hover:bg-surface-raised hover:text-foreground"
+      >
+        Show {Math.min(ROW_PAGE_SIZE, total - shown)} more
+      </button>
+    </div>
+  );
+}
+
+function CustomerCell({
   customer,
-  saleRep,
   onSelectCustomer,
 }: {
-  customer: StaleQuote["customer"];
-  saleRep: StaleQuote["sale_rep"];
+  customer: CustomerRef | null;
   onSelectCustomer: (customerId: number | null) => void;
 }) {
+  const customerId = selectableCustomerId(customer);
   return (
-    <p className="mt-3 border-t border-border pt-2 text-xs text-muted">
-      Customer: {customer?.company_name || "Unknown"}
-      {customer?.company_name && (
+    <div>
+      <p>{customer?.company_name || "Unknown customer"}</p>
+      {customerId ? (
+        <button
+          type="button"
+          onClick={() => onSelectCustomer(customerId)}
+          className="mt-0.5 text-xs text-accent transition-colors hover:text-accent/80"
+        >
+          View context
+        </button>
+      ) : (
+        <p className="mt-0.5 text-xs text-muted">No customer ID</p>
+      )}
+    </div>
+  );
+}
+
+function UnpaidTable({
+  rows,
+  totalCount,
+  rowLimit,
+  onShowMore,
+  onSelectCustomer,
+}: {
+  rows: UnpaidInvoice[];
+  totalCount: number;
+  rowLimit: number;
+  onShowMore: () => void;
+  onSelectCustomer: (customerId: number | null) => void;
+}) {
+  const visible = rows.slice(0, rowLimit);
+  return (
+    <TableShell
+      title="Unpaid invoices"
+      icon={AlertTriangle}
+      count={visible.length}
+      totalCount={totalCount}
+    >
+      {rows.length === 0 ? (
+        <EmptyNote>No invoices currently carry a balance.</EmptyNote>
+      ) : (
         <>
-          {" · "}
-          <button
-            type="button"
-            onClick={() =>
-              onSelectCustomer(customer.id !== null && customer.id > 0 ? customer.id : null)
-            }
-            className="text-accent transition-colors hover:text-accent/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-          >
-            View context
-          </button>
+          <table className="w-full min-w-[820px] text-left text-sm">
+            <thead>
+              <tr className="border-b border-border text-xs text-muted">
+                <th className="px-4 py-3 font-medium">Invoice</th>
+                <th className="px-4 py-3 font-medium">Customer</th>
+                <th className="px-4 py-3 font-medium">Payment status</th>
+                <th className="px-4 py-3 text-right font-medium">Balance</th>
+                <th className="px-4 py-3 text-right font-medium">Total</th>
+                <th className="px-4 py-3 text-right font-medium">Age</th>
+                <th className="px-4 py-3 font-medium">Overdue</th>
+                <th className="px-4 py-3 font-medium">Rep</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {visible.map((invoice, index) => (
+                <tr key={invoice.id ?? `${invoice.inv_ref ?? "invoice"}-${index}`}>
+                  <td className="px-4 py-3">
+                    <p className="font-medium">{invoice.inv_ref || "—"}</p>
+                    <p className="mt-1 text-xs text-muted">ID {invoice.id ?? "—"}</p>
+                  </td>
+                  <td className="px-4 py-3">
+                    <CustomerCell customer={invoice.customer} onSelectCustomer={onSelectCustomer} />
+                  </td>
+                  <td className="px-4 py-3 text-muted">
+                    {invoice.payment_status_label || "Status not provided"}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums">
+                    {formatMoney(invoice.balance)}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums text-muted">
+                    {formatMoney(invoice.total_amount)}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums text-muted">
+                    {invoice.days_invoice_age}d
+                  </td>
+                  <td className="px-4 py-3">
+                    <span
+                      className={`rounded-md px-2 py-1 text-[11px] ${
+                        invoice.overdue
+                          ? "bg-red-400/10 text-red-300"
+                          : "bg-surface-raised text-muted"
+                      }`}
+                    >
+                      {invoice.overdue ? "Overdue" : "Within terms"}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-muted">{invoice.sale_rep?.name || "Unassigned"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <ShowMore shown={visible.length} total={totalCount} onShowMore={onShowMore} />
         </>
       )}
-      {" · "}Sales rep: {saleRep?.name || "Unassigned"}
+    </TableShell>
+  );
+}
+
+function StaleQuoteTable({
+  rows,
+  totalCount,
+  rowLimit,
+  onShowMore,
+  onSelectCustomer,
+}: {
+  rows: StaleQuote[];
+  totalCount: number;
+  rowLimit: number;
+  onShowMore: () => void;
+  onSelectCustomer: (customerId: number | null) => void;
+}) {
+  const visible = rows.slice(0, rowLimit);
+  return (
+    <TableShell
+      title="Stale quotes"
+      icon={FileText}
+      count={visible.length}
+      totalCount={totalCount}
+    >
+      {rows.length === 0 ? (
+        <EmptyNote>No open quotes match the current stale threshold.</EmptyNote>
+      ) : (
+        <>
+          <table className="w-full min-w-[760px] text-left text-sm">
+            <thead>
+              <tr className="border-b border-border text-xs text-muted">
+                <th className="px-4 py-3 font-medium">Quote</th>
+                <th className="px-4 py-3 font-medium">Customer</th>
+                <th className="px-4 py-3 font-medium">Status</th>
+                <th className="px-4 py-3 text-right font-medium">Amount</th>
+                <th className="px-4 py-3 text-right font-medium">Stale</th>
+                <th className="px-4 py-3 font-medium">Created</th>
+                <th className="px-4 py-3 font-medium">Rep</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {visible.map((quote, index) => (
+                <tr key={quote.id ?? `${quote.ref ?? "quote"}-${index}`}>
+                  <td className="px-4 py-3">
+                    <p className="font-medium">{quote.ref || "—"}</p>
+                    <p className="mt-1 text-xs text-muted">ID {quote.id ?? "—"}</p>
+                  </td>
+                  <td className="px-4 py-3">
+                    <CustomerCell customer={quote.customer} onSelectCustomer={onSelectCustomer} />
+                  </td>
+                  <td className="px-4 py-3 text-muted">{quote.status || "Unknown"}</td>
+                  <td className="px-4 py-3 text-right tabular-nums">{formatMoney(quote.amount)}</td>
+                  <td className="px-4 py-3 text-right tabular-nums text-muted">
+                    {quote.days_stale}d
+                  </td>
+                  <td className="px-4 py-3 text-muted">{formatDate(quote.created_at)}</td>
+                  <td className="px-4 py-3 text-muted">{quote.sale_rep?.name || "Unassigned"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <ShowMore shown={visible.length} total={totalCount} onShowMore={onShowMore} />
+        </>
+      )}
+    </TableShell>
+  );
+}
+
+function StalledOrderTable({
+  rows,
+  totalCount,
+  reliable,
+  rowLimit,
+  onShowMore,
+  onSelectCustomer,
+}: {
+  rows: StalledOrder[];
+  totalCount: number;
+  reliable: boolean;
+  rowLimit: number;
+  onShowMore: () => void;
+  onSelectCustomer: (customerId: number | null) => void;
+}) {
+  const visible = rows.slice(0, rowLimit);
+  return (
+    <TableShell
+      title="Stalled orders"
+      icon={Boxes}
+      count={visible.length}
+      totalCount={totalCount}
+      warning={
+        !reliable
+          ? "The backend marks this signal unreliable: the ERP exposes no order status timestamps, so these rows are derived from invoice age only. Do not use them for decisions."
+          : undefined
+      }
+    >
+      {rows.length === 0 ? (
+        <EmptyNote>No orders match the current stalled threshold.</EmptyNote>
+      ) : (
+        <>
+          <table className="w-full min-w-[760px] text-left text-sm">
+            <thead>
+              <tr className="border-b border-border text-xs text-muted">
+                <th className="px-4 py-3 font-medium">Order</th>
+                <th className="px-4 py-3 font-medium">Customer</th>
+                <th className="px-4 py-3 font-medium">Status</th>
+                <th className="px-4 py-3 text-right font-medium">Amount</th>
+                <th className="px-4 py-3 text-right font-medium">Invoice age</th>
+                <th className="px-4 py-3 font-medium">Invoice date</th>
+                <th className="px-4 py-3 font-medium">Rep</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {visible.map((order, index) => (
+                <tr key={order.id ?? `${order.inv_ref ?? "order"}-${index}`}>
+                  <td className="px-4 py-3">
+                    <p className="font-medium">{order.inv_ref || "—"}</p>
+                    <p className="mt-1 text-xs text-muted">ID {order.id ?? "—"}</p>
+                  </td>
+                  <td className="px-4 py-3">
+                    <CustomerCell customer={order.customer} onSelectCustomer={onSelectCustomer} />
+                  </td>
+                  <td className="px-4 py-3 text-muted">
+                    {order.status_label || "Unknown"} ·{" "}
+                    {order.payment_status_label || "Payment unknown"}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums">
+                    {formatMoney(order.total_amount)}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums text-muted">
+                    {order.days_invoice_age}d
+                  </td>
+                  <td className="px-4 py-3 text-muted">{formatDate(order.invoice_date)}</td>
+                  <td className="px-4 py-3 text-muted">{order.sale_rep?.name || "Unassigned"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <ShowMore shown={visible.length} total={totalCount} onShowMore={onShowMore} />
+        </>
+      )}
+    </TableShell>
+  );
+}
+
+function LoadingNote() {
+  return (
+    <p className="rounded-xl border border-border bg-surface px-4 py-6 text-center text-sm text-muted" role="status">
+      Loading signals from the backend...
     </p>
   );
 }
 
-function formatAmount(amount: number) {
-  return amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function ErrorNote({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="rounded-xl border border-red-400/30 bg-red-400/5 px-4 py-5 text-center">
+      <p className="text-sm text-red-300">{message}</p>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="mt-3 rounded-md border border-border px-3 py-1.5 text-xs text-muted hover:bg-surface-raised hover:text-foreground"
+      >
+        Try again
+      </button>
+    </div>
+  );
+}
+
+function EmptyNote({ children }: { children: ReactNode }) {
+  return <p className="px-4 py-8 text-center text-xs text-muted">{children}</p>;
 }

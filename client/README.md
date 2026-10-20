@@ -37,3 +37,38 @@ The backend uses LangGraph's native `interrupt()` function to pause execution be
 1.  When a user requests an action via `/api/chat`, the backend may return a status payload such as `{"status": "paused_for_approval", "thread_id": "12345", "action_details": "..."}`.
 2.  The frontend must catch this specific status and render a pending card in the Approval Inbox component[cite: 3].
 3.  When the user clicks "Approve", the frontend sends a POST request to `/api/approve` with the `thread_id` so the backend can resume the exact workflow state[cite: 2, 3].
+## 5. Integration status (implemented frontend)
+
+The frontend now calls the real FastAPI routes and has no mock-data fallback. The
+API base URL defaults to `http://localhost:8000` and can be overridden with
+`NEXT_PUBLIC_API_BASE_URL`.
+
+| UI surface | Backend route | Notes |
+| :--- | :--- | :--- |
+| KPI cards, charts, top reps | `GET /api/metrics` + `GET /api/live` | One shared `EventSource` updates every tile from `snapshot` events. |
+| Receivables / pipeline tables | `GET /api/signals?stale_days=&stalled_days=&overdue_days=` | Thresholds are the backend's own query parameters. Tables render 25 rows at a time; totals are never computed in the browser. |
+| Customer context sheet | `GET /api/customers/{id}/context` | Lookup is by numeric customer ID only. |
+| AI review queue | `GET /api/briefing/latest`, `POST /api/agents/run` | Starting a run polls until the new `run_id` is saved, then shows the briefing. |
+| Text chat | `POST /api/chat` (SSE) | Real model deltas: streams `tool`, `token`, `reset` (discard provisional text), `done` and `error` events. |
+| Health badge | `GET /health` | Shows MongoDB state, database name and whether the scheduler is enabled. |
+
+### Backend pieces that are missing or incomplete
+
+These are surfaced in the UI rather than simulated:
+
+* **No approval endpoint.** `POST /api/approve` returns 404 and there is no LangGraph
+  `interrupt()` in `server/app`. The review queue is therefore read-only: it drafts
+  messages and lets a reviewer copy them; nothing is sent or written to the ERP.
+* **No voice endpoint.** `POST /api/voice` returns 404. The voice tab explains the
+  required STT/TTS contract instead of pretending to transcribe.
+* **No list endpoints** for all orders, quotes, leads or users, and no customer
+  search. The dashboard shows the signal-derived rows the backend exposes and looks
+  up customers by ID.
+* **No authentication or JWT.** CORS only allows `http://localhost:3000` and
+  `http://127.0.0.1:3000`; a deployed origin needs backend/Caddy configuration.
+* **No pagination on `/api/signals`.** The response includes every stalled order
+  (~1.3 MB in the current data), even though the backend marks that signal unreliable;
+  the client only renders a window of rows.
+* **Snapshot freshness.** `/api/metrics` and the SSE `snapshot` event are produced by
+  the scheduler (`REFRESH_MINUTES`), while `/api/signals` is recomputed per request,
+  so the two can disagree slightly between cycles.

@@ -61,22 +61,28 @@ export function SystemHealthBadge() {
 
   const label =
     healthState.status === "checking"
-      ? "Checking..."
+      ? "Checking backend..."
       : healthState.status === "unavailable"
-        ? "API Offline (Mock Mode)"
-        : "API Online";
+        ? "Backend unreachable"
+        : healthState.status === "degraded"
+          ? "Backend degraded"
+          : "Backend online";
   const indicatorClass =
-    healthState.status === "unavailable"
-      ? "bg-amber-400"
+    healthState.status === "unavailable" || healthState.status === "degraded"
+      ? "bg-red-400"
       : healthState.status === "checking"
         ? "bg-amber-300"
         : "bg-emerald-400";
   const detail =
     healthState.status === "unavailable"
       ? healthState.error
-      : healthState.status === "ok" || healthState.status === "degraded"
-        ? `Database: ${healthState.health.database}`
-        : undefined;
+      : healthState.status === "checking"
+        ? undefined
+        : [
+            `MongoDB: ${healthState.health.mongo ? "ok" : "unavailable"}`,
+            `Database: ${healthState.health.database}`,
+            `Scheduler: ${healthState.health.scheduler ? "on" : "off"}`,
+          ].join(" · ");
 
   return (
     <div

@@ -41,26 +41,30 @@ export function CustomerContextPanel({
   useEffect(() => {
     if (selectedCustomerId === null) return;
 
+    let isActive = true;
     const requestId = ++requestIdRef.current;
+
     fetchCustomerContext(selectedCustomerId)
       .then((context) => {
-        if (requestId === requestIdRef.current) {
+        if (isActive && requestId === requestIdRef.current) {
           setCustomer(context);
         }
       })
       .catch((error: unknown) => {
-        console.error("Unable to load customer context.", error);
-        if (requestId === requestIdRef.current) {
-          setErrorMessage(
-            error instanceof Error ? error.message : "Customer context could not be loaded.",
-          );
-        }
+        if (!isActive || requestId !== requestIdRef.current) return;
+        setErrorMessage(
+          error instanceof Error ? error.message : "Customer context could not be loaded.",
+        );
       })
       .finally(() => {
-        if (requestId === requestIdRef.current) {
+        if (isActive && requestId === requestIdRef.current) {
           setIsLoading(false);
         }
       });
+
+    return () => {
+      isActive = false;
+    };
   }, [selectedCustomerId]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -82,7 +86,9 @@ export function CustomerContextPanel({
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border px-5 py-4">
         <div>
           <h2 id="customer-context-title" className="font-semibold">Customer context</h2>
-          <p className="mt-1 text-xs text-muted">Search by the backend customer ID</p>
+          <p className="mt-1 text-xs text-muted">
+            Look up by the backend customer ID. There is no customer search endpoint.
+          </p>
         </div>
         <form onSubmit={handleSubmit} className="flex w-full gap-2 sm:w-auto">
           <label className="sr-only" htmlFor="customer-id">Customer ID</label>
@@ -265,8 +271,19 @@ function CountList({ counts }: { counts: Record<string, number> }) {
   );
 }
 
+function formatDate(value: string | null): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
 function DateRange({ first, last }: { first: string | null; last: string | null }) {
-  return <p>Dates: {first || "—"} to {last || "—"}</p>;
+  return <p>Dates: {formatDate(first)} to {formatDate(last)}</p>;
 }
 
 function LeadSummary({ title, values }: { title: string; values: Record<string, unknown> }) {
@@ -306,12 +323,21 @@ function StatusBadge({ label, variant = "default" }: { label: string; variant?: 
 }
 
 function formatAmount(amount: number) {
-  return amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const whole = Number.isInteger(amount);
+  return amount.toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: whole ? 0 : 2,
+    maximumFractionDigits: whole ? 0 : 2,
+  });
 }
 
 function formatUnknown(value: unknown): string {
   if (value === null || value === undefined || value === "") return "—";
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+  if (typeof value === "string") {
+    return /^\d{4}-\d{2}-\d{2}T/.test(value) ? formatDate(value) : value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
     return String(value);
   }
   return JSON.stringify(value) ?? "—";

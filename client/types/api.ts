@@ -1,3 +1,6 @@
+// Types mirror the Pydantic / JSON models served by the FastAPI backend
+// (server/app/schemas/*.py and server/app/services/metrics.py).
+
 export interface SaleRep {
   id: number | null;
   name: string | null;
@@ -95,6 +98,63 @@ export interface SignalsReport {
   summary: SignalsSummary;
 }
 
+export interface SignalsQuery {
+  staleDays?: number;
+  stalledDays?: number;
+  overdueDays?: number;
+}
+
+// GET /api/metrics and the `snapshot` event from GET /api/live
+// (server/app/services/metrics.py: build_snapshot_from_docs)
+export interface RepMetric {
+  rep_id: number;
+  name: string;
+  total: number;
+  count: number;
+  total_display: string;
+}
+
+export interface QuotesPerDay {
+  date: string;
+  count: number;
+}
+
+export interface RevenuePerDay {
+  date: string;
+  total: number;
+  total_display: string;
+}
+
+export interface ScannedCounts {
+  quotes: number;
+  orders: number;
+  payments: number;
+}
+
+export interface DashboardSnapshot {
+  generated_at: string;
+  revenue_today: number;
+  revenue_today_display: string;
+  revenue_month_to_date: number;
+  revenue_month_to_date_display: string;
+  revenue_last_7_days: number;
+  revenue_last_7_days_display: string;
+  payments_count_today: number;
+  open_quotes_count: number;
+  open_quotes_value: number;
+  open_quotes_value_display: string;
+  unpaid_total: number;
+  unpaid_count: number;
+  unpaid_total_display: string;
+  overdue_total: number;
+  overdue_count: number;
+  overdue_total_display: string;
+  top_reps_this_month: RepMetric[];
+  quotes_per_day: QuotesPerDay[];
+  revenue_per_day: RevenuePerDay[];
+  scanned: ScannedCounts;
+}
+
 export interface Contact {
   email: string | null;
   phone: string | null;
@@ -148,10 +208,12 @@ export interface CustomerContext {
   notes: string[];
 }
 
+// GET /health (server/app/main.py)
 export interface HealthResponse {
   status: "ok" | "degraded";
   mongo: boolean;
   database: string;
+  scheduler: boolean;
 }
 
 export interface ChatRequest {
@@ -176,9 +238,16 @@ export interface ChatErrorEvent {
   message: string;
 }
 
+// Sent when provisional streamed text must be discarded (for example the model
+// started answering and then decided to call a tool instead).
+export interface ChatResetEvent {
+  reason?: string;
+}
+
 export type ChatStreamEvent =
   | { event: "tool"; data: ChatToolEvent }
   | { event: "token"; data: ChatTokenEvent }
+  | { event: "reset"; data: ChatResetEvent }
   | { event: "done"; data: ChatDoneEvent }
   | { event: "error"; data: ChatErrorEvent };
 
@@ -193,7 +262,12 @@ export interface NegotiationOutput {
   evidence?: string;
   quote_id?: number;
   quote_amount?: number;
-  likely_reason?: "price" | "no_response" | "new_customer_no_history" | "repeat_customer_slow" | "unclear";
+  likely_reason?:
+    | "price"
+    | "no_response"
+    | "new_customer_no_history"
+    | "repeat_customer_slow"
+    | "unclear";
   tactic?: "follow_up" | "adjust_price" | "bundle_offer" | "let_go";
   message_draft?: string | null;
   flags?: string[];
@@ -243,6 +317,12 @@ export interface AgentRunCounts {
   cached: number;
 }
 
+export interface AgentUsage {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+}
+
 export interface AgentRunStarted {
   run_id: string;
   status: "started";
@@ -252,11 +332,12 @@ export interface AgentRunBriefing {
   run_id: string;
   started_at: string;
   finished_at: string;
+  finished_epoch?: number;
   counts: AgentRunCounts;
   negotiation: NegotiationOutput[];
   collections: CollectionsOutput[];
   master: MasterBriefing | null;
-  usage: Record<string, number> | null;
+  usage: AgentUsage | null;
   errors: string[];
 }
 
@@ -266,3 +347,22 @@ export interface EmptyAgentBriefing {
 }
 
 export type LatestBriefingResponse = AgentRunBriefing | EmptyAgentBriefing;
+
+// SSE events from GET /api/live (server/app/api/live.py + scheduler.py)
+export interface LiveErrorPayload {
+  message?: string;
+  trigger?: string;
+  run_id?: string;
+  error?: string;
+}
+
+export type LiveStreamEvent =
+  | { event: "snapshot"; data: DashboardSnapshot }
+  | { event: "briefing"; data: AgentRunBriefing | null }
+  | { event: "error"; data: LiveErrorPayload };
+
+export type LiveConnectionStatus =
+  | "connecting"
+  | "live"
+  | "reconnecting"
+  | "offline";

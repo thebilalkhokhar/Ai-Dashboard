@@ -50,6 +50,13 @@ export function ChatInterface() {
               : entry,
           ),
         );
+      } else if (streamEvent.event === "reset") {
+        setActiveTool("");
+        setMessages((currentMessages) =>
+          currentMessages.map((entry) =>
+            entry.id === assistantMessageId ? { ...entry, content: "" } : entry,
+          ),
+        );
       } else if (streamEvent.event === "done") {
         setActiveTool("");
         setMessages((currentMessages) =>
