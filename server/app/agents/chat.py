@@ -15,7 +15,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
 from app import db as app_db
-from app.agents.chat_tools import CHAT_TOOL_MAP, CHAT_TOOLS, invoke_tool
+from app.agents.chat_tools import CHAT_TOOL_MAP, CHAT_TOOLS, format_money, invoke_tool
 from app.agents.graph import _walk_numbers, invented_amounts
 from app.agents.llm import add_usage, build_model, empty_usage, usage_of
 from app.config import settings
@@ -29,24 +29,42 @@ Answer only from tool results returned during this turn. You may use prior
 conversation messages to understand references, but do not use their facts as
 current evidence. You must call tools to retrieve business numbers; Python
 tools do all math and counting, and you must copy their numbers without
-calculating or estimating. Write counts as numerals and format every money
-amount with a leading $ copied from a tool result. If the data does not contain the answer (including
-artwork, shipping, order notes, or line items), say so plainly instead of
-guessing. Be concise. Reply in the same language the user writes in: English,
-Urdu, or Roman Urdu. Never propose or perform ERP writes, approvals, messages,
-or other external actions. For questions about whether artwork, shipping,
-order notes, or line items are tracked, call get_signals_summary and state
-which requested fields are listed as unavailable. Do not offer a follow-up
-data pull or imply that missing fields can be retrieved. Match the user's
-language and script: English gets English, Urdu gets Urdu script, and Roman
-Urdu gets Roman Urdu, even when the business terms are English. Words such as
-"ka", "kya", and "hai" indicate Roman Urdu. For a named customer's status,
-first call find_customer,
-then call get_customer_context for the returned customer ID; never answer a
-customer-specific question from get_signals_summary. For a general customer
-status, report the quote and order counts, amounts, payment status, and
-received-payment total. Omit first_at/last_at fields and empty arrays unless
-the user asks for them."""
+calculating or estimating. Tool results already format money; copy each money
+string exactly, including its $ sign and separators. Counts are plain
+integers. Start with exactly one plain sentence that directly answers the
+question, followed by at most three short supporting lines. Name the person
+or customer and include the date range when relevant. Do not use raw field
+names, or include an "As of" date unless the user asked about dates. If the
+data does not contain an answer (including artwork, shipping, order notes, or
+line items), say so plainly without guessing. Never propose or perform ERP
+writes, approvals, messages, or other external actions. For questions about
+whether artwork, shipping, order notes, or line items are tracked, call
+get_signals_summary and describe the missing information in plain language.
+Do not offer a follow-up data pull. Match the user's language and script:
+English gets English; Urdu script gets Urdu script; Roman Urdu gets wholly
+Roman Urdu, including every sentence and supporting line. Preserve names,
+counts, dates, and $ amounts as written. Words such as "ka", "kya", and
+"hai" indicate Roman Urdu. For Roman Urdu, write natural Latin-script Urdu;
+translate headings and labels as well as sentences. Use labels such as
+"Quotes ki tadaad", "Orders ki tadaad", "ada hui raqam", and "baqi raqam";
+do not start supporting lines with English labels such as "Quotes:",
+"Orders:", "amount paid", or "balance". Use concise phrasing such as
+"Pure 7 ka status: 27 quotes hain; 24 orders mein $147,296 ada hue aur
+$585,260 baqi hai." Translate descriptive status values too: "Estimate"
+as "andazati", "Quote Created" as "quote banaya gaya", "No payment
+recorded" as "payment darj nahi", and "Paid" as "ada shuda". Do not repeat
+the same amount. Avoid awkward literal translations. For a named customer's
+status, first call find_customer, then call get_customer_context for the returned customer ID;
+never answer a customer-specific question from get_signals_summary. For a
+general customer status, report the useful quote and order counts, amounts,
+payment status, and received-payment total. Omit raw date fields and empty
+arrays unless the user asks for them. When asked who owes the most and about
+their payments, call get_top_unpaid, then find_customer for that customer,
+then get_customer_context; distinguish payment records from amounts marked
+paid on orders. For that question, include payment record count and total,
+as well as the order count, amount paid on orders, and order balance. If the
+payment-record total differs from the order-record amount paid, state both
+as stored; do not answer only with the unpaid invoice list."""
 
 
 class ChatState(TypedDict, total=False):
@@ -70,6 +88,9 @@ def trim_turns(turns: list[dict], limit: int = MAX_STORED_TURNS) -> list[dict]:
 
 def validate_numeric_claims(text: str, tool_results: list[dict]) -> list[str]:
     """Reject unsupported dollar amounts and other numeric claims in the answer."""
+    if not re.search(r"(?<!\w)\d[\d,]*(?:\.\d+)?", text or ""):
+        return []
+
     payload = {"tool_results": tool_results}
     errors = [f"unsupported amount {amount:g}" for amount in invented_amounts(text, payload)]
 
@@ -89,7 +110,24 @@ def validate_numeric_claims(text: str, tool_results: list[dict]) -> list[str]:
         value = float(raw_value.replace(",", ""))
         if not any(abs(value - found) < 0.005 for found in allowed):
             errors.append(f"unsupported number {value:g}")
+
+    # Currency claims must match both a tool value and the Python format sent
+    # to the model (for example, $2,379.50 rather than $2379.5).
+    for match in re.finditer(r"\$\s*(-?[\d,]+(?:\.\d+)?)", text or ""):
+        value = float(match.group(1).replace(",", ""))
+        expected = f"${int(value):,}" if value == int(value) else f"${value:,.2f}"
+        if match.group(0).replace(" ", "") != expected:
+            errors.append(f"format amount as {expected}")
     return list(dict.fromkeys(errors))
+
+
+def _format_answer_money(text: str) -> str:
+    """Normalize currency punctuation in model text before numeric validation."""
+    return re.sub(
+        r"\$\s*(-?[\d,]+(?:\.\d+)?)",
+        lambda match: format_money(match.group(1)),
+        text or "",
+    )
 
 
 def _fallback_text(user_message: str) -> str:
@@ -180,7 +218,7 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
                     )
                 continue
 
-            final_text = _message_text(response)
+            final_text = _format_answer_money(_message_text(response))
             if calls and not final_text:
                 final_text = _fallback_text(_last_user_text(messages))
             errors = validate_numeric_claims(final_text, results)
