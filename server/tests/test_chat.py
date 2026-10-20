@@ -62,12 +62,14 @@ class FakeModel:
     def __init__(self, responses):
         self.responses = deque(responses)
         self.bind_count = 0
+        self.seen_messages = []
 
     def bind_tools(self, tools, **kwargs):
         self.bind_count += 1
         return self
 
     async def ainvoke(self, messages):
+        self.seen_messages.append(messages)
         return self.responses.popleft()
 
 
@@ -97,6 +99,16 @@ async def test_tool_arguments_are_pydantic_validated_and_bounded():
 
 
 @pytest.mark.asyncio
+async def test_tool_results_format_money_and_keep_counts_as_integers():
+    async def read_tool(database=None):
+        return {"balance": 357500.0, "total_amount": 2379.5, "count": 3.0}
+
+    tool = ChatTool("format_read", "Return fixed values", EmptyArgs, read_tool)
+    result = await invoke_tool("format_read", {}, registry={"format_read": tool})
+    assert result == {"balance": "$357,500", "total_amount": "$2,379.50", "count": 3}
+
+
+@pytest.mark.asyncio
 async def test_revenue_tool_filters_dates_and_sums_in_python():
     db = FakeDatabase(
         payments_flat=FakeCollection(
@@ -113,7 +125,7 @@ async def test_revenue_tool_filters_dates_and_sums_in_python():
         database=db,
     )
     assert result["payment_count"] == 1
-    assert result["total_payments"] == 120.5
+    assert result["total_payments"] == "$120.50"
 
 
 @pytest.mark.asyncio
@@ -205,3 +217,22 @@ def test_count_guard_only_accepts_counts_present_in_tool_results():
     assert validate_numeric_claims("There are 3 stale quotes.", results) == []
     assert validate_numeric_claims("There are 8 stale quotes.", results)
     assert validate_numeric_claims("Revenue is 900.00.", results)
+    assert validate_numeric_claims("The order data does not include artwork status.", results) == []
+
+
+@pytest.mark.asyncio
+async def test_prompt_requires_wholly_roman_urdu_replies():
+    model = FakeModel([plain_answer("The answer is available.")])
+    await execute_chat("Pure 7 ka kya status?", model=model, tools=[])
+    prompt = " ".join(model.seen_messages[0][0].content.split())
+    assert "Roman Urdu gets wholly Roman Urdu" in prompt
+    assert "including every sentence and supporting line" in prompt
+
+
+@pytest.mark.asyncio
+async def test_prompt_requires_urdu_script_replies():
+    model = FakeModel([plain_answer("جواب موجود ہے۔")])
+    await execute_chat("پیور 7 کی کیا صورتحال ہے؟", model=model, tools=[])
+    prompt = " ".join(model.seen_messages[0][0].content.split())
+    assert "Urdu script gets Urdu script" in prompt
+    assert "including every sentence and supporting line" in prompt

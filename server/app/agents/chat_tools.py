@@ -18,6 +18,34 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app import db as app_db
 from app.services import processors
 
+_CURRENCY_TEXT = re.compile(r"\$\s*(-?[\d,]+(?:\.\d+)?)")
+
+
+def format_money(value: Any) -> str:
+    amount = round(processors.to_number(value), 2)
+    if amount == int(amount):
+        return f"${int(amount):,}"
+    return f"${amount:,.2f}"
+
+
+def format_chat_result(value: Any, key: str = "") -> Any:
+    """Format money and counts before a tool result is sent to the model."""
+    lowered = key.casefold()
+    is_money = "amount" in lowered or "balance" in lowered or lowered.endswith("_value") or lowered == "total_payments"
+    is_count = lowered == "count" or lowered.endswith("_count") or lowered == "total_count"
+
+    if isinstance(value, dict):
+        return {name: format_chat_result(item, name) for name, item in value.items()}
+    if isinstance(value, list):
+        return [format_chat_result(item, key) for item in value]
+    if is_money and isinstance(value, (int, float, str)) and value is not None:
+        return format_money(value)
+    if is_count and isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value)
+    if isinstance(value, str):
+        return _CURRENCY_TEXT.sub(lambda match: format_money(match.group(1)), value)
+    return value
+
 
 class ToolArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -254,14 +282,35 @@ async def get_top_unpaid(limit: int = 5, database: Any = None) -> dict:
                 "customer_id": customer.get("id"),
                 "company_name": customer.get("company_name"),
                 "unpaid_invoice_count": 0,
+                "overdue_invoice_count": 0,
                 "total_balance": 0.0,
             },
         )
         group["unpaid_invoice_count"] += 1
+        group["overdue_invoice_count"] += int(bool(row["overdue"]))
         group["total_balance"] += row["balance"]
     largest_customer_debt = max(debts.values(), key=lambda item: item["total_balance"], default=None)
     if largest_customer_debt is not None:
         largest_customer_debt["total_balance"] = round(largest_customer_debt["total_balance"], 2)
+        customer_id = largest_customer_debt.get("customer_id")
+        customer_query = {"$or": [{"customer.id": customer_id}, {"customer_id": customer_id}]}
+        payments = await db.payments_flat.find(customer_query).to_list(200_000)
+        largest_customer_debt["payments"] = {
+            "count": len(payments),
+            "total_amount": round(sum(processors.to_number(row.get("amount")) for row in payments), 2),
+        }
+        customer_orders = [
+            row for row in orders
+            if _same_id(
+                (row.get("customer") or {}).get("id", row.get("customer_id")),
+                customer_id,
+            )
+        ]
+        largest_customer_debt["order_history"] = {
+            "count": len(customer_orders),
+            "amount_paid": round(sum(processors.to_number(row.get("amount_paid")) for row in customer_orders), 2),
+            "balance": round(sum(processors.to_number(row.get("total_amount")) - processors.to_number(row.get("amount_paid")) for row in customer_orders), 2),
+        }
     fields = (
         "id", "inv_ref", "status_label", "payment_status_label", "total_amount",
         "amount_paid", "balance", "overdue", "invoice_date", "customer", "sale_rep",
@@ -370,4 +419,4 @@ async def invoke_tool(name: str, raw_args: dict, database: Any = None, registry:
     result = await tool.function(**validated.model_dump(), database=database)
     if not isinstance(result, dict):
         result = {"result": result}
-    return _bounded(result)
+    return _bounded(format_chat_result(result))
