@@ -109,7 +109,9 @@ def good_factory():
                     "customer_id": history["customer_id"],
                     "customer_name": history["company_name"],
                     "quote_id": q["id"],
-                    "quote_amount": q["amount"],
+                    # the model copies the amount it reads ('$2,000.00') and the
+                    # schema stores it as a number, exactly like a real answer
+                    "quote_amount": to_number(q["amount"]),
                     "likely_reason": "new_customer_no_history" if is_new else "repeat_customer_slow",
                     "tactic": "follow_up",
                     "message_draft": (
@@ -128,7 +130,7 @@ def good_factory():
                     "customer_id": history["customer_id"],
                     "customer_name": history["company_name"],
                     "invoice_id": inv["id"],
-                    "balance": inv["balance"],
+                    "balance": to_number(inv["balance"]),
                     "approach": "firm_nudge" if inv.get("overdue") else "soft_reminder",
                     "reason": f"balance ${inv['balance']} on file, overdue={inv.get('overdue')}",
                     "message_draft": f"Friendly reminder: balance ${to_number(inv['balance']):,.2f} is open.",
@@ -171,6 +173,46 @@ def bad_draft_factory():
             def answer(payload: dict) -> dict:
                 data = original_answer(payload)
                 data["message_draft"] = "Special price: only $9999.00 today!"
+                return data
+
+            return FakeCallerForTest(NegotiationOutput, answer)
+        return caller
+
+    return factory
+
+
+def contact_bad_factory():
+    """Valid copies everywhere EXCEPT the negotiation draft invents a phone."""
+    base = good_factory()
+
+    def factory(k: str):
+        caller = base(k)
+        if k == "negotiation":
+            original_answer = caller._answer
+
+            def answer(payload: dict) -> dict:
+                data = original_answer(payload)
+                data["message_draft"] += " Call 818-225-9999 to discuss."
+                return data
+
+            return FakeCallerForTest(NegotiationOutput, answer)
+        return caller
+
+    return factory
+
+
+def first_name_factory():
+    """Negotiation draft greets a person the ERP does not know."""
+    base = good_factory()
+
+    def factory(k: str):
+        caller = base(k)
+        if k == "negotiation":
+            original_answer = caller._answer
+
+            def answer(payload: dict) -> dict:
+                data = original_answer(payload)
+                data["message_draft"] = "Hi Arthur, " + data["message_draft"].split("quote", 1)[-1].strip()
                 return data
 
             return FakeCallerForTest(NegotiationOutput, answer)
@@ -322,6 +364,29 @@ async def test_invented_amount_becomes_needs_review():
     # the invalid item must NOT reach the master brief
     master_customers = doc["master"].get("bullets", [])
     assert len(master_customers) == 3  # master still runs on remaining items
+
+
+@pytest.mark.asyncio
+async def test_invented_phone_becomes_needs_review():
+    database = fresh_db()
+    await run_pipeline(
+        run_id="test-run-phone", database=database, caller_factory=contact_bad_factory(), now_epoch=EPOCH
+    )
+    item = database.agent_runs.saved[0]["negotiation"][0]
+    assert "needs_review" in item["flags"]
+    assert item["message_draft"] is None
+    assert "818-225-9999" in item["rejected_reason"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_greeting_name_becomes_company_greeting():
+    database = fresh_db()
+    await run_pipeline(
+        run_id="test-run-greeting", database=database, caller_factory=first_name_factory(), now_epoch=EPOCH
+    )
+    item = database.agent_runs.saved[0]["negotiation"][0]
+    assert item["flags"] != ["needs_review"]
+    assert item["message_draft"].startswith("Hello ACME team,")
 
 
 @pytest.mark.asyncio

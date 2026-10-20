@@ -109,6 +109,55 @@ def to_number(value: Any) -> float:
         return 0.0
 
 
+# Field names that hold money in the agent payloads. Used to turn every amount
+# into text BEFORE the model sees it, so drafts cannot print "36414.0".
+MONEY_FIELDS = frozenset(
+    {
+        "amount",
+        "quote_amount",
+        "total_amount",
+        "amount_paid",
+        "balance",
+        "total_paid",
+        "open_orders_value",
+        "open_quotes_value",
+        "unpaid_balance_total",
+    }
+)
+
+
+def money_text(value: Any) -> str:
+    """Money as the agents/chat write it: '$56,600' or '$2,379.50'.
+
+    Whole dollars lose the cents; anything with cents keeps two decimals.
+    """
+    amount = to_number(value)
+    sign = "-" if amount < 0 else ""
+    amount = abs(amount)
+    if amount == int(amount):
+        return f"{sign}${int(amount):,}"
+    return f"{sign}${amount:,.2f}"
+
+
+def format_money_tree(value: Any) -> Any:
+    """Copy of a payload with every money field formatted as text.
+
+    Only `MONEY_FIELDS` are touched, so counts, IDs, ages and booleans stay
+    numeric for the cards and for the pipeline's own checks.
+    """
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if key in MONEY_FIELDS and isinstance(item, (int, float)) and not isinstance(item, bool):
+                result[key] = money_text(item)
+            else:
+                result[key] = format_money_tree(item)
+        return result
+    if isinstance(value, list):
+        return [format_money_tree(item) for item in value]
+    return value
+
+
 def age_days(start: Optional[datetime], now: datetime) -> Optional[float]:
     """Age in exact (float) days between two aware datetimes."""
     if start is None:

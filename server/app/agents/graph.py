@@ -32,7 +32,7 @@ from langgraph.graph import END, START, StateGraph
 from app import db as app_db
 from app.config import settings
 from app.services import processors
-from app.services.processors import to_number
+from app.services.processors import money_text, to_number
 from app.services.erp_client import ERPClient
 from app.agents.llm import (
     FakeCaller,
@@ -102,8 +102,13 @@ def _walk_numbers(node: Any, found: set[float]) -> None:
         found.add(float(node))
         return
     if isinstance(node, str):
+        # formatted money from the payload ('$56,600', '$2,379.50') is a legal
+        # money reference: the validator must accept it verbatim
         text = node.strip().replace(",", "").replace("$", "").strip()
-        try:  # plain numeric strings are legal money references too
+        for suffix in ("dollars", "dollar", "usd"):
+            if text.lower().endswith(suffix):
+                text = text[: -len(suffix)].strip()
+        try:
             found.add(float(text))
         except ValueError:
             pass
@@ -123,10 +128,9 @@ _DOLLAR_RE = re.compile(r"\$\s?([\d][\d,]*(?:\.\d+)?)|([\d][\d,]*(?:\.\d+)?)\s(?
 
 
 def invented_amounts(draft: str, payload: dict) -> list[float]:
-    """Dollar amounts in the draft whose value is NOT anywhere in the payload.
+    """Dollar amounts in the draft whose value is NOT a money value in the payload.
     The pipeline runs this on every message_draft."""
-    allowed: set[float] = set()
-    _walk_numbers(payload, allowed)
+    allowed = money_values(payload)
     bad: list[float] = []
     for match in _DOLLAR_RE.finditer(draft or ""):
         value = float((match.group(1) or match.group(2)).replace(",", ""))
@@ -135,11 +139,164 @@ def invented_amounts(draft: str, payload: dict) -> list[float]:
     return bad
 
 
+# ---------------------------------------------------------------------------
+# text rules on model output (money format, contact details, greetings)
+# ---------------------------------------------------------------------------
+
+# money written with a '$' or with decimal cents ("$36414.0", "28869.0");
+# bare integers (invoice numbers, ages, counts) never match
+_MONEY_TOKEN_RE = re.compile(r"\$\s?(\d[\d,]*(?:\.\d+)?)|(\d[\d,]*\.\d+)")
+
+_FORMATTED_MONEY_RE = re.compile(r"^-?\$\s?\d[\d,]*(?:\.\d+)?$")
+_FORMATTED_MONEY_TOKEN_RE = re.compile(r"\$\s?\d[\d,]*(?:\.\d+)?")
+
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_URL_RE = re.compile(r"(?:https?://|www\.)[^\s)>\"]+")
+_PHONE_RE = re.compile(r"(?:\+?1[\s.\-]?)?(?:\(\d{3}\)|\d{3})[\s.\-]?\d{3}[\s.\-]?\d{4}")
+_GREETING_RE = re.compile(
+    r"^(\s*)(hi|hello|hey|dear)\s+([A-Za-z][A-Za-z'\-]+)(\s+team)?", re.I
+)
+# a raw float like 36414.0 is unformatted money; '$36,414' is fine
+_UNFORMATTED_MONEY_RE = re.compile(r"\d{3,}\.\d(?!\d)")
+
+
+def money_values(payload: Any) -> set[float]:
+    """Every REAL money value in the payload (numbers or '$56,600' text).
+
+    Only money fields and money that code already formatted inside text count.
+    Days, counts and IDs are excluded, so '39.3 days late' can never become
+    '$39.30' and cannot pass the money validator as if it were an amount.
+    """
+    found: set[float] = set()
+
+    def add(value: Any) -> None:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            found.add(float(value))
+        elif isinstance(value, str) and _FORMATTED_MONEY_RE.match(value.strip()):
+            found.add(to_number(value))
+
+    def walk(node: Any, is_money: bool) -> None:
+        if isinstance(node, dict):
+            for key, item in node.items():
+                walk(item, key in processors.MONEY_FIELDS)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, is_money)
+        elif isinstance(node, str):
+            for match in _FORMATTED_MONEY_TOKEN_RE.finditer(node):
+                found.add(to_number(match.group(0)))
+            if is_money:
+                add(node)
+        elif is_money:
+            add(node)
+
+    walk(payload, False)
+    return found
+
+
+def normalise_money_text(text: str, payload: dict) -> str:
+    """Rewrite raw / half-formatted money in model text as '$56,600'.
+
+    Only numbers that carry a '$' or decimals AND match a real money value in
+    the payload are touched, so invoice numbers, days and counts stay alone.
+    """
+    if not text:
+        return text
+    allowed = money_values(payload)
+
+    def replace(match: "re.Match") -> str:
+        raw = (match.group(1) or match.group(2) or "").replace(",", "")
+        try:
+            value = float(raw)
+        except ValueError:
+            return match.group(0)
+        if any(abs(value - known) < 0.005 for known in allowed):
+            return money_text(value)
+        return match.group(0)
+
+    return _MONEY_TOKEN_RE.sub(replace, text)
+
+
+def invented_contacts(draft: str, payload: dict) -> list[str]:
+    """Phones / emails / URLs in a draft that are NOT verbatim input data.
+
+    Copying contact details is fine; inventing one is not. The string must
+    appear character for character in the item's payload.
+    """
+    if not draft:
+        return []
+    haystack = json.dumps(payload, sort_keys=True, default=str)
+    found: list[str] = []
+    for regex in (_EMAIL_RE, _URL_RE, _PHONE_RE):
+        for match in regex.finditer(draft):
+            token = match.group(0).rstrip(".,;:)")
+            if token and token not in haystack and token not in found:
+                found.append(token)
+    return found
+
+
+def sanitise_greeting(draft: str, payload: dict) -> str:
+    """A greeting first name must come from the input contact data.
+
+    Otherwise the greeting becomes 'Hello <company> team', which cannot be
+    wrong about who is reading it.
+    """
+    if not draft:
+        return draft
+    match = _GREETING_RE.match(draft)
+    if not match:
+        return draft
+    name = match.group(3)
+    history = payload.get("customer_history") or {}
+    contact = history.get("contact") or {}
+    contact_blob = " ".join(str(value) for value in contact.values() if value)
+    company = str(history.get("company_name") or "").strip()
+    first_word = company.split()[0] if company else ""
+    # 'Hello Polkadot team' greets the company, not a person - leave it
+    if first_word and name.lower() == first_word.lower():
+        return draft
+    if re.search(rf"\b{re.escape(name)}\b", contact_blob, re.I):
+        return draft  # the name really is in the contact data
+    neutral = f"Hello {company} team" if company else "Hello"
+    # match.end() also swallows a trailing ' team', so nothing is duplicated
+    return neutral + draft[match.end():]
+
+
+def has_unformatted_money(text: Any) -> bool:
+    """True for raw model money like '36414.0' (False for '$36,414')."""
+    return bool(text) and bool(_UNFORMATTED_MONEY_RE.search(str(text)))
+
+
+def cache_text_is_clean(item: dict) -> bool:
+    """A cached output may only be reused when its money is already formatted."""
+    return not any(
+        has_unformatted_money(item.get(field))
+        for field in ("message_draft", "reason", "evidence")
+    )
+
+
+def normalise_master_output(master: MasterOutput, payload: dict) -> MasterOutput:
+    """Apply the same money format to bullets, priorities and conflicts."""
+    bullets = [normalise_money_text(text, payload) for text in master.bullets]
+    priorities = [
+        priority.model_copy(
+            update={
+                "why": normalise_money_text(priority.why, payload),
+                "suggested_action": normalise_money_text(priority.suggested_action, payload),
+            }
+        )
+        for priority in master.priorities
+    ]
+    conflicts = [normalise_money_text(text, payload) for text in master.conflicts_resolved]
+    return master.model_copy(
+        update={"bullets": bullets, "priorities": priorities, "conflicts_resolved": conflicts}
+    )
+
+
 def master_invented_amounts(master_dict: dict, payload: dict) -> list[float]:
-    """Dollar amounts in the MASTER's bullets/priorities/conflicts that do not
-    appear anywhere in the data Python sent it. Masters must not do math,"""
-    allowed: set[float] = set()
-    _walk_numbers(payload, allowed)
+    """Dollar amounts in the MASTER's bullets/priorities/conflicts that are not
+    money values in the data Python sent it. Masters must not do math,"""
+    allowed = money_values(payload)
     texts = list(master_dict.get("bullets") or [])
     for priority in master_dict.get("priorities") or []:
         texts.extend([str(priority.get("why") or ""), str(priority.get("suggested_action") or "")])
@@ -172,6 +329,8 @@ def cache_lookup(recent_runs: list[dict], items: list[dict], cutoff_epoch: float
                     continue
                 if not item.get("message_draft"):
                     continue  # a draft-less copy (old schema) is not reusable
+                if not cache_text_is_clean(item):
+                    continue  # raw money ('36414.0') -> regenerate once, then cache
                 saved[item_hash] = item
     for item in items:
         if item["input_hash"] in saved:
@@ -179,6 +338,23 @@ def cache_lookup(recent_runs: list[dict], items: list[dict], cutoff_epoch: float
     return {item["input_hash"]: item["cached_output"] for item in items if item.get("cached_output")}
 
 
+
+
+def _hash_ready(value: Any) -> Any:
+    """Formatted money hashes exactly like the number it was built from.
+
+    Without this, switching the payload to '$56,600' would invalidate the
+    whole 24h cache; with it, only the cached items whose text was never
+    formatted regenerate (see cache_text_is_clean).
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        return to_number(text) if _FORMATTED_MONEY_RE.match(text) else value
+    if isinstance(value, dict):
+        return {key: _hash_ready(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_hash_ready(item) for item in value]
+    return value
 
 
 def stable_cache_key(kind: str, payload: dict) -> str:
@@ -217,7 +393,7 @@ def stable_cache_key(kind: str, payload: dict) -> str:
         }
     else:
         stable = payload
-    blob = json.dumps({"kind": kind, "stable": stable}, sort_keys=True, default=str)
+    blob = json.dumps({"kind": kind, "stable": _hash_ready(stable)}, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
@@ -376,7 +552,7 @@ async def _run_one(
     payload = entry["payload"]
     semaphore = getattr(_run_one, "_sema", None) or asyncio.Semaphore(CONCURRENCY)
 
-    async def one_pass() -> Tuple[Any, dict]:
+    async def one_pass() -> Tuple[Any, dict, list[str]]:
         # send the EXACT payload that the input hash covers (no rebuilds)
         caller = caller_factory(kind)
         system = NEGOTIATION_SYSTEM if kind == "negotiation" else COLLECTIONS_SYSTEM
@@ -385,9 +561,27 @@ async def _run_one(
             {"role": "user", "content": json.dumps(payload, default=str)},
         ]
         parsed, usage = await caller.ainvoke(messages)
-        # dollar validation on the draft
-        bad = invented_amounts(getattr(parsed, "message_draft", "") or "", payload)
-        return parsed, usage, bad
+
+        # deterministic cleanups BEFORE validation:
+        # 1) a greeting first name must exist in the contact data
+        parsed.message_draft = sanitise_greeting(
+            getattr(parsed, "message_draft", "") or "", payload
+        )
+        # 2) raw / half formatted money ('36414.0') becomes '$36,414'
+        parsed.message_draft = normalise_money_text(parsed.message_draft, payload)
+        parsed.evidence = normalise_money_text(getattr(parsed, "evidence", "") or "", payload)
+        if hasattr(parsed, "reason"):
+            parsed.reason = normalise_money_text(parsed.reason, payload)
+
+        problems: list[str] = []
+        invented = invented_amounts(parsed.message_draft, payload)
+        if invented:
+            problems.append(f"amounts {invented} are not in the input data")
+        # phone / email / URL must appear verbatim in the item's input
+        contacts = invented_contacts(parsed.message_draft, payload)
+        if contacts:
+            problems.append(f"contact details {contacts} are not in the input data")
+        return parsed, usage, problems
 
     async def guarded() -> dict:
         async with semaphore:
@@ -395,10 +589,15 @@ async def _run_one(
             try:
                 parsed, usage, bad = await one_pass()
                 # defense in depth: the COPIED fields must equal the input too
+                # (payload amounts are formatted strings now - _amount_number parses them)
                 if kind == "negotiation" and abs(getattr(parsed, "quote_amount", -1) - _amount_number(payload["quote"]["amount"])) > 0.005:
-                    bad = bad or [getattr(parsed, "quote_amount", 0.0)]
+                    bad.append(
+                        f"quote_amount {getattr(parsed, 'quote_amount', 0.0)} does not match the input"
+                    )
                 if kind == "collections" and abs(getattr(parsed, "balance", -1) - _amount_number(payload["invoice"]["balance"])) > 0.005:
-                    bad = bad or [getattr(parsed, "balance", 0.0)]
+                    bad.append(
+                        f"balance {getattr(parsed, 'balance', 0.0)} does not match the input"
+                    )
                 regen = 0
                 while bad:
                     if regen >= 1:
@@ -409,16 +608,19 @@ async def _run_one(
                     parsed.approach = "escalate_to_human"
                     parsed.reason = _escalation_reason(payload)
                     parsed.message_draft = _escalation_note(payload)
-                    bad = invented_amounts(parsed.message_draft, payload)
+                    # the escalation note is code-written: still check it like a draft
+                    bad = []
+                    if invented_amounts(parsed.message_draft, payload):
+                        bad.append("the escalation note mentions an amount not in the input")
+                    if invented_contacts(parsed.message_draft, payload):
+                        bad.append("the escalation note mentions contact details not in the input")
                 result["source"] = "agent"
                 async with usage_lock:
                     regen_count[kind] += regen
                 if bad:
                     result["flags"] = ["needs_review"]
                     result["message_draft"] = None
-                    result["rejected_reason"] = (
-                        f"message mentioned amounts {bad} that are not in the input data"
-                    )
+                    result["rejected_reason"] = "; ".join(bad)
                     result.update(
                         {
                             key: getattr(parsed, key)
@@ -530,11 +732,12 @@ async def master_node(state: RunState) -> RunState:
         attempt += 1
         try:
             caller = state["_caller_factory"]("master")
-            parsed, _, usage = await run_master(grouped, master_input, caller)
+            parsed, master_payload_used, usage = await run_master(grouped, master_input, caller)
+            # same money format in bullets / priorities / conflicts
+            parsed = normalise_master_output(parsed, master_payload_used)
             # numbers-only rule extends to the whole brief: no invented totals
-            bad = master_invented_amounts(
-                parsed.model_dump(), {"signals": master_input, "grouped": grouped}
-            )
+            # (validated against the exact formatted payload the master saw)
+            bad = master_invented_amounts(parsed.model_dump(), master_payload_used)
             if not bad or attempt >= 2:
                 break
         except Exception as exc:

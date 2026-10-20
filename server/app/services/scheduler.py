@@ -1,0 +1,431 @@
+"""In-process scheduler for the live dashboard and the event-triggered agents.
+
+Runs as a plain asyncio task inside the FastAPI lifespan - no cron, no worker,
+no extra service. Every REFRESH_MINUTES it does one cycle:
+
+    1. incremental ERP refresh            (app/services/refresh.py)
+    2. build + store + publish snapshot   (Mongo `snapshots`, Redis)
+    3. decide whether the agents run      (hash comparison against the last run)
+    4. daily safety net at AGENT_FULL_RUN_HOUR, with the cache bypassed
+
+Agent runs are event-triggered. After every refresh the current stale-quote
+and unpaid-invoice items are built with graph.load_signals_node (the graph's
+own code, so the hashes are identical to what the pipeline would compute) and
+compared with the hashes stored in the previous agent_runs document. Only when
+something is new or changed does the scheduler call the pipeline once; inside
+the pipeline the existing 24h cache skips every unchanged item. No changes ->
+zero LLM calls.
+
+A Redis lock (`dashboard:scheduler:lock`) makes sure two cycles never overlap.
+Every job has its own try/except: one failure is logged and the loop keeps
+running. Only agent failures publish an "error" event.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import uuid
+from contextlib import suppress
+from datetime import datetime, timezone
+from typing import Any, Callable, Optional
+
+from app import db as app_db
+from app.config import settings
+from app.services import metrics, refresh
+from app.services.erp_client import ERPClient
+from app.services.redis_client import get_redis
+
+log = logging.getLogger("scheduler")
+
+# Redis keys / channel shared with app/api/live.py
+SNAPSHOT_KEY = "dashboard:snapshot"
+UPDATES_CHANNEL = "dashboard:updates"
+LOCK_KEY = "dashboard:scheduler:lock"
+
+
+# ---------------------------------------------------------------------------
+# default dependencies (tests inject fakes instead)
+# ---------------------------------------------------------------------------
+
+
+async def _default_pipeline(**kwargs) -> dict:
+    """Thin wrapper around the existing agent pipeline entry point."""
+    from app.agents.graph import run_pipeline  # noqa: PLC0415 - heavy import
+
+    return await run_pipeline(**kwargs)
+
+
+class DashboardScheduler:
+    """One loop, three jobs, one Redis lock."""
+
+    def __init__(
+        self,
+        database: Any = None,
+        redis: Any = None,
+        refresh_func: Optional[Callable] = None,
+        snapshot_func: Optional[Callable] = None,
+        pipeline_func: Optional[Callable] = None,
+        interval_seconds: Optional[int] = None,
+    ) -> None:
+        self.database = database
+        self.redis = redis
+        self._refresh_func = refresh_func or refresh.run_incremental_refresh
+        self._snapshot_func = snapshot_func or metrics.build_snapshot
+        self._pipeline_func = pipeline_func or _default_pipeline
+        self._interval = interval_seconds
+        self._task: Optional[asyncio.Task] = None
+        self._stop: Optional[asyncio.Event] = None
+        self._last_daily_day: Optional[str] = None  # e.g. "2026-10-20"
+
+    # ----------------------------------------------------------- plumbing
+
+    def _db(self) -> Any:
+        # AsyncDatabase objects cannot be truth-tested, so never use `or` here
+        return self.database if self.database is not None else app_db.get_db()
+
+    def _redis(self) -> Any:
+        return self.redis if self.redis is not None else get_redis()
+
+    def interval_seconds(self) -> int:
+        return int(self._interval or max(1, settings.REFRESH_MINUTES * 60))
+
+    def _lock_ttl(self) -> int:
+        # Longer than a slow cycle (refresh + an agent run) but short enough
+        # that a crashed process does not block the dashboard for long.
+        return max(900, self.interval_seconds() * 3)
+
+    # ---------------------------------------------------------- start/stop
+
+    async def start(self) -> None:
+        if self._task is not None and not self._task.done():
+            return
+        self._stop = asyncio.Event()
+        self._task = asyncio.create_task(self._loop(), name="dashboard-scheduler")
+
+    async def stop(self) -> None:
+        if self._stop is not None:
+            self._stop.set()
+        if self._task is not None:
+            self._task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._task
+            self._task = None
+
+    async def _loop(self) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            started = loop.time()
+            try:
+                await self.run_cycle()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # a bad cycle must never kill the loop
+                log.exception("scheduler cycle failed")
+            # fixed cadence: a slow cycle (a 2 minute agent run) must not push
+            # the next refresh further out than one interval
+            remaining = max(1.0, self.interval_seconds() - (loop.time() - started))
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                raise
+            if self._stop.is_set():
+                return
+
+    # --------------------------------------------------------------- lock
+
+    async def _acquire_lock(self, token: str) -> bool:
+        try:
+            return bool(await self._redis().set(LOCK_KEY, token, nx=True, ex=self._lock_ttl()))
+        except Exception:
+            log.exception("could not reach Redis for the scheduler lock")
+            return False
+
+    async def _release_lock(self, token: str) -> None:
+        try:
+            current = await self._redis().get(LOCK_KEY)
+            if isinstance(current, bytes):
+                current = current.decode()
+            if current == token:  # only the owner releases it
+                await self._redis().delete(LOCK_KEY)
+        except Exception:
+            log.debug("could not release the scheduler lock", exc_info=True)
+
+    # -------------------------------------------------------------- cycle
+
+    async def run_cycle(self, now: Optional[datetime] = None) -> dict:
+        """One refresh + snapshot + agent decision. Never raises."""
+        now = now or datetime.now(timezone.utc)
+        token = str(uuid.uuid4())
+        if not await self._acquire_lock(token):
+            log.info("scheduler: a run is already in progress, skipping this tick")
+            return {"at": now.isoformat(), "skipped": "locked"}
+        try:
+            summary = {
+                "at": now.isoformat(),
+                "refresh": await self._job_refresh(),
+                "snapshot": await self._job_snapshot(now),
+                "agents": await self._job_agents(now),
+            }
+            return summary
+        finally:
+            await self._release_lock(token)
+
+    # --------------------------------------------------------- job: refresh
+
+    async def _job_refresh(self) -> dict:
+        try:
+            return await self._refresh_func(database=self._db())
+        except Exception as exc:
+            log.exception("refresh job failed")
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    # -------------------------------------------------------- job: snapshot
+
+    async def _job_snapshot(self, now: datetime) -> dict:
+        try:
+            snapshot = await self._snapshot_func(database=self._db(), now=now)
+            await self._store_snapshot(snapshot)
+            await self._publish("snapshot", snapshot)
+            return {"ok": True, "generated_at": snapshot.get("generated_at")}
+        except Exception as exc:
+            log.exception("snapshot job failed")
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    async def _store_snapshot(self, snapshot: dict) -> None:
+        await self._db().snapshots.insert_one(dict(snapshot))
+        await self._redis().set(
+            SNAPSHOT_KEY, json.dumps({"event": "snapshot", "data": snapshot}, default=str)
+        )
+
+    # ---------------------------------------------------------- job: agents
+
+    async def _job_agents(self, now: datetime) -> dict:
+        try:
+            if await self._daily_run_due(now):
+                return await self._run_agent("daily_run", now, ignore_cache=True)
+
+            new_quotes, new_invoices = await self._new_items(now)
+            if not new_quotes and not new_invoices:
+                log.info("scheduler: no new or changed items - no agent run")
+                return {"ok": True, "ran": False, "new_count": 0}
+
+            if new_quotes and new_invoices:
+                trigger = "new_quote_and_new_overdue_invoice"
+            elif new_quotes:
+                trigger = "new_quote"
+            else:
+                trigger = "new_overdue_invoice"
+            return await self._run_agent(
+                trigger, now, new_quotes=new_quotes, new_invoices=new_invoices
+            )
+        except Exception as exc:  # trigger evaluation itself broke
+            log.exception("agent trigger check failed")
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    async def _daily_run_due(self, now: datetime) -> bool:
+        """True once a day, from AGENT_FULL_RUN_HOUR (server local time) on.
+
+        The `agent_triggers` check means a restart later in the day does not
+        bill a second full run.
+        """
+        local = now.astimezone()  # system local timezone
+        day_key = local.date().isoformat()
+        if local.hour < int(settings.AGENT_FULL_RUN_HOUR):
+            return False
+        if self._last_daily_day == day_key:
+            return False
+        try:
+            already = await self._db().agent_triggers.find_one(
+                {"trigger": "daily_run", "day": day_key}
+            )
+        except Exception:
+            already = None
+        if already is not None:
+            self._last_daily_day = day_key
+            return False
+        return True
+
+    async def _current_items(self, now: datetime) -> tuple[list[dict], list[dict]]:
+        """Reuse the graph's own loading node so hashes match the pipeline.
+
+        `_erp=None` on purpose: the lead-outcomes ERP calls add nothing to the
+        stable cache keys (those use Mongo-only history counts), and we do not
+        want extra ERP traffic every ten minutes.
+        """
+        from app.agents import graph  # noqa: PLC0415 - heavy import
+
+        state = await graph.load_signals_node(
+            {
+                "run_id": "scheduler-check",
+                "now_epoch": now.timestamp(),
+                "_database": self._db(),
+                "_erp": None,
+                "_use_cache": False,  # we only want the hashes, not cached output
+            }
+        )
+        return state.get("negotiation_input") or [], state.get("collections_input") or []
+
+    async def _previous_hashes(self) -> set[str]:
+        """Every input hash from the most recent completed agent run."""
+        docs = (
+            await self._db()
+            .agent_runs.find({"finished_epoch": {"$exists": True}})
+            .sort("finished_epoch", -1)
+            .to_list(1)
+        )
+        if not docs:
+            return set()
+        run = docs[0]
+        hashes: set[str] = set()
+        for kind in ("negotiation", "collections"):
+            for item in run.get(kind) or []:
+                if item.get("input_hash"):
+                    hashes.add(item["input_hash"])
+        return hashes
+
+    async def _new_items(self, now: datetime) -> tuple[list[dict], list[dict]]:
+        """Items whose input hash the previous run has never seen."""
+        negotiation, collections = await self._current_items(now)
+        previous = await self._previous_hashes()
+        new_quotes = [item for item in negotiation if item.get("input_hash") not in previous]
+        new_invoices = [item for item in collections if item.get("input_hash") not in previous]
+        return new_quotes, new_invoices
+
+    async def _run_agent(
+        self,
+        trigger: str,
+        now: datetime,
+        ignore_cache: bool = False,
+        new_quotes: Optional[list[dict]] = None,
+        new_invoices: Optional[list[dict]] = None,
+    ) -> dict:
+        """One pipeline call + the trigger log + the published briefing."""
+        new_quotes = new_quotes or []
+        new_invoices = new_invoices or []
+        local_day = now.astimezone().date().isoformat()
+        if trigger == "daily_run":
+            self._last_daily_day = local_day
+
+        run_id = str(uuid.uuid4())
+        started_at = datetime.now(timezone.utc)
+        log.info(
+            "scheduler: agent run %s (%s, new_quotes=%d, new_invoices=%d, full=%s)",
+            run_id, trigger, len(new_quotes), len(new_invoices), ignore_cache,
+        )
+
+        try:
+            result = await self._pipeline_func(
+                run_id=run_id,
+                database=self._db(),
+                ignore_cache=ignore_cache,
+            )
+        except Exception as exc:
+            log.exception("agent run %s failed", run_id)
+            await self._log_trigger(
+                trigger, run_id, started_at, len(new_quotes), len(new_invoices),
+                ignore_cache, ok=False, error=f"{type(exc).__name__}: {exc}",
+            )
+            # only agent failures are worth an error event on the live stream
+            await self._publish(
+                "error",
+                {
+                    "message": "Agent run failed",
+                    "trigger": trigger,
+                    "run_id": run_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+            return {"ok": False, "ran": True, "trigger": trigger, "error": str(exc)}
+
+        await self._log_trigger(
+            trigger, run_id, started_at, len(new_quotes), len(new_invoices),
+            ignore_cache, ok=True, error=None,
+        )
+        await self._publish("briefing", await self._latest_briefing())
+        return {
+            "ok": True,
+            "ran": True,
+            "trigger": trigger,
+            "new_count": len(new_quotes) + len(new_invoices),
+            "run_id": run_id,
+        }
+
+    async def _log_trigger(
+        self,
+        trigger: str,
+        run_id: str,
+        started_at: datetime,
+        new_quotes: int,
+        new_invoices: int,
+        full_run: bool,
+        ok: bool,
+        error: Optional[str],
+    ) -> None:
+        doc = {
+            "trigger": trigger,
+            "day": started_at.astimezone().date().isoformat(),  # server-local day
+            "run_id": run_id,
+            "new_count": new_quotes + new_invoices,
+            "new_quotes": new_quotes,
+            "new_invoices": new_invoices,
+            "full_run": bool(full_run),
+            "started_at": started_at.isoformat(),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "ok": ok,
+            "error": error,
+        }
+        try:
+            await self._db().agent_triggers.insert_one(doc)
+        except Exception:  # logging must never break the cycle
+            log.exception("could not write the agent trigger log")
+
+    async def _latest_briefing(self) -> Optional[dict]:
+        docs = (
+            await self._db()
+            .agent_runs.find({"finished_epoch": {"$exists": True}})
+            .sort("finished_epoch", -1)
+            .to_list(1)
+        )
+        if not docs:
+            return None
+        doc = docs[0]
+        doc.pop("_id", None)
+        return doc
+
+    # ------------------------------------------------------------ publish
+
+    async def _publish(self, event: str, data: Any) -> None:
+        """Send one event to the live subscribers. Redis trouble is not fatal."""
+        try:
+            message = json.dumps({"event": event, "data": data}, default=str)
+            await self._redis().publish(UPDATES_CHANNEL, message)
+        except Exception:
+            log.warning("could not publish %r to Redis", event, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# process-wide singleton used by the FastAPI lifespan
+# ---------------------------------------------------------------------------
+
+_scheduler: Optional[DashboardScheduler] = None
+
+
+def get_scheduler() -> DashboardScheduler:
+    global _scheduler
+    if _scheduler is None:
+        _scheduler = DashboardScheduler()
+    return _scheduler
+
+
+async def start_scheduler() -> None:
+    await get_scheduler().start()
+
+
+async def stop_scheduler() -> None:
+    global _scheduler
+    if _scheduler is not None:
+        await _scheduler.stop()
