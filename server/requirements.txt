@@ -1,4 +1,4 @@
-# Biztek AI Command Center - backend (FastAPI + asyncio)
+# Biztek AI Command Center - backend (FastAPI + LangGraph agents)
 fastapi==0.153.0
 uvicorn[standard]==0.54.0
 httpx==0.28.1
@@ -7,3 +7,8 @@ pydantic==2.14.1
 pydantic-settings==2.16.1
 pytest==9.1.1
 pytest-asyncio==1.4.0
+# agents layer (LangChain init_chat_model + OpenAI provider + LangGraph TS)
+langchain==1.4.6
+langchain-core==1.6.12
+langchain-openai==1.7.2
+langgraph==1.2.16
