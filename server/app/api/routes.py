@@ -73,6 +73,7 @@ async def get_signals(
     stale_days: Annotated[int | None, Query(ge=0)] = None,
     stalled_days: Annotated[int | None, Query(ge=0)] = None,
     overdue_days: Annotated[int | None, Query(ge=0)] = None,
+    include_stalled: bool = True,
 ) -> SignalsReport:
     """Everything that needs attention, in one deterministic JSON."""
     db = get_db()
@@ -98,7 +99,7 @@ async def get_signals(
         generated_at=now.isoformat(),
         stale_quotes=stale,
         unpaid_invoices=unpaid,
-        stalled_orders={"reliable": False, "items": stalled},
+        stalled_orders={"reliable": False, "items": stalled if include_stalled else []},
         summary=SignalsSummary(
             quotes_scanned=len(quotes),
             orders_scanned=len(orders),

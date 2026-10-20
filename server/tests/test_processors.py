@@ -245,3 +245,34 @@ def test_money_strings_and_missing_values_are_tolerated():
     assert row["quotes"]["total_amount"] == 1250.5
     assert row["orders"]["balance"] == 750.0  # missing amount_paid means 0
     assert row["payments"]["total_amount"] == 0.0  # junk string is not invented money
+
+
+def test_customer_context_date_bounds_use_parsed_datetimes():
+    customer = {"id": 10}
+    earlier = "2026-10-18T20:00:00+02:00"
+    later = "2026-10-20T04:00:00-05:00"
+
+    row = processors.customer_context(
+        10,
+        quotes=[
+            {"customer": customer, "created_at": later},
+            {"customer": customer, "created_at": earlier},
+        ],
+        orders=[
+            {"customer": customer, "invoice_date": later},
+            {"customer": customer, "invoice_date": earlier},
+        ],
+        payments=[
+            {"customer_id": 10, "received_at": later},
+            {"customer_id": 10, "received_at": earlier},
+        ],
+    )
+
+    expected_first = "2026-10-18T18:00:00+00:00"
+    expected_last = "2026-10-20T09:00:00+00:00"
+    for summary in (row["quotes"], row["orders"], row["payments"]):
+        assert summary["first_at"] == expected_first
+        assert summary["last_at"] == expected_last
+        assert processors.parse_date(summary["first_at"]) <= processors.parse_date(
+            summary["last_at"]
+        )

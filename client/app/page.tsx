@@ -1,5 +1,6 @@
 "use client";
 
+import { MessageSquareText } from "lucide-react";
 import { useState } from "react";
 import { AgentReview } from "@/components/approval-inbox";
 import { Dashboard } from "@/components/dashboard";
@@ -11,6 +12,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/co
 
 export default function Home() {
   const [isCustomerSheetOpen, setIsCustomerSheetOpen] = useState(false);
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [selectedCustomerId, setSelectedCustomerId] = useState<number | null>(null);
 
@@ -59,7 +61,7 @@ export default function Home() {
                   onSelectCustomer={openCustomerContext}
                 />
               </div>
-              <div id="ai-sidebar" className="min-w-0">
+              <div id="ai-sidebar" className="hidden min-w-0 xl:block">
                 <AISidebar
                   isOpen={isSidebarOpen}
                   onOpen={() => setIsSidebarOpen(true)}
@@ -79,6 +81,27 @@ export default function Home() {
             />
           </SheetContent>
         </Sheet>
+        <Sheet open={isMobileSidebarOpen} onOpenChange={setIsMobileSidebarOpen}>
+          <SheetContent side="right" className="gap-0 p-0 sm:max-w-[440px] xl:hidden">
+            <SheetHeader className="sr-only">
+              <SheetTitle>Biztek Assistant</SheetTitle>
+            </SheetHeader>
+            <AISidebar
+              isOpen
+              onOpen={() => setIsMobileSidebarOpen(true)}
+              onClose={() => setIsMobileSidebarOpen(false)}
+            />
+          </SheetContent>
+        </Sheet>
+        <button
+          type="button"
+          onClick={() => setIsMobileSidebarOpen(true)}
+          className="fixed bottom-5 right-5 z-40 inline-flex items-center gap-2 rounded-full bg-accent px-4 py-3 text-sm font-semibold text-[#11150b] shadow-lg xl:hidden"
+          aria-label="Open chat and voice panel"
+        >
+          <MessageSquareText size={17} aria-hidden="true" />
+          Chat
+        </button>
       </LiveDataProvider>
     </SystemHealthProvider>
   );

@@ -414,8 +414,8 @@ def summarize_quotes(records: Iterable[Mapping[str, Any]]) -> dict:
         "count": len(rows),
         "total_amount": round(total, 2),
         "status_counts": dict(status_counts),
-        "first_at": dates[0].isoformat() if dates else None,
-        "last_at": dates[-1].isoformat() if dates else None,
+        "first_at": min(dates).isoformat() if dates else None,
+        "last_at": max(dates).isoformat() if dates else None,
     }
 
 
@@ -448,8 +448,8 @@ def summarize_orders(records: Iterable[Mapping[str, Any]]) -> dict:
         "partially_paid_count": partially_paid,
         "fully_paid_count": fully_paid,
         "payment_status_counts": dict(payment_status_counts),
-        "first_at": dates[0].isoformat() if dates else None,
-        "last_at": dates[-1].isoformat() if dates else None,
+        "first_at": min(dates).isoformat() if dates else None,
+        "last_at": max(dates).isoformat() if dates else None,
     }
 
 
@@ -460,8 +460,8 @@ def summarize_payments(records: Iterable[Mapping[str, Any]]) -> dict:
     return {
         "count": len(rows),
         "total_amount": round(total, 2),
-        "first_at": dates[0].isoformat() if dates else None,
-        "last_at": dates[-1].isoformat() if dates else None,
+        "first_at": min(dates).isoformat() if dates else None,
+        "last_at": max(dates).isoformat() if dates else None,
     }
 
 

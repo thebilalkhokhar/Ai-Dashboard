@@ -102,6 +102,7 @@ export interface SignalsQuery {
   staleDays?: number;
   stalledDays?: number;
   overdueDays?: number;
+  includeStalled?: boolean;
 }
 
 // GET /api/metrics and the `snapshot` event from GET /api/live

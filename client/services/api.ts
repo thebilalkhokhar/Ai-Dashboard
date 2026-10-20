@@ -21,6 +21,8 @@ export const API_BASE_URL = (
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
 ).replace(/\/+$/, "");
 
+const inFlightSignals = new Map<string, Promise<SignalsReport>>();
+
 export class ApiError extends Error {
   readonly status: number;
 
@@ -96,8 +98,21 @@ export function fetchSignals(query: SignalsQuery = {}): Promise<SignalsReport> {
   if (query.staleDays !== undefined) params.set("stale_days", String(query.staleDays));
   if (query.stalledDays !== undefined) params.set("stalled_days", String(query.stalledDays));
   if (query.overdueDays !== undefined) params.set("overdue_days", String(query.overdueDays));
+  if (query.includeStalled !== undefined) {
+    params.set("include_stalled", String(query.includeStalled));
+  }
   const search = params.size > 0 ? `?${params.toString()}` : "";
-  return apiFetch<SignalsReport>(`/api/signals${search}`);
+  const path = `/api/signals${search}`;
+  const pending = inFlightSignals.get(path);
+  if (pending) return pending;
+
+  const request = apiFetch<SignalsReport>(path);
+  inFlightSignals.set(path, request);
+  const clearRequest = () => {
+    if (inFlightSignals.get(path) === request) inFlightSignals.delete(path);
+  };
+  void request.then(clearRequest, clearRequest);
+  return request;
 }
 
 export function fetchCustomerContext(

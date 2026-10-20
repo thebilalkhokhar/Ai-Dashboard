@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -94,13 +94,51 @@ export function Dashboard({
   const [activeTab, setActiveTab] = useState("overview");
   const [rowLimit, setRowLimit] = useState(ROW_PAGE_SIZE);
   const [reloadKey, setReloadKey] = useState(0);
+  const [stalledOrders, setStalledOrders] = useState<StalledOrder[] | null>(null);
+  const [stalledOrdersError, setStalledOrdersError] = useState("");
+  const [isLoadingStalledOrders, setIsLoadingStalledOrders] = useState(false);
+  const hasRequestedSignalsRef = useRef(false);
+  const previousFilterKeyRef = useRef(JSON.stringify(filters));
+  const previousReloadKeyRef = useRef(reloadKey);
+  const previousSnapshotAtRef = useRef<string | null>(null);
+  const signalsRequestRef = useRef<{
+    key: string;
+    promise: Promise<SignalsReport>;
+  } | null>(null);
 
-  // Refetch whenever a filter changes, on manual retry, or when the scheduler
-  // publishes a new snapshot. State is only written after the request settles.
+  // The first snapshot only establishes the baseline. Later generated_at
+  // changes refresh signals; an in-flight request is shared across StrictMode's
+  // development effect replay so the initial mount still makes one request.
   useEffect(() => {
     let isActive = true;
+    const filterKey = JSON.stringify(filters);
+    const filtersChanged = previousFilterKeyRef.current !== filterKey;
+    previousFilterKeyRef.current = filterKey;
+    const retryChanged = previousReloadKeyRef.current !== reloadKey;
+    previousReloadKeyRef.current = reloadKey;
+    const snapshotAt = snapshot?.generated_at ?? null;
+    const snapshotChanged =
+      previousSnapshotAtRef.current !== null &&
+      snapshotAt !== null &&
+      previousSnapshotAtRef.current !== snapshotAt;
+    if (snapshotAt !== null) previousSnapshotAtRef.current = snapshotAt;
 
-    fetchSignals(filters)
+    const shouldFetch =
+      !hasRequestedSignalsRef.current || filtersChanged || retryChanged || snapshotChanged;
+    const requestKey = `${filterKey}:${reloadKey}`;
+    const inFlight = signalsRequestRef.current;
+    if (!shouldFetch && !inFlight) return;
+
+    const request =
+      inFlight?.key === requestKey
+        ? inFlight.promise
+        : fetchSignals({ ...filters, includeStalled: false });
+    if (request !== inFlight?.promise) {
+      hasRequestedSignalsRef.current = true;
+      signalsRequestRef.current = { key: requestKey, promise: request };
+    }
+
+    request
       .then((report) => {
         if (!isActive) return;
         setSignals(report);
@@ -113,6 +151,9 @@ export function Dashboard({
         );
       })
       .finally(() => {
+        if (signalsRequestRef.current?.promise === request) {
+          signalsRequestRef.current = null;
+        }
         if (isActive) setIsLoadingSignals(false);
       });
 
@@ -121,15 +162,49 @@ export function Dashboard({
     };
   }, [filters, reloadKey, snapshot?.generated_at]);
 
+  useEffect(() => {
+    if (activeTab !== "pipeline") return;
+    let isActive = true;
+
+    fetchSignals({ ...filters, includeStalled: true })
+      .then((report) => {
+        if (!isActive) return;
+        setStalledOrders(report.stalled_orders.items);
+        setStalledOrdersError("");
+      })
+      .catch((error: unknown) => {
+        if (!isActive) return;
+        setStalledOrdersError(
+          error instanceof Error ? error.message : "Could not load stalled orders.",
+        );
+      })
+      .finally(() => {
+        if (isActive) setIsLoadingStalledOrders(false);
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [activeTab, filters, reloadKey, snapshot?.generated_at]);
+
   function applyFilter(patch: SignalsQuery) {
     setIsLoadingSignals(true);
     setRowLimit(ROW_PAGE_SIZE);
+    if (activeTab === "pipeline") {
+      setStalledOrders(null);
+      setIsLoadingStalledOrders(true);
+    }
     setFilters((current) => ({ ...current, ...patch }));
   }
 
   function retrySignals() {
     setIsLoadingSignals(true);
     setSignalsError("");
+    if (activeTab === "pipeline") {
+      setStalledOrders(null);
+      setStalledOrdersError("");
+      setIsLoadingStalledOrders(true);
+    }
     setReloadKey((current) => current + 1);
   }
 
@@ -152,9 +227,10 @@ export function Dashboard({
     <section aria-labelledby="dashboard-title" className="space-y-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="text-sm text-muted">
-            {snapshot ? formatDateTime(snapshot.generated_at) : "Loading live data"}
-          </p>
+          <div className="space-y-0.5 text-xs text-muted">
+            <p>Metrics as of {snapshot ? formatDateTime(snapshot.generated_at) : "—"}</p>
+            <p>Signals as of {signals ? formatDateTime(signals.generated_at) : "—"}</p>
+          </div>
           <h1 id="dashboard-title" className="mt-1 text-2xl font-semibold tracking-tight">
             Command center
           </h1>
@@ -195,8 +271,14 @@ export function Dashboard({
       <Tabs
         value={activeTab}
         onValueChange={(value) => {
-          setActiveTab(String(value));
+          const nextTab = String(value);
+          setActiveTab(nextTab);
           setRowLimit(ROW_PAGE_SIZE);
+          if (nextTab === "pipeline") {
+            setStalledOrders(null);
+            setStalledOrdersError("");
+            setIsLoadingStalledOrders(true);
+          }
         }}
       >
         <TabsList aria-label="Dashboard sections" className="max-w-full flex-wrap">
@@ -421,14 +503,20 @@ export function Dashboard({
                 onShowMore={() => setRowLimit((current) => current + ROW_PAGE_SIZE)}
                 onSelectCustomer={onSelectCustomer}
               />
-              <StalledOrderTable
-                rows={signals.stalled_orders.items}
-                totalCount={signals.summary.stalled_orders.count}
-                reliable={signals.stalled_orders.reliable}
-                rowLimit={rowLimit}
-                onShowMore={() => setRowLimit((current) => current + ROW_PAGE_SIZE)}
-                onSelectCustomer={onSelectCustomer}
-              />
+              {isLoadingStalledOrders && !stalledOrders ? (
+                <LoadingNote />
+              ) : stalledOrdersError ? (
+                <ErrorNote message={stalledOrdersError} onRetry={retrySignals} />
+              ) : stalledOrders ? (
+                <StalledOrderTable
+                  rows={stalledOrders}
+                  totalCount={signals.summary.stalled_orders.count}
+                  reliable={signals.stalled_orders.reliable}
+                  rowLimit={rowLimit}
+                  onShowMore={() => setRowLimit((current) => current + ROW_PAGE_SIZE)}
+                  onSelectCustomer={onSelectCustomer}
+                />
+              ) : null}
             </div>
           ) : (
             <ErrorNote message={signalsError || "Signals are unavailable."} onRetry={retrySignals} />
