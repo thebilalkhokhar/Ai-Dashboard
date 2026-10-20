@@ -19,6 +19,7 @@ from app.agents.chat_tools import CHAT_TOOL_MAP, CHAT_TOOLS, format_money, invok
 from app.agents.graph import _walk_numbers, invented_amounts
 from app.agents.llm import add_usage, build_model, empty_usage, usage_of
 from app.config import settings
+from app.services.processors import ERP_TZ
 
 log = logging.getLogger("chat_agent")
 MAX_TOOL_CALLS = 5
@@ -29,7 +30,11 @@ Answer only from tool results returned during this turn. You may use prior
 conversation messages to understand references, but do not use their facts as
 current evidence. You must call tools to retrieve business numbers; Python
 tools do all math and counting, and you must copy their numbers without
-calculating or estimating. Tool results already format money; copy each money
+calculating or estimating. For any dashboard KPI question (today's revenue,
+month to date, last 7 days, open quotes, unpaid/overdue totals), call
+get_dashboard_metrics and copy its money strings exactly. Never infer "today"
+from the user's local date: business data uses the ERP's US Central business
+day, and get_dashboard_metrics already applies it. Tool results already format money; copy each money
 string exactly, including its $ sign and separators. Counts are plain
 integers. Start with exactly one plain sentence that directly answers the
 question, followed by at most three short supporting lines. Name the person
@@ -75,6 +80,7 @@ class ChatState(TypedDict, total=False):
     tools_used: list[str]
     usage: dict
     final_text: str
+    emitted_tokens: int
     regen_count: int
     retry: bool
     database: Any
@@ -150,9 +156,50 @@ def _message_text(message: Any) -> str:
     return str(content or "").strip()
 
 
+def _chunk_text(chunk: Any) -> str:
+    """Like _message_text but without stripping: chunk whitespace is meaningful."""
+    content = getattr(chunk, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(part.get("text", "")) if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    return str(content or "")
+
+
 def _tool_calls(message: Any) -> list[dict]:
     calls = getattr(message, "tool_calls", None) or []
     return [call for call in calls if isinstance(call, dict)]
+
+
+async def _stream_response(bound: Any, messages: list[Any], events: Any) -> tuple[Any, int]:
+    """Stream one model turn, emitting real token deltas as they arrive.
+
+    Returns the accumulated AIMessage and how many characters were sent. Tool
+    calls are accumulated from tool_call_chunks; if the model streams text and
+    then decides to call a tool, a `reset` event tells the UI to drop that
+    provisional text before the tool runs.
+    """
+    full: Any = None
+    emitted = 0
+    streamed_text = False
+    saw_tool_chunks = False
+
+    async for chunk in bound.astream(messages):
+        full = chunk if full is None else full + chunk
+        if getattr(chunk, "tool_call_chunks", None):
+            saw_tool_chunks = True
+        text = _chunk_text(chunk)
+        if text and not saw_tool_chunks:
+            events.put_nowait({"event": "token", "data": {"text": text}})
+            emitted += len(text)
+            streamed_text = True
+
+    if saw_tool_chunks and streamed_text:
+        events.put_nowait({"event": "reset", "data": {}})
+    return (full if full is not None else AIMessage(content="")), emitted
 
 
 def build_chat_graph(model: Any = None, tools: list | None = None):
@@ -169,6 +216,7 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
         regen_count = 0
         usage = empty_usage()
         final_text = ""
+        emitted_tokens = 0
 
         while True:
             if count >= MAX_TOOL_CALLS:
@@ -178,7 +226,14 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
                     bound = llm.bind_tools(tool_schemas, parallel_tool_calls=False)
                 except TypeError:
                     bound = llm.bind_tools(tool_schemas)
-            response = await bound.ainvoke(messages)
+
+            events = state.get("events")
+            if events is not None and hasattr(bound, "astream"):
+                response, attempt_emitted = await _stream_response(bound, messages, events)
+            else:
+                response = await bound.ainvoke(messages)
+                attempt_emitted = 0
+            emitted_tokens += attempt_emitted
             usage = add_usage(usage, usage_of(response))
             messages.append(response)
             calls = _tool_calls(response)
@@ -193,7 +248,6 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
                     else:
                         count += 1
                         used.append(name)
-                        events = state.get("events")
                         if events is not None:
                             events.put_nowait({"event": "tool", "data": {"name": name}})
                         try:
@@ -225,6 +279,8 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
             if not errors:
                 break
             if regen_count == 0:
+                if events is not None and attempt_emitted:
+                    events.put_nowait({"event": "reset", "data": {}})
                 messages.append(
                     SystemMessage(
                         content=(
@@ -235,6 +291,8 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
                 )
                 regen_count = 1
                 continue
+            if events is not None and attempt_emitted:
+                events.put_nowait({"event": "reset", "data": {}})
             final_text = _fallback_text(_last_user_text(messages))
             break
 
@@ -244,6 +302,7 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
             "tools_used": used,
             "usage": usage,
             "final_text": final_text,
+            "emitted_tokens": emitted_tokens,
         }
 
     graph = StateGraph(ChatState)
@@ -270,9 +329,14 @@ async def execute_chat(
     events: Any = None,
 ) -> dict:
     today = datetime.now(ZoneInfo("Asia/Karachi")).date().isoformat()
+    business_today = datetime.now(ERP_TZ).date().isoformat()
     system = (
         f"{CHAT_SYSTEM}\nCurrent date in the user's timezone (Asia/Karachi): {today}. "
-        "Treat last week as the previous complete Monday through Sunday, and use inclusive date ranges."
+        f"Current ERP business date ({ERP_TZ}): {business_today}. Business records use the "
+        "ERP business calendar, so 'today', 'yesterday', 'this month' and 'last week' mean "
+        "that calendar; use get_dashboard_metrics for KPIs rather than sending the local "
+        "date to get_revenue. Treat last week as the previous complete Monday through Sunday, "
+        "and use inclusive date ranges."
     )
     messages: list[Any] = [SystemMessage(content=system)]
     for turn in trim_turns(history or []):
@@ -298,6 +362,7 @@ async def execute_chat(
         "tools_used": result.get("tools_used", []),
         "tool_results": result.get("tool_results", []),
         "tokens": result.get("usage") or empty_usage(),
+        "emitted_tokens": int(result.get("emitted_tokens") or 0),
     }
 
 
@@ -403,8 +468,11 @@ async def stream_chat(
                 tools=tools,
                 events=queue,
             )
-            for chunk in _text_chunks(outcome["text"]):
-                await queue.put({"event": "token", "data": {"text": chunk}})
+            # Real streaming already sent deltas. Only models without astream
+            # (tests, unusual providers) need the post-hoc chunk fallback.
+            if not outcome.get("emitted_tokens"):
+                for chunk in _text_chunks(outcome["text"]):
+                    await queue.put({"event": "token", "data": {"text": chunk}})
             await queue.put({"event": "done", "data": {"text": outcome["text"], "thread_id": thread_id}})
         except Exception:
             log.exception("chat turn failed")

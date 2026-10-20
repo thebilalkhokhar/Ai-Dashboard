@@ -16,7 +16,7 @@ from typing import Any, Callable, Type
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app import db as app_db
-from app.services import processors
+from app.services import metrics, processors
 
 _CURRENCY_TEXT = re.compile(r"\$\s*(-?[\d,]+(?:\.\d+)?)")
 
@@ -242,6 +242,35 @@ async def get_customer_context(customer_id: int, database: Any = None) -> dict:
     return _bounded(context)
 
 
+async def get_dashboard_metrics(
+    database: Any = None, now: datetime | None = None
+) -> dict:
+    """The exact metrics the Next.js dashboard renders (same Python code).
+
+    Uses metrics.build_snapshot, whose day/month boundaries are the ERP's
+    US Central business day, so "today's revenue" here can never disagree with
+    the dashboard tile.
+    """
+    EmptyArgs.model_validate({})
+    snapshot = await metrics.build_snapshot(database=_database(database), now=now)
+    return {
+        "generated_at": snapshot["generated_at"],
+        "business_timezone": str(processors.ERP_TZ),
+        "revenue_today": snapshot["revenue_today_display"],
+        "revenue_month_to_date": snapshot["revenue_month_to_date_display"],
+        "revenue_last_7_days": snapshot["revenue_last_7_days_display"],
+        "payments_count_today": snapshot["payments_count_today"],
+        # Numbers a label such as "last 7 days" may legitimately mention.
+        "window_days": {"today": 1, "last_7_days": 7},
+        "open_quotes_count": snapshot["open_quotes_count"],
+        "open_quotes_value": snapshot["open_quotes_value_display"],
+        "unpaid_total": snapshot["unpaid_total_display"],
+        "unpaid_count": snapshot["unpaid_count"],
+        "overdue_total": snapshot["overdue_total_display"],
+        "overdue_count": snapshot["overdue_count"],
+    }
+
+
 async def get_revenue(
     date_from: date | str,
     date_to: date | str,
@@ -400,6 +429,12 @@ async def get_rep_summary(
 
 CHAT_TOOLS = [
     ChatTool("get_latest_briefing", "Get the latest saved Master brief and its priorities.", EmptyArgs, get_latest_briefing),
+    ChatTool(
+        "get_dashboard_metrics",
+        "Get the same pre-computed dashboard metrics the UI shows: revenue today (ERP business day), month to date, last 7 days, payments count today, open quotes, unpaid and overdue totals. Use this for 'today's revenue', 'this month', 'last 7 days' and any dashboard KPI question instead of passing a local date to get_revenue.",
+        EmptyArgs,
+        get_dashboard_metrics,
+    ),
     ChatTool("get_signals_summary", "Get Python-computed counts and totals for stale quotes, unpaid invoices, and overdue invoices. Also use it to check whether artwork, shipping, order notes, or line-item fields are available; it lists order fields missing from the source data.", EmptyArgs, get_signals_summary),
     ChatTool("find_customer", "Fuzzy-search company names in quotes, orders, and payments. Returns up to five customer IDs and names.", CustomerSearchArgs, find_customer),
     ChatTool("get_customer_context", "Get aggregate quote, order, and payment context for one customer ID.", CustomerContextArgs, get_customer_context),

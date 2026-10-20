@@ -209,6 +209,10 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+# Proxies must not buffer a streamed answer into one flush.
+_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
 @router.post("/chat")
 async def chat(request: ChatRequest) -> StreamingResponse:
     """Stream read-only chat progress and the verified final answer."""
@@ -221,7 +225,9 @@ async def chat(request: ChatRequest) -> StreamingResponse:
         async def rate_error():
             yield _sse("error", {"message": "Chat limit reached. Try again in a minute."})
 
-        return StreamingResponse(rate_error(), media_type="text/event-stream")
+        return StreamingResponse(
+            rate_error(), media_type="text/event-stream", headers=_SSE_HEADERS
+        )
 
     if await daily_token_total(database) >= settings.CHAT_DAILY_TOKEN_CAP:
         await log_rejected_turn(request.thread_id, request.message, "daily_token_cap", database)
@@ -229,7 +235,9 @@ async def chat(request: ChatRequest) -> StreamingResponse:
         async def cap_error():
             yield _sse("error", {"message": "The daily chat token limit has been reached."})
 
-        return StreamingResponse(cap_error(), media_type="text/event-stream")
+        return StreamingResponse(
+            cap_error(), media_type="text/event-stream", headers=_SSE_HEADERS
+        )
 
     async def events():
         async for event in stream_chat(request.thread_id, request.message, database):
@@ -238,5 +246,5 @@ async def chat(request: ChatRequest) -> StreamingResponse:
     return StreamingResponse(
         events(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers=_SSE_HEADERS,
     )

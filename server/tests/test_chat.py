@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from collections import deque
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 from pydantic import ValidationError
 
 from app.agents.chat import execute_chat, run_chat, stream_chat, trim_turns
@@ -16,8 +16,10 @@ from app.agents.chat_tools import (
     RevenueArgs,
     TopItemsArgs,
     ChatTool,
+    get_dashboard_metrics,
     invoke_tool,
 )
+from app.services import metrics
 
 
 class FakeCursor:
@@ -73,6 +75,23 @@ class FakeModel:
         return self.responses.popleft()
 
 
+class FakeStreamingModel:
+    """Streams two chunks; blocks after the first until the consumer reads it."""
+
+    def __init__(self, chunks, gate):
+        self.chunks = chunks
+        self.gate = gate
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    async def astream(self, messages):
+        for index, text in enumerate(self.chunks):
+            yield AIMessageChunk(content=text)
+            if index == 0:
+                await self.gate.wait()
+
+
 def tool_call(index=1):
     return AIMessage(
         content="",
@@ -106,6 +125,35 @@ async def test_tool_results_format_money_and_keep_counts_as_integers():
     tool = ChatTool("format_read", "Return fixed values", EmptyArgs, read_tool)
     result = await invoke_tool("format_read", {}, registry={"format_read": tool})
     assert result == {"balance": "$357,500", "total_amount": "$2,379.50", "count": 3}
+
+
+@pytest.mark.asyncio
+async def test_dashboard_metrics_tool_matches_the_dashboard_snapshot():
+    now = datetime(2026, 10, 20, 20, 30, tzinfo=timezone.utc)
+    db = FakeDatabase(
+        quotes_flat=FakeCollection(
+            [
+                {
+                    "id": 1,
+                    "status": "Quote Created",
+                    "amount": 5000,
+                    "created_at": "2026-10-18T15:00:00Z",
+                    "customer": {"id": 7, "company_name": "Acme"},
+                }
+            ]
+        ),
+        orders_flat=FakeCollection([]),
+        payments_flat=FakeCollection(
+            [{"amount": 11687, "received_at": "2026-10-20T15:00:00Z"}]
+        ),
+    )
+    result = await get_dashboard_metrics(database=db, now=now)
+    expected = metrics.build_snapshot_from_docs(
+        db.quotes_flat.rows, db.orders_flat.rows, db.payments_flat.rows, now
+    )
+    assert result["revenue_today"] == expected["revenue_today_display"] == "$11,687"
+    assert result["payments_count_today"] == 1
+    assert result["revenue_month_to_date"] == expected["revenue_month_to_date_display"]
 
 
 @pytest.mark.asyncio
@@ -178,6 +226,37 @@ async def test_run_chat_persists_only_the_last_ten_turns():
     assert turns[0]["question"] == "q6"
     assert turns[-1]["question"] == "new question"
     assert len(db.chat_logs.inserted) == 1
+
+
+@pytest.mark.asyncio
+async def test_sse_streams_tokens_before_the_model_finishes():
+    import asyncio
+
+    db = FakeDatabase(
+        chat_threads=FakeCollection(),
+        chat_logs=FakeCollection(),
+    )
+    gate = asyncio.Event()
+    model = FakeStreamingModel(["The dashboard ", "is ready."], gate)
+    stream = stream_chat("thread-stream", "status?", db, model=model, tools=[])
+
+    # If the backend buffered the full answer, this would block until the gate
+    # is set and the test would time out.
+    first = await asyncio.wait_for(anext(stream), timeout=2)
+    assert first == {"event": "token", "data": {"text": "The dashboard "}}
+
+    gate.set()
+    rest = [event async for event in stream]
+    tokens = [first, *rest]
+    text = "".join(
+        event["data"]["text"] for event in tokens if event["event"] == "token"
+    )
+    assert text == "The dashboard is ready."
+    assert [event["event"] for event in rest][-1] == "done"
+    assert [event["event"] for event in tokens if event["event"] == "token"] == [
+        "token",
+        "token",
+    ]
 
 
 @pytest.mark.asyncio
