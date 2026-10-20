@@ -21,6 +21,7 @@ import {
 } from "@/lib/mockData";
 import { fetchSignals } from "@/services/api";
 import { SystemHealthBadge } from "@/components/system-health";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { SignalsReport, StaleQuote } from "@/types/api";
 
 type ChartData = (typeof mockDashboardCharts)[number];
@@ -114,7 +115,13 @@ function ChartTile({
   );
 }
 
-export function Dashboard() {
+export function Dashboard({
+  actionCenter,
+  onSelectCustomer,
+}: {
+  actionCenter: ReactNode;
+  onSelectCustomer: (customerId: number | null) => void;
+}) {
   const [charts, setCharts] = useState<LiveChartData[]>(() =>
     mockDashboardCharts.map((chart) => ({
       ...chart,
@@ -168,34 +175,44 @@ export function Dashboard() {
         <SystemHealthBadge />
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-3">
-        {charts.map((chart) => {
-          const summary = signalsReport.summary[chart.id];
-          return <ChartTile key={chart.id} chart={chart} summary={summary} />;
-        })}
-      </div>
+      <Tabs defaultValue="overview">
+        <TabsList aria-label="Dashboard sections">
+          <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="operations">Operations</TabsTrigger>
+          <TabsTrigger value="action-center">Action Center</TabsTrigger>
+        </TabsList>
 
-      <div className="grid gap-4 sm:grid-cols-3">
-        <MetricCard
-          label="Unpaid balance"
-          value={signalsReport.summary.unpaid_invoices.total_amount}
-          icon={AlertTriangle}
-        />
-        <MetricCard
-          label="Unpaid invoices"
-          value={signalsReport.summary.unpaid_invoices.count}
-          icon={FileText}
-        />
-        <MetricCard
-          label="Partially paid"
-          value={signalsReport.summary.unpaid_invoices.partially_paid_count}
-          icon={Boxes}
-        />
-      </div>
+        <TabsContent value="overview" className="space-y-5">
+          <div className="grid gap-4 sm:grid-cols-3 2xl:grid-cols-3">
+            <MetricCard
+              label="Unpaid balance"
+              value={signalsReport.summary.unpaid_invoices.total_amount}
+              icon={AlertTriangle}
+            />
+            <MetricCard
+              label="Unpaid invoices"
+              value={signalsReport.summary.unpaid_invoices.count}
+              icon={FileText}
+            />
+            <MetricCard
+              label="Partially paid"
+              value={signalsReport.summary.unpaid_invoices.partially_paid_count}
+              icon={Boxes}
+            />
+          </div>
 
-      <AttentionNeeded report={signalsReport} />
+          <div className="grid gap-4 sm:grid-cols-3 2xl:grid-cols-3">
+            {charts.map((chart) => {
+              const summary = signalsReport.summary[chart.id];
+              return <ChartTile key={chart.id} chart={chart} summary={summary} />;
+            })}
+          </div>
 
-      <div className="grid gap-5 xl:grid-cols-2">
+          <AttentionNeeded report={signalsReport} onSelectCustomer={onSelectCustomer} />
+        </TabsContent>
+
+        <TabsContent value="operations">
+          <div className="grid gap-5 xl:grid-cols-2 2xl:grid-cols-3">
         <DataTable title="Orders" icon={Boxes}>
           <table className="w-full min-w-[620px] text-left text-sm">
             <thead>
@@ -242,7 +259,30 @@ export function Dashboard() {
                     <p className="font-medium">{quote.ref}</p>
                     <p className="mt-1 text-xs text-muted">ID {quote.id}</p>
                   </td>
-                  <td className="px-4 py-3">{quote.customer.company_name}</td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <span>{quote.customer.company_name}</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const customerId = [
+                            ...signalsReport.stale_quotes,
+                            ...signalsReport.unpaid_invoices,
+                            ...signalsReport.stalled_orders,
+                          ].find(
+                            (signal) =>
+                              signal.customer?.company_name === quote.customer.company_name &&
+                              signal.customer.id !== null &&
+                              signal.customer.id > 0,
+                          )?.customer?.id;
+                          onSelectCustomer(customerId ?? null);
+                        }}
+                        className="whitespace-nowrap text-xs text-accent transition-colors hover:text-accent/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                      >
+                        View context
+                      </button>
+                    </div>
+                  </td>
                   <td className="px-4 py-3 text-muted">{quote.sale_rep.name}</td>
                   <td className="px-4 py-3 text-muted">{quote.status}</td>
                   <td className="px-4 py-3 text-right tabular-nums">{quote.amount}</td>
@@ -284,7 +324,13 @@ export function Dashboard() {
             </tbody>
           </table>
         </DataTable>
-      </div>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="action-center">
+          {actionCenter}
+        </TabsContent>
+      </Tabs>
     </section>
   );
 }
@@ -331,7 +377,13 @@ function DataTable({
   );
 }
 
-function AttentionNeeded({ report }: { report: SignalsReport }) {
+function AttentionNeeded({
+  report,
+  onSelectCustomer,
+}: {
+  report: SignalsReport;
+  onSelectCustomer: (customerId: number | null) => void;
+}) {
   return (
     <section aria-labelledby="attention-title" className="rounded-xl border border-border bg-surface">
       <div className="flex items-center gap-3 border-b border-border px-5 py-4">
@@ -343,7 +395,7 @@ function AttentionNeeded({ report }: { report: SignalsReport }) {
           </p>
         </div>
       </div>
-      <div className="grid gap-4 p-4 lg:grid-cols-3">
+      <div className="grid gap-4 p-4 lg:grid-cols-3 2xl:grid-cols-3">
         <SignalGroupCard
           title="Stale quotes"
           icon={FileText}
@@ -364,7 +416,7 @@ function AttentionNeeded({ report }: { report: SignalsReport }) {
                 Stale for {quote.days_stale} days
                 {quote.age_days !== null && ` · Age ${quote.age_days.toFixed(1)} days`}
               </p>
-              <SignalPeople customer={quote.customer} saleRep={quote.sale_rep} />
+              <SignalPeople customer={quote.customer} saleRep={quote.sale_rep} onSelectCustomer={onSelectCustomer} />
             </article>
           ))}
         </SignalGroupCard>
@@ -397,7 +449,7 @@ function AttentionNeeded({ report }: { report: SignalsReport }) {
                 <p>Paid <span className="text-foreground">{formatAmount(invoice.amount_paid)}</span></p>
               </div>
               <p className="mt-2 text-xs text-muted">Invoice date: {invoice.invoice_date || "—"}</p>
-              <SignalPeople customer={invoice.customer} saleRep={invoice.sale_rep} />
+              <SignalPeople customer={invoice.customer} saleRep={invoice.sale_rep} onSelectCustomer={onSelectCustomer} />
             </article>
           ))}
         </SignalGroupCard>
@@ -425,7 +477,7 @@ function AttentionNeeded({ report }: { report: SignalsReport }) {
                 {order.age_days !== null && ` · Age ${order.age_days.toFixed(1)} days`}
                 {" · "}Invoice {order.invoice_date || "date unavailable"}
               </p>
-              <SignalPeople customer={order.customer} saleRep={order.sale_rep} />
+              <SignalPeople customer={order.customer} saleRep={order.sale_rep} onSelectCustomer={onSelectCustomer} />
             </article>
           ))}
         </SignalGroupCard>
@@ -473,13 +525,29 @@ function SignalGroupCard({
 function SignalPeople({
   customer,
   saleRep,
+  onSelectCustomer,
 }: {
   customer: StaleQuote["customer"];
   saleRep: StaleQuote["sale_rep"];
+  onSelectCustomer: (customerId: number | null) => void;
 }) {
   return (
     <p className="mt-3 border-t border-border pt-2 text-xs text-muted">
       Customer: {customer?.company_name || "Unknown"}
+      {customer?.company_name && (
+        <>
+          {" · "}
+          <button
+            type="button"
+            onClick={() =>
+              onSelectCustomer(customer.id !== null && customer.id > 0 ? customer.id : null)
+            }
+            className="text-accent transition-colors hover:text-accent/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          >
+            View context
+          </button>
+        </>
+      )}
       {" · "}Sales rep: {saleRep?.name || "Unassigned"}
     </p>
   );

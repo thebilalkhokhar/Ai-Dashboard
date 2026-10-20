@@ -1,24 +1,25 @@
 "use client";
 
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Building2, Mail, Phone, Search } from "lucide-react";
 import { fetchCustomerContext } from "@/services/api";
 import type { CustomerContext } from "@/types/api";
 
-export function CustomerContextPanel() {
-  const [customerId, setCustomerId] = useState("");
+export function CustomerContextPanel({
+  selectedCustomerId,
+}: {
+  selectedCustomerId: number | null;
+}) {
+  const [customerId, setCustomerId] = useState(
+    selectedCustomerId === null ? "" : String(selectedCustomerId),
+  );
   const [customer, setCustomer] = useState<CustomerContext | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(selectedCustomerId !== null);
   const [errorMessage, setErrorMessage] = useState("");
+  const requestIdRef = useRef(0);
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const parsedId = Number(customerId);
-    if (isLoading || !Number.isInteger(parsedId) || parsedId < 1) {
-      setErrorMessage("Enter a valid positive customer ID.");
-      return;
-    }
-
+  const loadCustomerContext = useCallback(async (parsedId: number) => {
+    const requestId = ++requestIdRef.current;
     setIsLoading(true);
     setErrorMessage("");
     setCustomer(null);
@@ -31,8 +32,46 @@ export function CustomerContextPanel() {
         error instanceof Error ? error.message : "Customer context could not be loaded.",
       );
     } finally {
-      setIsLoading(false);
+      if (requestId === requestIdRef.current) {
+        setIsLoading(false);
+      }
     }
+  }, []);
+
+  useEffect(() => {
+    if (selectedCustomerId === null) return;
+
+    const requestId = ++requestIdRef.current;
+    fetchCustomerContext(selectedCustomerId)
+      .then((context) => {
+        if (requestId === requestIdRef.current) {
+          setCustomer(context);
+        }
+      })
+      .catch((error: unknown) => {
+        console.error("Unable to load customer context.", error);
+        if (requestId === requestIdRef.current) {
+          setErrorMessage(
+            error instanceof Error ? error.message : "Customer context could not be loaded.",
+          );
+        }
+      })
+      .finally(() => {
+        if (requestId === requestIdRef.current) {
+          setIsLoading(false);
+        }
+      });
+  }, [selectedCustomerId]);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const parsedId = Number(customerId);
+    if (isLoading || !Number.isInteger(parsedId) || parsedId < 1) {
+      setErrorMessage("Enter a valid positive customer ID.");
+      return;
+    }
+
+    await loadCustomerContext(parsedId);
   }
 
   return (

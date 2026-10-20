@@ -28,7 +28,7 @@ export function VoiceConsole() {
   }
 
   return (
-    <section aria-labelledby="voice-title" className="rounded-xl border border-border bg-surface p-5">
+    <section aria-labelledby="voice-title" className="flex min-h-full flex-col">
       <div className="flex items-start justify-between">
         <div>
           <h2 id="voice-title" className="font-semibold">Voice console</h2>
@@ -39,7 +39,7 @@ export function VoiceConsole() {
           {isProcessing ? "Processing..." : voiceConsoleData.status}
         </span>
       </div>
-      <div className="mt-6 flex flex-col items-center rounded-lg border border-dashed border-border bg-[#0c0f15] px-4 py-7">
+      <div className="mt-6 flex flex-1 flex-col items-center justify-center rounded-2xl bg-surface-raised/40 px-4 py-7">
         <button
           type="button"
           onClick={() => void handlePushToTalk()}

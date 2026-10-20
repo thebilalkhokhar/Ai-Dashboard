@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { Bot, Send, Sparkles } from "lucide-react";
+import { Bot, Send } from "lucide-react";
 import { chatData } from "@/lib/mockData";
 import { sendMessage } from "@/services/api";
 
@@ -53,24 +53,13 @@ export function ChatInterface() {
   }
 
   return (
-    <section aria-labelledby="chat-title" className="flex min-h-[32rem] flex-col rounded-xl border border-border bg-surface">
-      <div className="flex items-center justify-between border-b border-border px-5 py-4">
-        <div className="flex items-center gap-3">
-          <span className="grid h-9 w-9 place-items-center rounded-lg bg-surface-raised text-accent">
-            <Bot size={18} aria-hidden="true" />
-          </span>
-          <div>
-            <h2 id="chat-title" className="text-sm font-semibold">{chatData.assistantName}</h2>
-            <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted">
-              <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-              {isSending ? "Thinking..." : chatData.status}
-            </p>
-          </div>
-        </div>
-        <Sparkles size={17} className="text-muted" aria-hidden="true" />
-      </div>
+    <section aria-label={chatData.assistantName} className="flex h-full min-h-0 flex-col">
+      <p className="flex shrink-0 items-center gap-2 px-5 py-3 text-xs text-muted">
+        <span className="h-1.5 w-1.5 rounded-full bg-accent" />
+        {isSending ? "Thinking..." : chatData.status}
+      </p>
 
-      <div className="flex-1 space-y-5 p-5" aria-live="polite">
+      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-3" aria-live="polite">
         {messages.map((entry, index) =>
           entry.role === "user" ? (
             <div key={`user-${index}`} className="ml-auto max-w-[85%] rounded-xl rounded-br-sm bg-surface-raised px-4 py-3 text-sm">
@@ -113,8 +102,8 @@ export function ChatInterface() {
         )}
       </div>
 
-      <div className="border-t border-border p-4">
-        <form onSubmit={handleSubmit} className="flex items-center gap-3 rounded-lg border border-border bg-[#0c0f15] px-3 py-2">
+      <div className="shrink-0 border-t border-border p-4">
+        <form onSubmit={handleSubmit} className="flex items-center gap-3 rounded-xl border border-border bg-surface-raised/70 px-3 py-2">
           <input
             value={message}
             onChange={(event) => setMessage(event.target.value)}
