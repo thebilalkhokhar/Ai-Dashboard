@@ -16,6 +16,7 @@ from typing import Any, Tuple
 from app.config import settings
 from app.agents.llm import StructuredCaller
 from app.schemas.agents import CollectionsOutput
+from app.services.processors import format_money_tree
 
 COLLECTIONS_SYSTEM = """You are an accounts-receivable analyst for a printing company.
 
@@ -40,8 +41,12 @@ Answer in the required JSON shape only.
 
 def collections_payload(item: dict, context: dict, payment_history: dict) -> dict:
     """item: an unpaid-invoice row from processors.unpaid_invoices.
-    context: customer_context dict. payment_history: summary_payment_history."""
-    return {
+    context: customer_context dict. payment_history: summary_payment_history.
+
+    Money leaves Python already formatted ('$56,600'), so the draft can only
+    copy a finished string - the model never sees 56600.0.
+    """
+    payload = {
         "task": "decide how to chase this unpaid invoice and draft a rep message",
         "invoice": {
             "id": item.get("id"),
@@ -67,6 +72,7 @@ def collections_payload(item: dict, context: dict, payment_history: dict) -> dic
             "payments": payment_history,
         },
     }
+    return format_money_tree(payload)
 
 
 async def collect_invoice(

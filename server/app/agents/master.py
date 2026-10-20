@@ -13,6 +13,7 @@ from typing import Any, Tuple
 
 from app.agents.llm import StructuredCaller
 from app.schemas.agents import MasterOutput
+from app.services.processors import format_money_tree
 
 MASTER_SYSTEM = """You are the Master CEO agent of the Biztek AI Command Center
 for a printing company.
@@ -52,7 +53,8 @@ def group_by_customer(outputs: list[dict]) -> dict:
 
 
 def master_payload(grouped: dict, signals_summary: dict) -> dict:
-    return {
+    """The master sees the same formatted money as the sub-agents."""
+    payload = {
         "task": "executive brief: what the sales team should do next",
         "signal_summary": signals_summary,
         "stalled_orders_note": "the stalled-orders signal is UNRELIABLE (no status timestamps) - never use it",
@@ -65,6 +67,7 @@ def master_payload(grouped: dict, signals_summary: dict) -> dict:
             for cid, group in grouped.items()
         ],
     }
+    return format_money_tree(payload)
 
 
 async def run_master(grouped: dict, signals_summary: dict, caller: StructuredCaller) -> Tuple[MasterOutput, dict, dict]:

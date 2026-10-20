@@ -46,11 +46,12 @@ MAX_DOCS = 200_000
 
 
 def money_text(value: Any) -> str:
-    """'$357,500' for whole dollars, '$357,500.25' otherwise (chat style)."""
-    amount = to_number(value)
-    if amount == int(amount):
-        return f"${int(amount):,}"
-    return f"${amount:,.2f}"
+    """'$357,500' for whole dollars, '$357,500.25' otherwise (chat style).
+
+    Delegates to the deterministic layer so dashboard tiles and agent text use
+    exactly the same money format.
+    """
+    return processors.money_text(value)
 
 
 def _utc_now(now: Optional[datetime] = None) -> datetime:

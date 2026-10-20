@@ -16,6 +16,7 @@ from typing import Any, Tuple
 
 from app.agents.llm import StructuredCaller
 from app.schemas.agents import NegotiationOutput
+from app.services.processors import format_money_tree
 
 NEGOTIATION_SYSTEM = """You are a B2B sales-negotiation analyst for a printing company.
 
@@ -40,8 +41,12 @@ Answer in the required JSON shape only.
 
 
 def negotiation_payload(item: dict, context: dict) -> dict:
-    """Everything the AI may use. context comes from customer_context (pure)."""
-    return {
+    """Everything the AI may use. context comes from customer_context (pure).
+
+    Money leaves Python already formatted ('$56,600'), so the draft can only
+    copy a finished string - the model never sees 56600.0.
+    """
+    payload = {
         "task": "explain why this open quote is stuck and draft a rep message",
         "quote": {
             "id": item.get("id"),
@@ -71,6 +76,7 @@ def negotiation_payload(item: dict, context: dict) -> dict:
             ],
         },
     }
+    return format_money_tree(payload)
 
 
 async def negotiate_quote(

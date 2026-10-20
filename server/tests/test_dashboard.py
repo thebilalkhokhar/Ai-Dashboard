@@ -347,7 +347,8 @@ def make_scheduler(redis, database, pipeline=None, refresh_func=ok_refresh) -> D
         interval_seconds=60,
     )
     # the daily safety net is tested via its own logic; keep these cycles event-only
-    scheduler._last_daily_day = datetime.now().astimezone().date().isoformat()
+    # (use the fixed NOW, not the wall clock, so the test cannot cross midnight)
+    scheduler._last_daily_day = NOW.astimezone().date().isoformat()
     return scheduler
 
 
