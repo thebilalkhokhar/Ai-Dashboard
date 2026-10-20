@@ -147,3 +147,31 @@ export interface HealthResponse {
   mongo: boolean;
   database: string;
 }
+
+export interface ChatRequest {
+  thread_id: string;
+  message: string;
+}
+
+export interface ChatToolEvent {
+  name: string;
+}
+
+export interface ChatTokenEvent {
+  text: string;
+}
+
+export interface ChatDoneEvent {
+  text: string;
+  thread_id: string;
+}
+
+export interface ChatErrorEvent {
+  message: string;
+}
+
+export type ChatStreamEvent =
+  | { event: "tool"; data: ChatToolEvent }
+  | { event: "token"; data: ChatTokenEvent }
+  | { event: "done"; data: ChatDoneEvent }
+  | { event: "error"; data: ChatErrorEvent };
