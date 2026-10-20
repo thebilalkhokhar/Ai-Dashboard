@@ -141,3 +141,9 @@ export interface CustomerContext {
   leads: LeadOutcome[];
   notes: string[];
 }
+
+export interface HealthResponse {
+  status: "ok" | "degraded";
+  mongo: boolean;
+  database: string;
+}

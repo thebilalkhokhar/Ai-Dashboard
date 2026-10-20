@@ -20,13 +20,8 @@ import {
   quotes,
 } from "@/lib/mockData";
 import { fetchSignals } from "@/services/api";
-import type {
-  SignalsReport,
-  SignalsSummary,
-  StaleQuote,
-  StalledOrder,
-  UnpaidInvoice,
-} from "@/types/api";
+import { SystemHealthBadge } from "@/components/system-health";
+import type { SignalsReport, StaleQuote } from "@/types/api";
 
 type ChartData = (typeof mockDashboardCharts)[number];
 type LiveChartData = Omit<ChartData, "labels" | "values"> & {
@@ -170,10 +165,7 @@ export function Dashboard() {
             Command center
           </h1>
         </div>
-        <div className="flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1.5 text-xs text-muted">
-          <span className="h-2 w-2 rounded-full bg-accent" />
-          Systems operational
-        </div>
+        <SystemHealthBadge />
       </div>
 
       <div className="grid gap-4 sm:grid-cols-3">
@@ -340,38 +332,6 @@ function DataTable({
 }
 
 function AttentionNeeded({ report }: { report: SignalsReport }) {
-  const alertGroups: {
-    id: string;
-    title: string;
-    summary: SignalsSummary["stale_quotes"] | SignalsSummary["unpaid_invoices"] | SignalsSummary["stalled_orders"];
-    records: (StaleQuote | UnpaidInvoice | StalledOrder)[];
-    icon: LucideIcon;
-    details?: string;
-  }[] = [
-    {
-      id: "stale-quotes",
-      title: "Stale quotes",
-      summary: report.summary.stale_quotes,
-      records: report.stale_quotes,
-      icon: FileText,
-    },
-    {
-      id: "unpaid-invoices",
-      title: "Unpaid invoices",
-      summary: report.summary.unpaid_invoices,
-      records: report.unpaid_invoices,
-      icon: AlertTriangle,
-      details: `Overdue: ${report.summary.unpaid_invoices.overdue_count} · Unpaid: ${report.summary.unpaid_invoices.unpaid_count} · Partially paid: ${report.summary.unpaid_invoices.partially_paid_count}`,
-    },
-    {
-      id: "stalled-orders",
-      title: "Stalled orders",
-      summary: report.summary.stalled_orders,
-      records: report.stalled_orders,
-      icon: Boxes,
-    },
-  ];
-
   return (
     <section aria-labelledby="attention-title" className="rounded-xl border border-border bg-surface">
       <div className="flex items-center gap-3 border-b border-border px-5 py-4">
@@ -379,43 +339,152 @@ function AttentionNeeded({ report }: { report: SignalsReport }) {
         <div>
           <h2 id="attention-title" className="font-semibold">Attention needed</h2>
           <p className="mt-1 text-xs text-muted">
-            Generated {report.generated_at} · Data range: {report.summary.data_from} to {report.summary.data_to}
+            Generated {report.generated_at} · Data range: {report.summary.data_from || "—"} to {report.summary.data_to || "—"}
           </p>
         </div>
       </div>
       <div className="grid gap-4 p-4 lg:grid-cols-3">
-        {alertGroups.map((group) => {
-          const Icon = group.icon;
-          return (
-            <article key={group.id} className="rounded-lg border border-border bg-[#0c0f15] p-4">
+        <SignalGroupCard
+          title="Stale quotes"
+          icon={FileText}
+          count={report.summary.stale_quotes.count}
+          total={report.summary.stale_quotes.total_amount}
+          empty={report.stale_quotes.length === 0}
+        >
+          {report.stale_quotes.map((quote, index) => (
+            <article key={quote.id ?? `${quote.ref ?? "quote"}-${index}`} className="rounded-md border border-border bg-surface p-3">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <h3 className="text-sm font-medium">{group.title}</h3>
-                  <p className="mt-2 text-xs text-muted">
-                    {group.summary.count} items · Total amount: {group.summary.total_amount}
-                  </p>
-                  {group.details && <p className="mt-1 text-xs text-muted">{group.details}</p>}
+                  <h4 className="text-sm font-medium">{quote.ref || "Quote reference unavailable"}</h4>
+                  <p className="mt-1 text-xs text-muted">{quote.status || "Status unavailable"}</p>
                 </div>
-                <Icon size={16} className="text-muted" aria-hidden="true" />
+                <p className="text-sm font-semibold tabular-nums">{formatAmount(quote.amount)}</p>
               </div>
-              <div className="mt-4 space-y-2">
-                {group.records.length === 0 ? (
-                  <p className="text-xs text-muted">No records in this signal.</p>
-                ) : (
-                  group.records.map((record, index) => (
-                    <pre
-                      key={`${group.id}-${index}`}
-                      className="overflow-x-auto rounded-md border border-border bg-surface p-3 text-[11px] leading-5 text-muted"
-                    >
-                      {JSON.stringify(record, null, 2)}
-                    </pre>
-                  ))
-                )}
-              </div>
+              <p className="mt-3 text-xs text-muted">
+                Stale for {quote.days_stale} days
+                {quote.age_days !== null && ` · Age ${quote.age_days.toFixed(1)} days`}
+              </p>
+              <SignalPeople customer={quote.customer} saleRep={quote.sale_rep} />
             </article>
-          );
-        })}
+          ))}
+        </SignalGroupCard>
+
+        <SignalGroupCard
+          title="Unpaid invoices"
+          icon={AlertTriangle}
+          count={report.summary.unpaid_invoices.count}
+          total={report.summary.unpaid_invoices.total_amount}
+          empty={report.unpaid_invoices.length === 0}
+          details={`Overdue: ${report.summary.unpaid_invoices.overdue_count} · Unpaid: ${report.summary.unpaid_invoices.unpaid_count} · Partially paid: ${report.summary.unpaid_invoices.partially_paid_count}`}
+        >
+          {report.unpaid_invoices.map((invoice, index) => (
+            <article key={invoice.id ?? `${invoice.inv_ref ?? "invoice"}-${index}`} className="rounded-md border border-border bg-surface p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h4 className="text-sm font-medium">{invoice.inv_ref || "Invoice reference unavailable"}</h4>
+                  <p className="mt-1 text-xs text-muted">
+                    {invoice.status_label || "Status unavailable"} · {invoice.payment_status_label || "Payment status unavailable"}
+                  </p>
+                </div>
+                <span className={`rounded-md px-2 py-1 text-[11px] ${invoice.overdue ? "bg-red-400/10 text-red-300" : "bg-surface-raised text-muted"}`}>
+                  {invoice.overdue ? "Overdue" : "Not overdue"}
+                </span>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-muted">
+                <p>Balance <span className="text-foreground">{formatAmount(invoice.balance)}</span></p>
+                <p>Age <span className="text-foreground">{invoice.days_invoice_age} days</span></p>
+                <p>Total <span className="text-foreground">{formatAmount(invoice.total_amount)}</span></p>
+                <p>Paid <span className="text-foreground">{formatAmount(invoice.amount_paid)}</span></p>
+              </div>
+              <p className="mt-2 text-xs text-muted">Invoice date: {invoice.invoice_date || "—"}</p>
+              <SignalPeople customer={invoice.customer} saleRep={invoice.sale_rep} />
+            </article>
+          ))}
+        </SignalGroupCard>
+
+        <SignalGroupCard
+          title="Stalled orders"
+          icon={Boxes}
+          count={report.summary.stalled_orders.count}
+          total={report.summary.stalled_orders.total_amount}
+          empty={report.stalled_orders.length === 0}
+        >
+          {report.stalled_orders.map((order, index) => (
+            <article key={order.id ?? `${order.inv_ref ?? "order"}-${index}`} className="rounded-md border border-border bg-surface p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h4 className="text-sm font-medium">{order.inv_ref || "Order reference unavailable"}</h4>
+                  <p className="mt-1 text-xs text-muted">
+                    {order.status_label || "Status unavailable"} · {order.payment_status_label || "Payment status unavailable"}
+                  </p>
+                </div>
+                <p className="text-sm font-semibold tabular-nums">{formatAmount(order.total_amount)}</p>
+              </div>
+              <p className="mt-3 text-xs text-muted">
+                Stalled for {order.days_invoice_age} days
+                {order.age_days !== null && ` · Age ${order.age_days.toFixed(1)} days`}
+                {" · "}Invoice {order.invoice_date || "date unavailable"}
+              </p>
+              <SignalPeople customer={order.customer} saleRep={order.sale_rep} />
+            </article>
+          ))}
+        </SignalGroupCard>
       </div>
     </section>
   );
+}
+
+function SignalGroupCard({
+  title,
+  icon: Icon,
+  count,
+  total,
+  empty,
+  details,
+  children,
+}: {
+  title: string;
+  icon: LucideIcon;
+  count: number;
+  total: number;
+  empty: boolean;
+  details?: string;
+  children: ReactNode;
+}) {
+  return (
+    <article className="rounded-lg border border-border bg-[#0c0f15] p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-medium">{title}</h3>
+          <p className="mt-2 text-xs text-muted">
+            {count} items · Total amount: {formatAmount(total)}
+          </p>
+          {details && <p className="mt-1 text-xs text-muted">{details}</p>}
+        </div>
+        <Icon size={16} className="text-muted" aria-hidden="true" />
+      </div>
+      <div className="mt-4 space-y-2">
+        {empty ? <p className="text-xs text-muted">No records in this signal.</p> : children}
+      </div>
+    </article>
+  );
+}
+
+function SignalPeople({
+  customer,
+  saleRep,
+}: {
+  customer: StaleQuote["customer"];
+  saleRep: StaleQuote["sale_rep"];
+}) {
+  return (
+    <p className="mt-3 border-t border-border pt-2 text-xs text-muted">
+      Customer: {customer?.company_name || "Unknown"}
+      {" · "}Sales rep: {saleRep?.name || "Unassigned"}
+    </p>
+  );
+}
+
+function formatAmount(amount: number) {
+  return amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }

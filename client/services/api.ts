@@ -3,7 +3,7 @@ import {
   mockSignalsReport,
   voiceConsoleData,
 } from "@/lib/mockData";
-import type { SignalsReport } from "@/types/api";
+import type { CustomerContext, HealthResponse, SignalsReport } from "@/types/api";
 
 const wait = (milliseconds: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
@@ -23,6 +23,47 @@ export async function fetchSignals(): Promise<SignalsReport> {
     console.warn("Unable to load live signals; using mock signals report.", error);
     return mockSignalsReport;
   }
+}
+
+export async function fetchHealth(): Promise<HealthResponse> {
+  const response = await fetch("http://localhost:8000/health", {
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Health request failed with status ${response.status}`);
+  }
+
+  return (await response.json()) as HealthResponse;
+}
+
+export async function fetchCustomerContext(
+  customerId: number,
+  options: { leadLimit?: number } = {},
+): Promise<CustomerContext> {
+  if (!Number.isInteger(customerId) || customerId < 1) {
+    throw new RangeError("Customer ID must be a positive integer.");
+  }
+
+  const query = new URLSearchParams();
+  if (options.leadLimit !== undefined) {
+    if (!Number.isInteger(options.leadLimit) || options.leadLimit < 1 || options.leadLimit > 500) {
+      throw new RangeError("Lead limit must be an integer between 1 and 500.");
+    }
+    query.set("lead_limit", String(options.leadLimit));
+  }
+
+  const search = query.size > 0 ? `?${query.toString()}` : "";
+  const response = await fetch(
+    `http://localhost:8000/api/customers/${customerId}/context${search}`,
+    { cache: "no-store" },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Customer context request failed with status ${response.status}`);
+  }
+
+  return (await response.json()) as CustomerContext;
 }
 
 export async function sendMessage(message: string): Promise<typeof chatData> {
