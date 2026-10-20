@@ -69,6 +69,12 @@ export interface UnpaidSummary {
 export interface StalledOrderSummary {
   count: number;
   total_amount: number;
+  reliable: boolean;
+}
+
+export interface StalledOrderList {
+  reliable: boolean;
+  items: StalledOrder[];
 }
 
 export interface SignalsSummary {
@@ -85,7 +91,7 @@ export interface SignalsReport {
   generated_at: string;
   stale_quotes: StaleQuote[];
   unpaid_invoices: UnpaidInvoice[];
-  stalled_orders: StalledOrder[];
+  stalled_orders: StalledOrderList;
   summary: SignalsSummary;
 }
 
@@ -175,3 +181,88 @@ export type ChatStreamEvent =
   | { event: "token"; data: ChatTokenEvent }
   | { event: "done"; data: ChatDoneEvent }
   | { event: "error"; data: ChatErrorEvent };
+
+export type AgentConfidence = "low" | "medium" | "high";
+
+export interface NegotiationOutput {
+  kind?: "negotiation";
+  input_hash?: string;
+  customer_id?: number | null;
+  customer_name?: string | null;
+  confidence?: AgentConfidence;
+  evidence?: string;
+  quote_id?: number;
+  quote_amount?: number;
+  likely_reason?: "price" | "no_response" | "new_customer_no_history" | "repeat_customer_slow" | "unclear";
+  tactic?: "follow_up" | "adjust_price" | "bundle_offer" | "let_go";
+  message_draft?: string | null;
+  flags?: string[];
+  source?: "agent" | "cache";
+  rejected_reason?: string;
+  error?: string;
+}
+
+export interface CollectionsOutput {
+  kind?: "collections";
+  input_hash?: string;
+  customer_id?: number | null;
+  customer_name?: string | null;
+  confidence?: AgentConfidence;
+  evidence?: string;
+  invoice_id?: number;
+  balance?: number;
+  approach?: "soft_reminder" | "firm_nudge" | "hold_off" | "escalate_to_human";
+  reason?: string;
+  message_draft?: string | null;
+  flags?: string[];
+  source?: "agent" | "cache";
+  rejected_reason?: string;
+  error?: string;
+}
+
+export interface AgentPriority {
+  customer_name: string;
+  why: string;
+  suggested_action: string;
+}
+
+export interface MasterBriefing {
+  bullets: string[];
+  priorities: AgentPriority[];
+  conflicts_resolved: string[];
+  flags?: string[];
+  rejected_reason?: string;
+  error?: string;
+}
+
+export interface AgentRunCounts {
+  negotiation_total: number;
+  collections_total: number;
+  unclear: number;
+  needs_review: number;
+  cached: number;
+}
+
+export interface AgentRunStarted {
+  run_id: string;
+  status: "started";
+}
+
+export interface AgentRunBriefing {
+  run_id: string;
+  started_at: string;
+  finished_at: string;
+  counts: AgentRunCounts;
+  negotiation: NegotiationOutput[];
+  collections: CollectionsOutput[];
+  master: MasterBriefing | null;
+  usage: Record<string, number> | null;
+  errors: string[];
+}
+
+export interface EmptyAgentBriefing {
+  run_id: null;
+  message: string;
+}
+
+export type LatestBriefingResponse = AgentRunBriefing | EmptyAgentBriefing;

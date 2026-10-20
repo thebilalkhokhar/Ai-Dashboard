@@ -244,28 +244,31 @@ export const mockSignalsReport = {
       sale_rep: null,
     },
   ],
-  stalled_orders: [
-    {
-      ...orders[2],
-      status: null,
-      payment_status: 0,
-      invoice_date: "2026-10-01",
-      days_invoice_age: 19,
-      age_days: 19,
-      customer: null,
-      sale_rep: null,
-    },
-    {
-      ...orders[3],
-      status: null,
-      payment_status: 1,
-      invoice_date: "2026-10-05",
-      days_invoice_age: 15,
-      age_days: 15,
-      customer: null,
-      sale_rep: null,
-    },
-  ],
+  stalled_orders: {
+    reliable: false,
+    items: [
+      {
+        ...orders[2],
+        status: null,
+        payment_status: 0,
+        invoice_date: "2026-10-01",
+        days_invoice_age: 19,
+        age_days: 19,
+        customer: null,
+        sale_rep: null,
+      },
+      {
+        ...orders[3],
+        status: null,
+        payment_status: 1,
+        invoice_date: "2026-10-05",
+        days_invoice_age: 15,
+        age_days: 15,
+        customer: null,
+        sale_rep: null,
+      },
+    ],
+  },
   summary: {
     quotes_scanned: 4,
     orders_scanned: 4,
@@ -285,6 +288,7 @@ export const mockSignalsReport = {
     stalled_orders: {
       count: 2,
       total_amount: 10100,
+      reliable: false,
     },
   },
 } satisfies SignalsReport;

@@ -268,7 +268,7 @@ export function Dashboard({
                           const customerId = [
                             ...signalsReport.stale_quotes,
                             ...signalsReport.unpaid_invoices,
-                            ...signalsReport.stalled_orders,
+                            ...signalsReport.stalled_orders.items,
                           ].find(
                             (signal) =>
                               signal.customer?.company_name === quote.customer.company_name &&
@@ -459,9 +459,9 @@ function AttentionNeeded({
           icon={Boxes}
           count={report.summary.stalled_orders.count}
           total={report.summary.stalled_orders.total_amount}
-          empty={report.stalled_orders.length === 0}
+          empty={report.stalled_orders.items.length === 0}
         >
-          {report.stalled_orders.map((order, index) => (
+          {report.stalled_orders.items.map((order, index) => (
             <article key={order.id ?? `${order.inv_ref ?? "order"}-${index}`} className="rounded-md border border-border bg-surface p-3">
               <div className="flex items-start justify-between gap-3">
                 <div>

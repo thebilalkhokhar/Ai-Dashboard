@@ -8,6 +8,8 @@ import type {
   ChatStreamEvent,
   CustomerContext,
   HealthResponse,
+  AgentRunStarted,
+  LatestBriefingResponse,
   SignalsReport,
 } from "@/types/api";
 
@@ -160,6 +162,31 @@ export async function fetchCustomerContext(
   }
 
   return (await response.json()) as CustomerContext;
+}
+
+export async function startAgentRun(): Promise<AgentRunStarted> {
+  const response = await fetch("http://localhost:8000/api/agents/run", {
+    method: "POST",
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Agent run request failed with status ${response.status}`);
+  }
+
+  return (await response.json()) as AgentRunStarted;
+}
+
+export async function fetchLatestBriefing(): Promise<LatestBriefingResponse> {
+  const response = await fetch("http://localhost:8000/api/briefing/latest", {
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Latest briefing request failed with status ${response.status}`);
+  }
+
+  return (await response.json()) as LatestBriefingResponse;
 }
 
 export async function sendMessage(
