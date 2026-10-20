@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     REDIS_URL: str = ""
     ERP_REQUEST_DELAY_SECONDS: float = 0.3
 
+    # --- Dashboard scheduler (in-process asyncio tasks) ---
+    REFRESH_LOOKBACK_DAYS: int = 2      # only this many days get re-pulled from the ERP
+    REFRESH_MINUTES: int = 10           # dashboard refresh interval
+    AGENT_FULL_RUN_HOUR: int = Field(default=6, ge=0, le=23)  # daily safety net (local time)
+    SCHEDULER_ENABLED: bool = True      # tests / dev set this to false
+    LIVE_MAX_CLIENTS: int = 20          # concurrent SSE subscribers
+
     # --- LLM (OpenAI stack by default; only read from .env) ---
     LLM_PROVIDER: str = ""
     LLM_API_KEY: str = ""
