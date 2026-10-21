@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Biztek AI Command Center",
-  description: "A real-time operational overview for Biztek AI.",
+  description: "A real-time operational overview: the Biztek AI Command Center.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

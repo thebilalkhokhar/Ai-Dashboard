@@ -79,13 +79,29 @@ def _collection(database: Any, name: str):
         return getattr(database, name)
 
 
+async def _existing_keys(collection) -> set[tuple[tuple[str, int], ...]]:
+    """Key specs already on the collection, whatever they were named."""
+    try:
+        info = await collection.index_information()
+    except Exception:  # a brand new collection, or no permission to list
+        return set()
+    return {tuple(tuple(key) for key in spec.get("key", [])) for spec in info.values()}
+
+
 async def ensure_indexes(database: Any) -> dict[str, int]:
-    """Create every declared index. Returns {collection: indexes created}."""
+    """Create every declared index. Returns {collection: indexes created}.
+
+    A key spec that already exists under another name (the ingest script created
+    plain single-field indexes first) is skipped, so re-running is quiet.
+    """
     created: dict[str, int] = {}
     for name, indexes in INDEXES.items():
         collection = _collection(database, name)
+        existing = await _existing_keys(collection)
         count = 0
         for suffix, keys in indexes:
+            if keys in existing:
+                continue
             try:
                 await collection.create_index(list(keys), name=f"{name}_{suffix}")
                 count += 1
