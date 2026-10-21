@@ -1,10 +1,16 @@
 """API endpoints.
 
+Every route here requires the X-API-Key header (see app/api/security.py) and
+CORS_ORIGINS decides which browser origins may call it.
+
 GET /api/signals                    - all attention-needed items in one JSON
 GET /api/customers/{id}/context     - one customer: quotes, orders, payments,
                                       leads + the ambiguous flag
-POST /api/agents/run                - starts ONE agent pipeline run (idempotent,
-                                      nothing is sent anywhere)
+POST /api/agents/run                - starts ONE agent pipeline run: a Redis
+                                      lock plus a "running" document in
+                                      agent_runs make a second concurrent call
+                                      answer 409 with the run_id in progress
+                                      (nothing is ever sent anywhere)
 GET /api/briefing/latest            - the latest saved master output + items
 
 Every number is computed in app/services/processors.py with ordinary Python.
@@ -19,10 +25,10 @@ import time
 import uuid
 from collections import deque
 from datetime import datetime, timezone
-from typing import Annotated, Dict, Any, Set
+from typing import Annotated, Dict, Any, Optional, Set
 
 from fastapi import APIRouter, HTTPException, Path, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.db import get_db
 from app.config import settings
@@ -39,6 +45,7 @@ from app.schemas.customer import CustomerContext
 from app.schemas.chat import ChatRequest
 from app.services.erp_client import ERPClient, ERPError
 from app.services import processors
+from app.services import run_guard
 
 router = APIRouter()
 
@@ -133,12 +140,13 @@ async def _background_run(run_id: str) -> None:
     from app import db as app_db
     from app.agents.graph import run_pipeline
 
+    database = app_db.get_db()
     try:
         await run_pipeline(run_id=run_id)
     except Exception as exc:  # keep a trace even if the graph itself blew up
         _run_log.exception("agent run %s failed", run_id)
         try:
-            await app_db.get_db().agent_runs.insert_one(
+            await database.agent_runs.insert_one(
                 {
                     "run_id": run_id,
                     "started_at": datetime.now(timezone.utc).isoformat(),
@@ -149,12 +157,33 @@ async def _background_run(run_id: str) -> None:
             )
         except Exception:
             pass
+    finally:
+        # whatever happened, the next run must be allowed to start
+        await run_guard.release_run(run_id, database)
 
 
 @router.post("/agents/run")
 async def run_agents() -> dict:
-    """Start one pipeline run in the background; returns its id immediately."""
+    """Start one pipeline run in the background; returns its id immediately.
+
+    One run at a time: the Redis lock (TTL AGENT_RUN_LOCK_TTL_SECONDS) and the
+    "running" document in agent_runs are taken before the task is created, so a
+    second call - from this worker or another one - gets 409 plus the run_id
+    already in progress instead of a second, identical, billed run.
+    """
     run_id = str(uuid.uuid4())
+    database = get_db()
+    already_running: Optional[str] = await run_guard.acquire_run(run_id, database)
+    if already_running:
+        _run_log.info("agent run refused: %s is still running", already_running)
+        return JSONResponse(
+            status_code=409,
+            content={
+                "run_id": already_running,
+                "status": "already_running",
+                "detail": "an agent run is already in progress",
+            },
+        )
     task = asyncio.create_task(_background_run(run_id))
     _running_tasks.add(task)
     task.add_done_callback(_running_tasks.discard)

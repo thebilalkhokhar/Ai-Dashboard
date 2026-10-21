@@ -175,10 +175,20 @@ export function AgentReview() {
     try {
       const started = await startAgentRun();
       if (!mountedRef.current) return;
+      if (started.status === "already_running") {
+        setStatusMessage(
+          started.run_id
+            ? `Agent run ${started.run_id.slice(0, 8)} is already running. Waiting for it to finish...`
+            : "An agent run is already running; it will show up when it finishes.",
+        );
+        if (started.run_id) await waitForRun(started.run_id);
+        return;
+      }
+      const { run_id: runId } = started;
       setStatusMessage(
-        `Agent run ${started.run_id.slice(0, 8)} started. Waiting for the pipeline to finish...`,
+        `Agent run ${runId.slice(0, 8)} started. Waiting for the pipeline to finish...`,
       );
-      await waitForRun(started.run_id);
+      await waitForRun(runId);
     } catch (error) {
       if (!mountedRef.current) return;
       setErrorMessage(

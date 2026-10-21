@@ -18,19 +18,30 @@ import type {
   StuckLeadsResponse,
 } from "@/types/api";
 
+// Where the browser sends backend calls.
+//
+// By default this is the same-origin proxy (/backend/... -> Next.js route
+// handler -> FastAPI) because that is the only place the X-API-Key exists:
+// anything under NEXT_PUBLIC_* is compiled into the browser bundle, so a real
+// key must never be put in one. Set NEXT_PUBLIC_API_BASE_URL to the FastAPI
+// URL only when the backend runs with AUTH_ENABLED=false (local development),
+// e.g. NEXT_PUBLIC_API_BASE_URL=http://localhost:8000 npm run dev.
 export const API_BASE_URL = (
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
+  process.env.NEXT_PUBLIC_API_BASE_URL ?? "/backend"
 ).replace(/\/+$/, "");
 
 const inFlightSignals = new Map<string, Promise<SignalsReport>>();
 
 export class ApiError extends Error {
   readonly status: number;
+  /** the parsed JSON body, when the backend sent one (409 carries its run_id) */
+  readonly body: unknown;
 
-  constructor(message: string, status = 0) {
+  constructor(message: string, status = 0, body?: unknown) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.body = body;
   }
 }
 
@@ -69,8 +80,9 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     let detail = "";
+    let payload: unknown;
     try {
-      const payload: unknown = await response.json();
+      payload = await response.json();
       if (payload && typeof payload === "object" && "detail" in payload) {
         detail = describeDetail((payload as { detail: unknown }).detail);
       }
@@ -80,6 +92,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(
       detail || `Backend request failed (HTTP ${response.status}).`,
       response.status,
+      payload,
     );
   }
 
@@ -168,8 +181,27 @@ export function fetchStuckLeads(
   return request;
 }
 
-export function startAgentRun(): Promise<AgentRunStarted> {
-  return apiFetch<AgentRunStarted>("/api/agents/run", { method: "POST" });
+export type AgentRunStart =
+  | { status: "started"; run_id: string }
+  | { status: "already_running"; run_id?: string; detail?: string };
+
+// 409 is not a failure: a run is already in progress and its id comes back,
+// so the caller can simply wait for that one.
+export async function startAgentRun(): Promise<AgentRunStart> {
+  try {
+    const started = await apiFetch<AgentRunStarted>("/api/agents/run", { method: "POST" });
+    return { status: "started", run_id: started.run_id };
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) {
+      const body = error.body as { run_id?: unknown; detail?: unknown } | undefined;
+      return {
+        status: "already_running",
+        run_id: typeof body?.run_id === "string" ? body.run_id : undefined,
+        detail: typeof body?.detail === "string" ? body.detail : error.message,
+      };
+    }
+    throw error;
+  }
 }
 
 export function fetchLatestBriefing(): Promise<LatestBriefingResponse> {

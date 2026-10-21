@@ -63,6 +63,17 @@ class Settings(BaseSettings):
     REDIS_URL: str = ""
     ERP_REQUEST_DELAY_SECONDS: float = 0.3
 
+    # --- API auth ---
+    # AUTH_ENABLED=false is for local development only; it logs a loud warning.
+    AUTH_ENABLED: bool = True
+    # Comma-separated X-API-Key values the client may use.
+    API_KEYS: str = ""
+    # Comma-separated browser origins allowed to call the API.
+    CORS_ORIGINS: str = "http://localhost:3000"
+
+    # --- One agent run at a time (Redis lock + Mongo 'running' doc) ---
+    AGENT_RUN_LOCK_TTL_SECONDS: int = 1800
+
     # --- Dashboard scheduler (in-process asyncio tasks) ---
     REFRESH_LOOKBACK_DAYS: int = 2      # only this many days get re-pulled from the ERP
     REFRESH_MINUTES: int = 10           # dashboard refresh interval
