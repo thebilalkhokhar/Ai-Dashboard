@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 from app import db as app_db
 from app.agents.chat_tools import CHAT_TOOL_MAP, CHAT_TOOLS, format_money, invoke_tool
-from app.agents.graph import _walk_numbers, invented_amounts
+from app.agents.graph import invented_amounts
 from app.agents.llm import add_usage, build_model, empty_usage, usage_of
 from app.config import settings
 from app.services.processors import ERP_TZ
@@ -128,45 +128,208 @@ def trim_turns(turns: list[dict], limit: int = MAX_STORED_TURNS) -> list[dict]:
     return [turn for turn in turns if turn.get("question") is not None and turn.get("answer") is not None][-limit:]
 
 
+# ---------------------------------------------------------------------------
+# numeric claim validation
+#
+# A number in an answer has to be a value a tool actually returned: an amount,
+# a count or a day figure from a real field. IDs and dates are only accepted
+# when the sentence puts them in an ID/date context. Digit runs found inside
+# unrelated strings (a date '2026-10-27' hiding a wrong count of 27) no longer
+# count as evidence.
+# ---------------------------------------------------------------------------
+
+_ID_KEY_RE = re.compile(r"(^|_)(id|ids|no|number|ref|code|run)(_|$)", re.I)
+_ID_CONTEXT_RE = re.compile(
+    r"(?i)\b(invoice|inv|quote|quotation|order|lead|customer|rep|run|thread|ref|reference|"
+    r"id|number|#)\b[^0-9$]{0,18}$"
+)
+_MONEYISH_RE = re.compile(r"^\s*-?\$[\d,]+(?:\.\d+)?\s*$")
+_NUMBER_RE = re.compile(
+    r"(?<![\w.])[\d۰-۹٠-٩][\d۰-۹٠-٩,]*(?:\.[\d۰-۹٠-٩]+)?(?:\s*[kKmM])?(?![\w])"
+)
+_MONEY_RE = re.compile(r"\$\s*(-?[\d,]+(?:\.\d+)?)")
+# "2026-10-27", "2026-10-27T14:24:32", "10/27/2026"
+_DATE_STRING_RE = re.compile(
+    r"\d{4}-\d{2}(?:-\d{2})?(?:[T ]\d{2}:\d{2}(?::\d{2})?)?|\d{1,2}/\d{1,2}/\d{2,4}"
+)
+# rounded money: "$147k", "$2.4M"
+_SUFFIXED_MONEY_RE = re.compile(r"\$\s*([\d][\d,]*(?:\.\d+)?)\s*([kKmM])(?![\w])")
+# part of a written reference such as '27608-2025-10' or '10/27/2026'
+_REFERENCE_RE = re.compile(r"\d[-/]\d")
+# a whole ERP reference / date-ish token: one identifier, never three numbers
+_REFERENCE_TOKEN_RE = re.compile(r"\d+(?:[-/]\d+)+")
+# the end of a sentence like 'Unpaid invoices: ' or an id list '33245, '
+_ID_LIST_CUE_RE = re.compile(r"(?s)[,:]\s*$")
+
+_SUFFIX_MULTIPLIER = {"k": 1_000.0, "m": 1_000_000.0}
+
+# digits the models may write in Urdu-Indic or Arabic-Indic form
+_DIGIT_TABLE = {
+    **{ord("۰") + i: str(i) for i in range(10)},   # Urdu / Persian
+    **{ord("٠") + i: str(i) for i in range(10)},   # Arabic
+}
+
+
+def normalize_digits(text: str) -> str:
+    """Urdu/Arabic digit forms -> ASCII, so the checks work in every language."""
+    return (text or "").translate(_DIGIT_TABLE)
+
+
+def _number_value(token: str) -> tuple[float, float]:
+    """(value, tolerance) for one written number: '1,500', '$45k', '$2.4M'."""
+    cleaned = normalize_digits(token).replace(",", "").replace("$", "").strip()
+    suffix = cleaned[-1:].lower()
+    if suffix in _SUFFIX_MULTIPLIER:
+        multiplier = _SUFFIX_MULTIPLIER[suffix]
+        try:
+            value = float(cleaned[:-1].strip()) * multiplier
+        except ValueError:
+            return 0.0, 0.0
+        return value, multiplier / 2  # '45k' may really be 44,501 - 45,500
+    try:
+        return float(cleaned), 0.0
+    except ValueError:
+        return 0.0, 0.0
+
+
+def _matches(value: float, tolerance: float, allowed: set[float]) -> bool:
+    return any(abs(value - known) <= max(tolerance, 0.005) for known in allowed)
+
+
+def _harvest(node: Any, facts: set[float], identifiers: set[float], dates: set[str], key_hint: str = "") -> None:
+    """Split tool-result numbers into 'values a claim may copy' and IDs/dates."""
+    if isinstance(node, bool) or node is None:
+        return
+    if isinstance(node, (int, float)):
+        (identifiers if _ID_KEY_RE.search(key_hint) else facts).add(float(node))
+        return
+    if isinstance(node, dict):
+        for key, value in node.items():
+            _harvest(value, facts, identifiers, dates, str(key))
+        return
+    if isinstance(node, (list, tuple)):
+        for value in node:
+            _harvest(value, facts, identifiers, dates, key_hint)
+        return
+
+    text = normalize_digits(str(node))
+    if _MONEYISH_RE.match(text):
+        facts.add(float(text.strip().replace("$", "").replace(",", "")))
+        return
+    # a date string is an identifier, never a source of counts - but the year
+    # alone is safe to write in prose ("revenue in 2026")
+    found_dates = _DATE_STRING_RE.findall(text)
+    for chunk in found_dates:
+        dates.add(chunk)
+        if re.match(r"\d{4}-", chunk):
+            facts.add(float(chunk[:4]))
+    if _ID_KEY_RE.search(key_hint):
+        for run in re.findall(r"\d+(?:,\d{3})*(?:\.\d+)?", text):
+            identifiers.add(float(run.replace(",", "")))
+        return
+    if re.fullmatch(r"-?\d[\d,]*(?:\.\d+)?", text.strip()):
+        facts.add(float(text.strip().replace(",", "")))
+        return
+    stripped = _DATE_STRING_RE.sub(" ", text)
+    # '27608-2025-10' is one ERP reference: it belongs to the id bucket, and its
+    # month part must not become a count a claim can borrow
+    for chunk in _REFERENCE_TOKEN_RE.findall(stripped):
+        for run in re.findall(r"\d+", chunk):
+            identifiers.add(float(run))
+    stripped = _REFERENCE_TOKEN_RE.sub(" ", stripped)
+    for match in re.finditer(r"(?<!\d)\d+(?:,\d{3})*(?:\.\d+)?(?!\d)", stripped):
+        facts.add(float(match.group(0).replace(",", "")))
+
+
+def allowed_numbers(tool_results: list[dict]) -> tuple[set[float], set[float], set[str]]:
+    """(amounts/counts/days, ids, date strings) a chat answer may write."""
+    facts: set[float] = set()
+    identifiers: set[float] = set()
+    dates: set[str] = set()
+    _harvest({"tool_results": tool_results}, facts, identifiers, dates)
+    return facts, identifiers, dates
+
+
+def _mask(text: str, spans: list[tuple[int, int]]) -> str:
+    """Blank out ranges so masked-out tokens are not checked twice."""
+    characters = list(text)
+    for start, end in spans:
+        for index in range(start, min(end, len(characters))):
+            characters[index] = " "
+    return "".join(characters)
+
+
 def validate_numeric_claims(
     text: str, tool_results: list[dict], prior_text: str = ""
 ) -> list[str]:
-    """Reject unsupported dollar amounts and other numeric claims in the answer."""
-    if not re.search(r"(?<!\w)\d[\d,]*(?:\.\d+)?", text or ""):
+    """Reject amounts, counts, IDs and dates the tools never returned."""
+    text = normalize_digits(text or "")
+    if not re.search(r"\d", text):
         return []
 
-    payload = {"tool_results": tool_results}
-    prior = {
-        float(value.replace(",", ""))
-        for value in re.findall(r"(?<![\w])\d[\d,]*(?:\.\d+)?", prior_text or "")
-    }
-    errors = [
+    facts, identifiers, dates = allowed_numbers(tool_results)
+    prior_facts: set[float] = set()
+    prior_ids: set[float] = set()
+    prior_dates: set[str] = set()
+    _harvest({"prior": prior_text or ""}, prior_facts, prior_ids, prior_dates)
+    facts |= prior_facts
+    identifiers |= prior_ids
+    dates |= prior_dates
+
+    errors: list[str] = []
+    scanned = text
+
+    # 1) dates: only when the very same date exists in this turn's data
+    date_spans = [(m.start(), m.end()) for m in _DATE_STRING_RE.finditer(scanned)]
+    for match in _DATE_STRING_RE.finditer(scanned):
+        written = match.group(0)
+        if not any(written == known or known.startswith(written) for known in dates):
+            errors.append(f"unsupported date {written}")
+    scanned = _mask(scanned, date_spans)
+
+    # 2) rounded money ("$147k", "$2.4M") may only differ by the rounding
+    suffix_spans = []
+    for match in _SUFFIXED_MONEY_RE.finditer(scanned):
+        value, tolerance = _number_value(match.group(0))
+        suffix_spans.append((match.start(), match.end()))
+        if not _matches(value, tolerance, facts):
+            errors.append(f"unsupported amount {match.group(0).strip()}")
+    scanned = _mask(scanned, suffix_spans)
+
+    # 3) dollar amounts must be money Python computed
+    errors.extend(
         f"unsupported amount {amount:g}"
-        for amount in invented_amounts(text, payload)
-        if not any(abs(amount - previous) < 0.005 for previous in prior)
-    ]
+        for amount in invented_amounts(scanned, {"tool_results": tool_results, "prior": prior_text or ""})
+        if not _matches(amount, 0.0, facts)
+    )
 
-    allowed: set[float] = set()
-    _walk_numbers(payload, allowed)
-    allowed |= prior
-    # IDs and names may contain digits (for example, "Pure 7"); they still
-    # count as present in the tool result if the same digits appear in it.
-    for value in re.findall(r"(?<![\w])\d[\d,]*(?:\.\d+)?", json.dumps(payload, default=str)):
-        try:
-            allowed.add(float(value.replace(",", "")))
-        except ValueError:
-            pass
+    # 4) every remaining number: a value the tools computed, or an id/date that
+    #    the sentence presents as an identifier
+    for match in _NUMBER_RE.finditer(scanned):
+        token = match.group(0)
+        value, tolerance = _number_value(token)
+        before = scanned[: match.start()]
+        window = scanned[max(0, match.start() - 2): match.end() + 2]
+        in_id_context = bool(_ID_CONTEXT_RE.search(before[-40:])) or bool(_REFERENCE_RE.search(window))
+        if in_id_context:
+            if not _matches(value, tolerance, facts | identifiers):
+                errors.append(f"unsupported id {token.strip()}")
+            continue
+        if not _matches(value, tolerance, facts):
+            # A large figure that the tools returned as an id may still be
+            # listed as one ('unpaid: 33245, 33407') even without the word
+            # 'invoice' in front of it; a small count may not borrow it.
+            listed = bool(_ID_LIST_CUE_RE.search(before[-40:])) or bool(
+                re.match(r"\s*\(", scanned[match.end(): match.end() + 3])
+            )
+            if listed and _matches(value, tolerance, identifiers) and value >= 1_000:
+                continue
+            label = "amount" if before.rstrip().endswith("$") else "number"
+            errors.append(f"unsupported {label} {token.strip()}")
 
-    # Check every digit in the final response. This covers counts and bare
-    # money claims, and also prevents dates or IDs from being made up.
-    for raw_value in re.findall(r"(?<![\w])\d[\d,]*(?:\.\d+)?", text or ""):
-        value = float(raw_value.replace(",", ""))
-        if not any(abs(value - found) < 0.005 for found in allowed):
-            errors.append(f"unsupported number {value:g}")
-
-    # Currency claims must match both a tool value and the Python format sent
-    # to the model (for example, $2,379.50 rather than $2379.5).
-    for match in re.finditer(r"\$\s*(-?[\d,]+(?:\.\d+)?)", text or ""):
+    # Currency claims must match both a tool value and the Python format used
+    # elsewhere (for example, $2,379.50 rather than $2379.5).
+    for match in _MONEY_RE.finditer(scanned):
         value = float(match.group(1).replace(",", ""))
         expected = f"${int(value):,}" if value == int(value) else f"${value:,.2f}"
         if match.group(0).replace(" ", "") != expected:

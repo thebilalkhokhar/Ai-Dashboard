@@ -344,6 +344,60 @@ def test_numeric_guard_accepts_prior_numbers_and_rejects_new_numbers():
     )
 
 
+def test_a_wrong_count_cannot_borrow_digits_from_a_date_or_a_reference():
+    """Item 12: the old guard accepted any digit sequence in the tool JSON."""
+    from app.agents.chat import validate_numeric_claims
+
+    results = [
+        {
+            "tool": "get_customer_context",
+            "result": {
+                "customer_id": 3312,
+                "quotes": {"count": 24, "total_amount": 147296.0},
+                "invoice_date": "2026-10-27",
+                "inv_ref": "33027-2026-10",
+            },
+        }
+    ]
+    # a real count field, a real amount, and ids/dates in an id context are fine
+    assert validate_numeric_claims("There are 24 quotes.", results) == []
+    assert validate_numeric_claims("Revenue is $147,296.", results) == []
+    assert validate_numeric_claims("Invoice 33027, dated 2026-10-27.", results) == []
+    assert validate_numeric_claims("Customer 3312 has 24 quotes.", results) == []
+    # 27 lives only inside a date and only 33027 inside a reference
+    assert validate_numeric_claims("There are 27 quotes.", results)
+    assert validate_numeric_claims("Invoice 33028 is open.", results)
+    assert validate_numeric_claims("There are 27 pieces.", results)
+    # a customer id is not a count either, and an invented date is not a fact
+    assert validate_numeric_claims("There are 3312 quotes.", results)
+    assert validate_numeric_claims("Invoiced on 2026-11-02.", results)
+    assert validate_numeric_claims("Invoiced on 2026-10-27.", results) == []
+    # a year in prose is fine when the data really is from that year
+    assert validate_numeric_claims("The quote is from 2026.", results) == []
+
+
+def test_money_suffixes_and_formatting_are_normalised_before_matching():
+    from app.agents.chat import validate_numeric_claims
+
+    results = [{"tool": "get_dashboard_metrics", "result": {"unpaid_total": "$2,379.50"}}]
+    assert validate_numeric_claims("Still open at $2,379.50.", results) == []
+    assert validate_numeric_claims("Still open at $2.4k.", results) == []
+    assert validate_numeric_claims("Still open at $2,380.", results)  # outside the rounding
+    big = [{"tool": "get_top_unpaid", "result": {"total_balance": 147296.0}}]
+    assert validate_numeric_claims("They owe $147k.", big) == []
+    assert validate_numeric_claims("They owe $150k.", big)
+
+
+def test_urdu_and_roman_urdu_digits_are_validated_the_same_way():
+    from app.agents.chat import normalize_digits, validate_numeric_claims
+
+    assert normalize_digits("۲۴ quotes") == "24 quotes"
+    results = [{"tool": "get_signals_summary", "result": {"stale_quotes": {"count": 24}}}]
+    assert validate_numeric_claims("۲۴ quotes baki hain.", results) == []
+    assert validate_numeric_claims("Quotes ki tadaad 24 hai.", results) == []
+    assert validate_numeric_claims("۲۷ quotes baki hain.", results)
+
+
 @pytest.mark.asyncio
 async def test_customer_context_includes_true_unpaid_invoice_count():
     now = datetime.now(timezone.utc)
