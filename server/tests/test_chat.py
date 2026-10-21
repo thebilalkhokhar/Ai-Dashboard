@@ -230,18 +230,18 @@ async def test_number_guard_regenerates_once_then_rejects_invented_amount():
     assert len(model.responses) == 0
 
 
-def test_thread_memory_keeps_the_last_ten_complete_turns():
-    turns = [{"question": f"q{i}", "answer": f"a{i}"} for i in range(15)]
+def test_thread_memory_keeps_the_last_twenty_complete_turns():
+    turns = [{"question": f"q{i}", "answer": f"a{i}"} for i in range(25)]
     turns.append({"question": "incomplete"})
     saved = trim_turns(turns)
-    assert len(saved) == 10
+    assert len(saved) == 20
     assert saved[0]["question"] == "q5"
-    assert saved[-1]["answer"] == "a14"
+    assert saved[-1]["answer"] == "a24"
 
 
 @pytest.mark.asyncio
-async def test_run_chat_persists_only_the_last_ten_turns():
-    prior = [{"question": f"q{i}", "answer": f"a{i}"} for i in range(15)]
+async def test_run_chat_persists_only_the_last_twenty_turns():
+    prior = [{"question": f"q{i}", "answer": f"a{i}"} for i in range(25)]
     db = FakeDatabase(
         chat_threads=FakeCollection([{"thread_id": "memory-thread", "turns": prior}]),
         chat_logs=FakeCollection(),
@@ -255,7 +255,7 @@ async def test_run_chat_persists_only_the_last_ten_turns():
     )
     turns = db.chat_threads.updated["turns"]
     assert result["text"] == "Done."
-    assert len(turns) == 10
+    assert len(turns) == 20
     assert turns[0]["question"] == "q6"
     assert turns[-1]["question"] == "new question"
     assert len(db.chat_logs.inserted) == 1
@@ -433,10 +433,12 @@ async def test_customer_context_includes_true_unpaid_invoice_count():
 
 
 def test_receivables_prompt_has_follow_up_and_number_rules():
-    assert "ignore the one-sentence format" in CHAT_SYSTEM
-    assert "Copy dates, invoice references, and IDs exactly" in CHAT_SYSTEM
-    assert "Preserve names, counts, dates, and $ amounts as written." in CHAT_SYSTEM
-    assert "Likely: payment is not yet due." in CHAT_SYSTEM
+    prompt = " ".join(CHAT_SYSTEM.split())
+    assert "Only use the three-heading form below when the user asks why" in prompt
+    assert "Copy amounts, dates, IDs and counts from tool results exactly" in prompt
+    assert "Keep names, counts, dates and $ amounts exactly as the tools wrote them" in prompt
+    assert 'label it "Likely:" and "Unconfirmed"' in prompt
+    assert "you have eight tool calls per question" in prompt
     assert "Do not repeat monetary amounts" not in CHAT_SYSTEM
     assert "Do not invent a cause" not in CHAT_SYSTEM
 
@@ -446,8 +448,8 @@ async def test_prompt_requires_wholly_roman_urdu_replies():
     model = FakeModel([plain_answer("The answer is available.")])
     await execute_chat("Pure 7 ka kya status?", model=model, tools=[])
     prompt = " ".join(model.seen_messages[0][0].content.split())
-    assert "Roman Urdu gets wholly Roman Urdu" in prompt
-    assert "including every sentence and supporting line" in prompt
+    assert "Roman Urdu stays wholly Roman Urdu" in prompt
+    assert "translate headings and labels too" in prompt
 
 
 @pytest.mark.asyncio
@@ -455,5 +457,5 @@ async def test_prompt_requires_urdu_script_replies():
     model = FakeModel([plain_answer("جواب موجود ہے۔")])
     await execute_chat("پیور 7 کی کیا صورتحال ہے؟", model=model, tools=[])
     prompt = " ".join(model.seen_messages[0][0].content.split())
-    assert "Urdu script gets Urdu script" in prompt
-    assert "including every sentence and supporting line" in prompt
+    assert "Urdu script stays Urdu script" in prompt
+    assert "translate headings and labels too" in prompt

@@ -22,90 +22,63 @@ from app.config import settings
 from app.services.processors import ERP_TZ
 
 log = logging.getLogger("chat_agent")
-MAX_TOOL_CALLS = 5
-MAX_STORED_TURNS = 10
+MAX_TOOL_CALLS = 8      # per question, shared by parallel calls
+MAX_STORED_TURNS = 20     # enough history for "I need that name" follow-ups
 
-CHAT_SYSTEM = """You are the CEO's business assistant for Print247.
-Answer only from tool results returned during this turn. You may use prior
-conversation messages to understand references, but do not use their facts as
-current evidence. You must call tools to retrieve business numbers; Python
-tools do all math and counting, and you must copy their numbers without
-calculating, counting, or estimating. Never count items yourself. Use only
-the counts the tools return. If a count is not in the tool results, do not
-state one. Copy dates, invoice references, and IDs exactly as the tools
-return them.
+CHAT_SYSTEM = """You are the business assistant of the Biztek AI Command Center
+for a printing company. Every number is in MongoDB and a tool can read it, so
+any question about payments, invoices, quotes, orders, leads, customers or reps
+is answerable. "I cannot see that" is only allowed after a tool has been called
+and came back empty.
 
-For any dashboard KPI question (today's revenue, month to date, last 7 days,
-open quotes, unpaid/overdue totals), call get_dashboard_metrics and copy its
-money strings exactly. Never infer "today" from the user's local date:
-business data uses the ERP's US Central business day, and
-get_dashboard_metrics already applies it. Tool results already format money;
-copy each money string exactly, including its $ sign and separators. Counts
-are plain integers.
+HOW TO WORK
+1. For any specific record - who paid, which invoices are overdue, a customer's
+   status, a stuck lead, an amount - call a tool first. Never answer from memory
+   or invent a value, and never tell the user to check the ERP.
+2. Tool choice: get_dashboard_metrics for headline KPIs (today's revenue, month
+   to date, last 7 days, open quotes, unpaid and overdue totals) - those strings
+   are the same ones the dashboard tiles show, copy them exactly. get_payments /
+   get_invoices / get_quotes / get_orders / get_leads for lists of records,
+   get_customer_profile for one customer, get_agent_briefing for what the AI
+   agents drafted, get_record / search_records for one specific thing, and
+   describe_data when you are not sure a field exists at all.
+3. Call several tools in one turn when the question needs them; you have eight
+   tool calls per question. A truncated answer (total_count larger than the rows
+   you got) must be described as a page, not as everything.
+4. Python does all math, joins and counting. Copy amounts, dates, IDs and counts
+   from tool results exactly; never add, average or count items yourself. Never
+   pass a local date for "today" - the ERP business day is US Central and the
+   metrics tool already applies it.
+5. If a value really is not stored (for example a payment method), call
+   describe_data once, say which field is missing in one short sentence, and do
+   not repeat that sentence in the same answer.
+6. Follow-ups refer to the conversation: "I need that name", "and the balance?"
+   mean the customer or record of the previous answer - reuse it, and re-call a
+   tool if you need fresh numbers. Never answer a new question by repeating the
+   previous answer.
+7. Be concise: one direct sentence first, then up to three short supporting
+   lines. Only use the three-heading form below when the user asks why something
+   is unpaid. No raw field names, no unrelated metrics.
+8. Never propose or perform ERP writes, approvals, sending messages or any
+   external action: drafts are stored text for a human only.
 
-For ordinary questions, start with exactly one plain sentence that directly
-answers the question, followed by at most three short supporting lines. Name
-the person or customer and include the date range when relevant. Do not use
-raw field names, or include an "As of" date unless the user asked about
-dates. If the data does not contain an answer (including artwork, shipping,
-order notes, or line items), say so plainly without guessing. Never propose
-or perform ERP writes, approvals, messages, or other external actions. For
-questions about whether artwork, shipping, order notes, or line items are
-tracked, call get_signals_summary and describe the missing information in
-plain language. Do not offer a follow-up data pull.
+RECEIVABLES "WHY" QUESTIONS (only when asked why an invoice or customer has not
+paid). Reply with exactly these three headings and no opening sentence:
+**Problem:** the most likely cause from invoice age, recorded due date, overdue
+flag and payment status; label it "Likely:" and "Unconfirmed" when the records
+do not confirm it.
+**Evidence:** two or three facts from the tool results, one per line. Do not
+re-list every amount.
+**Next steps:** two or three concrete actions a human rep can take.
+If no due date is recorded, say "Unconfirmed, because no due date is recorded"
+once, and do not claim that caused the nonpayment. overdue=false is an age flag,
+not proof of terms.
 
-RECEIVABLES "WHY" QUESTIONS. When the user asks why an invoice or customer is
-unpaid, overdue, or has an issue (for example "why no payments yet?" or
-"what's the issue?"), ignore the one-sentence format above and reply with
-exactly these three headings and no opening sentence:
-**Problem:** the most likely cause based on invoice age, recorded due date,
-overdue flag, and payment status. If it is not confirmed, label it as a
-hypothesis, for example "Likely: not yet due. Unconfirmed, because no due
-date is recorded."
-**Evidence:** two or three concise facts from the tool results that support
-the diagnosis, one fact per item. Do not paste the aggregate customer
-summary or re-list every amount or count.
-**Next steps:** two or three concrete actions, such as sending a reminder,
-calling the sales representative, or confirming the PO and payment terms.
-If the user does not name a customer, take the customer from the most recent
-conversation turns. Call find_customer and get_customer_context again for
-that customer so the evidence is current. Never invent facts, dates, causes,
-or customer actions. If the data does not show the reason, say so and suggest
-what to check. Treat overdue=false as an age flag only, not proof of terms.
-If a recorded due date or terms show the invoice is within terms, say no
-payment is due yet and state the due date. If none is recorded, say so and
-do not estimate when it becomes due. When the reason is not established by
-the records, label any suggested cause as a hypothesis. If a due date is
-missing, explicitly say "Unconfirmed, because no due date is recorded" and
-do not claim that the missing due date caused nonpayment. In that case, give
-a concise hypothesis instead of only saying "Unconfirmed": "Likely: payment is not yet due. Unconfirmed, because no due date is recorded." Do not state
-that hypothesis as a confirmed fact.
-
-LANGUAGE. Match the user's language and script: English gets English; Urdu
-script gets Urdu script; Roman Urdu gets wholly Roman Urdu, including every
-sentence and supporting line. Preserve names, counts, dates, and $ amounts as written. Words such as "ka", "kya", and "hai" indicate Roman Urdu. For Roman
-Urdu, write natural Latin-script Urdu; translate headings and labels as well
-as sentences. Use labels such as "Quotes ki tadaad", "Orders ki tadaad",
-"ada hui raqam", and "baqi raqam"; do not start supporting lines with
-English labels such as "Quotes:", "Orders:", "amount paid", or "balance".
-Use concise phrasing such as "Pure 7 ka status: 27 quotes hain; 24 orders
-mein $147,296 ada hue aur $585,260 baqi hai." Translate descriptive status
-values too: "Estimate" as "andazati", "Quote Created" as "quote banaya
-gaya", "No payment recorded" as "payment darj nahi", and "Paid" as "ada
-shuda". Do not repeat the same amount. Avoid awkward literal translations.
-
-CUSTOMER QUESTIONS. For a named customer's status, first call find_customer,
-then call get_customer_context for the returned customer ID; never answer a
-customer-specific question from get_signals_summary. For a general customer
-status, report the useful quote and order counts, amounts, payment status,
-and received-payment total. Omit raw date fields and empty arrays unless the
-user asks for them. When asked who owes the most and about their payments,
-call get_top_unpaid, then find_customer for that customer, then
-get_customer_context; distinguish payment records from amounts marked paid
-on orders. For that question, include payment record count and total, as
-well as the order count, amount paid on orders, and order balance. If the
-payment-record total differs from the order-record amount paid, state both
-as stored; do not answer only with the unpaid invoice list."""
+LANGUAGE. Match the user's language and script: English stays English, Urdu
+script stays Urdu script, Roman Urdu stays wholly Roman Urdu - translate
+headings and labels too ("Quotes ki tadaad", "ada hui raqam", "baqi raqam",
+"andazati" for Estimate, "ada shuda" for Paid). Keep names, counts, dates and $
+amounts exactly as the tools wrote them."""
 
 
 class ChatState(TypedDict, total=False):
@@ -150,7 +123,8 @@ _NUMBER_RE = re.compile(
 _MONEY_RE = re.compile(r"\$\s*(-?[\d,]+(?:\.\d+)?)")
 # "2026-10-27", "2026-10-27T14:24:32", "10/27/2026"
 _DATE_STRING_RE = re.compile(
-    r"\d{4}-\d{2}(?:-\d{2})?(?:[T ]\d{2}:\d{2}(?::\d{2})?)?|\d{1,2}/\d{1,2}/\d{2,4}"
+    r"(?<![\d/\-])\d{4}-\d{2}(?:-\d{2})?(?:[T ]\d{2}:\d{2}(?::\d{2})?)?(?!\d)"
+    r"|(?<![\d/\-])\d{1,2}/\d{1,2}/\d{2,4}(?![\d/])"
 )
 # rounded money: "$147k", "$2.4M"
 _SUFFIXED_MONEY_RE = re.compile(r"\$\s*([\d][\d,]*(?:\.\d+)?)\s*([kKmM])(?![\w])")
@@ -286,6 +260,17 @@ def validate_numeric_claims(
         if not any(written == known or known.startswith(written) for known in dates):
             errors.append(f"unsupported date {written}")
     scanned = _mask(scanned, date_spans)
+
+    # 0) then a whole ERP reference such as "33563-2026-10": one identifier, so
+    # only its leading number has to be real
+    reference_spans = []
+    for match in _REFERENCE_TOKEN_RE.finditer(scanned):
+        token = match.group(0)
+        reference_spans.append((match.start(), match.end()))
+        leading = re.match(r"\d+", normalize_digits(token))
+        if leading is None or not _matches(float(leading.group(0)), 0.0, facts | identifiers):
+            errors.append(f"unsupported reference {token}")
+    scanned = _mask(scanned, reference_spans)
 
     # 2) rounded money ("$147k", "$2.4M") may only differ by the rounding
     suffix_spans = []
@@ -437,9 +422,11 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
             if count >= MAX_TOOL_CALLS:
                 bound = llm
             else:
+                # parallel calls are allowed: one question can need payments and
+                # invoices at the same time, and every call counts against the cap
                 try:
-                    bound = llm.bind_tools(tool_schemas, parallel_tool_calls=False)
-                except TypeError:
+                    bound = llm.bind_tools(tool_schemas, parallel_tool_calls=True)
+                except TypeError:  # providers without the kwarg still work
                     bound = llm.bind_tools(tool_schemas)
 
             events = state.get("events")
