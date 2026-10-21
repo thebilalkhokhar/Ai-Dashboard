@@ -332,6 +332,11 @@ export function AgentReview() {
                   Flagged by validation: {master.rejected_reason || "the brief needs a human read."}
                 </p>
               )}
+              {master?.generated_by === "code_template" && (
+                <p className="mt-2 text-xs text-muted">
+                  Written by code: the model brief failed validation even after one regeneration.
+                </p>
+              )}
               {master?.conflicts_resolved.map((conflict, index) => (
                 <p key={`${index}-${conflict}`} className="mt-2 text-xs text-muted">
                   Resolved conflict: {conflict}
@@ -525,6 +530,7 @@ function RecommendationCard({
           <p>
             <span className="text-muted">Recommended tactic: </span>
             {humanise(negotiation?.tactic ?? collections?.approach)}
+            {collections?.tone ? ` (${collections.tone})` : ""}
           </p>
           <p>
             <span className="text-muted">
@@ -556,6 +562,15 @@ function RecommendationCard({
           {item.message_draft || "No draft available; this item needs human review."}
         </p>
       </div>
+
+      {collections?.escalation_note && (
+        <div className="mt-3 rounded-md border border-amber-400/30 bg-amber-400/5 p-3">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-amber-300">
+            Internal escalation note
+          </p>
+          <p className="mt-2 whitespace-pre-wrap text-sm leading-5">{collections.escalation_note}</p>
+        </div>
+      )}
 
       <div className="mt-3 flex flex-wrap justify-end gap-2">
         <button

@@ -12,8 +12,8 @@ import json
 from typing import Any, Tuple
 
 from app.agents.llm import StructuredCaller
-from app.schemas.agents import MasterOutput
-from app.services.processors import format_money_tree
+from app.schemas.agents import MasterOutput, Priority
+from app.services.processors import format_money_tree, money_text
 
 MASTER_SYSTEM = """You are the Master CEO agent of the Biztek AI Command Center
 for a printing company.
@@ -105,3 +105,101 @@ async def run_master(
     ]
     parsed, usage = await caller.ainvoke(messages)
     return parsed, payload, usage
+
+
+def _output_money(output: dict) -> float:
+    return float(output.get("quote_amount") or output.get("balance") or 0.0)
+
+
+def _quote_line(output: dict) -> str:
+    name = output.get("customer_name") or "a customer"
+    return f"{name} {money_text(output.get('quote_amount'))} (quote {output.get('quote_id')})"
+
+
+def _invoice_line(output: dict) -> str:
+    name = output.get("customer_name") or "a customer"
+    return f"{name} {money_text(output.get('balance'))} (invoice {output.get('invoice_id')})"
+
+
+def _lead_line(lead: dict) -> str:
+    name = lead.get("company") or lead.get("contact_name") or "a lead"
+    missing = ", ".join(str(item) for item in (lead.get("missing") or []) if item)
+    return f"{name} waiting on {missing}" if missing else str(name)
+
+
+def build_master_brief(
+    grouped: dict,
+    signals_summary: dict,
+    lead_items: list[dict] | None = None,
+) -> MasterOutput:
+    """The executive brief written WITHOUT an LLM.
+
+    Used when the model's brief failed validation even after one regeneration.
+    Every number is copied from the sub-agent outputs, so the brief cannot be
+    wrong about the data - it is only less fluent than the model's version.
+    """
+    outputs = [item for group in grouped.values() for item in group.get("items") or []]
+    quotes = sorted(
+        (o for o in outputs if o.get("quote_id") is not None), key=_output_money, reverse=True
+    )
+    invoices = sorted(
+        (o for o in outputs if o.get("invoice_id") is not None), key=_output_money, reverse=True
+    )
+    leads = list(lead_items or [])
+
+    if quotes:
+        first = "Open quotes to chase: " + "; ".join(_quote_line(o) for o in quotes[:3])
+    else:
+        first = f"No open quote needs a follow-up this run ({signals_summary.get('stale_quotes_count', 0)} stale quotes)."
+    if invoices:
+        second = (
+            "Unpaid invoices to remind: "
+            + "; ".join(_invoice_line(o) for o in invoices[:3])
+            + f" (unpaid total {money_text(signals_summary.get('unpaid_balance_total'))})."
+        )
+    else:
+        second = f"No unpaid invoice needs a reminder this run ({signals_summary.get('unpaid_invoices_count', 0)} unpaid)."
+    if leads:
+        third = (
+            f"{len(leads)} stuck lead(s) await details: "
+            + "; ".join(_lead_line(lead) for lead in leads[:3])
+            + "."
+        )
+    else:
+        third = "No lead is stuck waiting for details this run."
+
+    priorities = []
+    for output in sorted(outputs, key=_output_money, reverse=True)[:5]:
+        if output.get("quote_id") is not None:
+            why = f"Open quote {output.get('quote_id')} for {money_text(output.get('quote_amount'))}"
+            action = "A human rep reviews the quote and calls the customer about it."
+        else:
+            why = (
+                f"Unpaid invoice {output.get('invoice_id')} balance "
+                f"{money_text(output.get('balance'))}"
+            )
+            action = "A human rep sends the stored payment reminder and offers to discuss it."
+        priorities.append(
+            Priority(
+                customer_name=output.get("customer_name") or "a customer",
+                why=why,
+                suggested_action=action,
+            )
+        )
+
+    conflicts = []
+    for group in grouped.values():
+        items = group.get("items") or []
+        if len(items) > 1:
+            conflicts.append(
+                f"{group.get('customer_name') or 'a customer'} appears in {len(items)} sub-agent "
+                "outputs, so one combined rep conversation covers them all."
+            )
+    if not conflicts:
+        conflicts.append("Every customer appears exactly once in this run, so there is nothing to merge.")
+
+    return MasterOutput(
+        bullets=[first, second, third],
+        priorities=priorities,
+        conflicts_resolved=conflicts,
+    )

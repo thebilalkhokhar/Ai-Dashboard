@@ -251,7 +251,7 @@ async def _stream_response(bound: Any, messages: list[Any], events: Any) -> tupl
 
 def build_chat_graph(model: Any = None, tools: list | None = None):
     """Build a LangGraph node that runs the bounded tool-calling loop."""
-    llm = model or build_model("master")
+    llm = model or build_model("chat")
     registry = {tool.name: tool for tool in (CHAT_TOOLS if tools is None else tools)}
     tool_schemas = [tool.model_schema() for tool in registry.values()]
 

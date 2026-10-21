@@ -41,9 +41,18 @@ class NegotiationOutput(AgentOutputBase):
 class CollectionsOutput(AgentOutputBase):
     invoice_id: int
     balance: float  # must equal the input balance (pipeline checks)
-    approach: Literal["soft_reminder", "firm_nudge", "hold_off", "escalate_to_human"]
+    approach: Literal["soft_reminder", "firm_nudge", "hold_off"]
+    # the tone CODE chose from days_overdue - the model must copy it
+    tone: Literal["gentle", "standard", "firm"]
     reason: str
-    message_draft: str = Field(max_length=600, description="max 80 words")
+    message_draft: str = Field(
+        max_length=600,
+        description="max 80 words, customer-facing payment reminder (always required)",
+    )
+    escalation_note: Optional[str] = Field(
+        default=None,
+        description="Optional internal note for a manager; never replaces message_draft",
+    )
 
 
 LeadMissing = Literal["artwork", "quantity", "size", "material", "finish", "contact_info"]

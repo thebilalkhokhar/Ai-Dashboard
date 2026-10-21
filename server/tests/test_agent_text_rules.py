@@ -139,6 +139,22 @@ def test_company_greeting_is_not_treated_as_a_first_name():
     assert sanitise_greeting("Hello Saba, following up.", payload) == "Hello Saba, following up."
 
 
+def test_multi_word_company_greeting_is_left_alone():
+    """The old one-word match turned 'Hello X LLC team' into a duplicated mess."""
+    payload = {"customer_history": {"company_name": "Saba Enterprises LLC", "contact": {}}}
+    draft = "Hello Saba Enterprises LLC team, following up on the quote."
+    assert sanitise_greeting(draft, payload) == draft
+    unknown = "Hello Someone Else team, following up."
+    assert sanitise_greeting(unknown, payload) == "Hello Saba Enterprises LLC team, following up."
+
+
+def test_money_after_a_greeting_is_never_eaten():
+    """'$22,990,' has a comma inside the number - it is not an address."""
+    payload = {"customer_history": {"company_name": "GKA SNACKS", "contact": {}}}
+    draft = "Hello GKA SNACKS team $22,990, and thanks for your continued interest."
+    assert sanitise_greeting(draft, payload) == draft
+
+
 def test_day_counts_are_not_money():
     payload = {"payments": {"lateness_avg_days": 39.3, "total_paid": "$847,859", "count": 12}}
     assert 39.3 not in money_values(payload)

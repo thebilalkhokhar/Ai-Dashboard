@@ -9,9 +9,17 @@
 
 Rules encoded here, never left to the LLM:
   * each sub-agent sees only the top MAX_ITEMS_PER_AGENT items of its signal;
-  * money validation: every dollar amount in a message_draft must appear in
-    that item's input data. One regeneration on failure; if it still fails the
-    item is stored with flag "needs_review" and message_draft=None;
+  * money validation: every dollar amount in a message_draft must be one of
+    that item's own money fields (quote amount, invoice balance/total/paid) -
+    not any number that happens to sit in the payload. One regeneration on
+    failure; if it still fails the item is stored with flag "needs_review" and
+    message_draft=None;
+  * text quality: glued words ("todiscuss") cost one regeneration and are then
+    repaired in code; the Master brief is rejected when it keeps reasoning
+    artifacts, unknown numbers/IDs or sentences copied out of its own prompt,
+    and falls back to a brief built by code;
+  * every collections item keeps a customer-facing payment reminder draft;
+    escalation is an extra flag plus an internal note, never a replacement;
   * 24-hour cache: identical input hash -> reuse the stored output, no new
     LLM call (so a 24/7 loop does not re-bill identical work);
   * the stalled-orders signal is NEVER fed to agents (unreliable);
@@ -49,7 +57,20 @@ from app.agents.llm import (
 from app.agents.negotiation import negotiation_payload, NEGOTIATION_SYSTEM
 from app.agents.collections import collections_payload, COLLECTIONS_SYSTEM
 from app.agents.lead_followup import lead_followup_payload, LEAD_FOLLOWUP_SYSTEM
-from app.agents.master import group_by_customer, run_master
+from app.agents.master import (
+    MASTER_SYSTEM,
+    build_master_brief,
+    group_by_customer,
+    run_master,
+)
+from app.agents.text_rules import (
+    glued_words,
+    invented_numbers,
+    number_tokens,
+    prompt_echo,
+    repair_glued_words,
+    reasoning_artifacts,
+)
 from app.schemas.agents import (
     MasterOutput,
     NegotiationOutput,
@@ -137,15 +158,77 @@ def _walk_numbers(node: Any, found: set[float]) -> None:
             _walk_numbers(value, found)
 
 
+def all_numbers(payload: Any) -> set[float]:
+    """Every number the MASTER can read in its input.
+
+    Numbers count when they are a JSON value OR when they sit inside a text
+    field it was given ('111 days overdue' inside an escalation note), because
+    that text is the master's only source.
+    """
+    found: set[float] = set()
+    _walk_numbers(payload, found)
+
+    def mine(node: Any) -> None:
+        if isinstance(node, str):
+            for token in number_tokens(node):
+                try:
+                    found.add(float(token.replace(",", "")))
+                except ValueError:
+                    pass
+        elif isinstance(node, dict):
+            for value in node.values():
+                mine(value)
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                mine(value)
+
+    mine(payload)
+    return found | money_values(payload)
+
+
 import re  # noqa: E402  (must come before the regex below)
 
 _DOLLAR_RE = re.compile(r"\$\s?([\d][\d,]*(?:\.\d+)?)|([\d][\d,]*(?:\.\d+)?)\s(?:dollars?|USD|usd)", re.I)
 
 
-def invented_amounts(draft: str, payload: dict) -> list[float]:
-    """Dollar amounts in the draft whose value is NOT a money value in the payload.
-    The pipeline runs this on every message_draft."""
-    allowed = money_values(payload)
+# The only money fields one item's own draft may mention. History totals are
+# NOT here: a draft about this quote may not quote the customer's lifetime
+# spend as if it were the price ($56,600 from past orders vs. this quote 56800).
+ITEM_MONEY_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
+    "negotiation": (("quote", "amount"),),
+    "collections": (
+        ("invoice", "balance"),
+        ("invoice", "total_amount"),
+        ("invoice", "amount_paid"),
+    ),
+    "lead_followup": (),
+}
+
+
+def allowed_amounts(kind: str, payload: dict) -> set[float]:
+    """Exact money values this item's draft is allowed to mention."""
+    fields = ITEM_MONEY_FIELDS.get(kind)
+    if fields is None:
+        return money_values(payload)
+    allowed: set[float] = set()
+    for path in fields:
+        node: Any = payload
+        for key in path:
+            node = node.get(key) if isinstance(node, dict) else None
+        if node is not None:
+            value = _amount_number(node)
+            allowed.add(value)
+    return allowed
+
+
+def invented_amounts(draft: str, payload: dict, kind: Optional[str] = None) -> list[float]:
+    """Dollar amounts in the draft that the item is not allowed to mention.
+
+    With a `kind` the check is against that item's own money fields; without
+    one it falls back to every money value in the payload. The pipeline runs
+    this on every message_draft.
+    """
+    allowed = allowed_amounts(kind, payload) if kind else money_values(payload)
     bad: list[float] = []
     for match in _DOLLAR_RE.finditer(draft or ""):
         value = float((match.group(1) or match.group(2)).replace(",", ""))
@@ -168,8 +251,10 @@ _FORMATTED_MONEY_TOKEN_RE = re.compile(r"\$\s?\d[\d,]*(?:\.\d+)?")
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _URL_RE = re.compile(r"(?:https?://|www\.)[^\s)>\"]+")
 _PHONE_RE = re.compile(r"(?:\+?1[\s.\-]?)?(?:\(\d{3}\)|\d{3})[\s.\-]?\d{3}[\s.\-]?\d{4}")
+# the address is letters only: a money amount ('$22,990') must never be read as
+# part of a greeting, because its comma would end the match inside the number
 _GREETING_RE = re.compile(
-    r"^(\s*)(hi|hello|hey|dear)\s+([A-Za-z][A-Za-z'\-]+)(\s+team)?", re.I
+    r"^(\s*)(hi|hello|hey|dear)\s+([A-Za-z][A-Za-z'\- ]{0,40}?)(?:\s+team)?\s*,", re.I
 )
 # a raw float like 36414.0 is unformatted money; '$36,414' is fine
 _UNFORMATTED_MONEY_RE = re.compile(r"\d{3,}\.\d(?!\d)")
@@ -251,17 +336,19 @@ def invented_contacts(draft: str, payload: dict) -> list[str]:
 
 
 def sanitise_greeting(draft: str, payload: dict) -> str:
-    """A greeting first name must come from the input contact data.
+    """Every name in a greeting must come from the input contact data.
 
     Otherwise the greeting becomes 'Hello <company> team', which cannot be
-    wrong about who is reading it.
+    wrong about who is reading it. The whole address is checked ('Saba
+    Enterprises LLC' is one company address, not a first name) and only the
+    greeting itself is replaced, so no words get duplicated.
     """
     if not draft:
         return draft
     match = _GREETING_RE.match(draft)
     if not match:
         return draft
-    name = match.group(3)
+    address = match.group(3)
     lead = payload.get("lead")
     if isinstance(lead, dict):
         # lead payloads carry no contact blob - only the parsed name/company
@@ -272,15 +359,15 @@ def sanitise_greeting(draft: str, payload: dict) -> str:
         contact = history.get("contact") or {}
         contact_blob = " ".join(str(value) for value in contact.values() if value)
         company = str(history.get("company_name") or "").strip()
-    first_word = company.split()[0] if company else ""
-    # 'Hello Polkadot team' greets the company, not a person - leave it
-    if first_word and name.lower() == first_word.lower():
-        return draft
-    if re.search(rf"\b{re.escape(name)}\b", contact_blob, re.I):
-        return draft  # the name really is in the contact data
+    blob = f"{contact_blob} {company}".lower()
+    words = re.findall(r"[A-Za-z][A-Za-z'\-]+", address)
+    if words and all(re.search(rf"\b{re.escape(word.lower())}\b", blob) for word in words):
+        return draft  # the ERP really knows this addressee
     neutral = f"Hello {company} team" if company else "Hello"
-    # match.end() also swallows a trailing ' team', so nothing is duplicated
-    return neutral + draft[match.end():]
+    rest = draft[match.end():]
+    if not rest:
+        return neutral
+    return f"{neutral}, {rest.lstrip()}"
 
 
 def has_unformatted_money(text: Any) -> bool:
@@ -329,6 +416,44 @@ def master_invented_amounts(master_dict: dict, payload: dict) -> list[float]:
             if not any(abs(value - ok) < 0.005 for ok in allowed):
                 bad.append(value)
     return list(dict.fromkeys(bad))
+
+
+def master_texts(master_dict: dict) -> list[str]:
+    """Every free-text line the master wrote."""
+    texts = [str(item) for item in (master_dict.get("bullets") or [])]
+    for priority in master_dict.get("priorities") or []:
+        texts.extend(
+            [
+                str(priority.get("customer_name") or ""),
+                str(priority.get("why") or ""),
+                str(priority.get("suggested_action") or ""),
+            ]
+        )
+    texts.extend(str(item) for item in (master_dict.get("conflicts_resolved") or []))
+    return texts
+
+
+def master_problems(master_dict: dict, payload: dict) -> list[str]:
+    """What is wrong with a master brief, as plain problems.
+
+    Money must be money Python computed, every other number (invoice ids
+    included) must exist in the data the master was sent, and the text must not
+    still be thinking out loud or repeat its own instructions.
+    """
+    problems: list[str] = []
+    texts = master_texts(master_dict)
+    amounts = master_invented_amounts(master_dict, payload)
+    if amounts:
+        problems.append(f"amounts {amounts} are not money Python computed")
+    numbers = invented_numbers(texts, all_numbers(payload))
+    if numbers:
+        problems.append(f"numbers {numbers} appear nowhere in the sub-agent outputs")
+    for text in texts:
+        for artifact in reasoning_artifacts(text):
+            problems.append(f"{text[:60]!r} keeps leftover reasoning {artifact!r}")
+        for echo in prompt_echo(text, MASTER_SYSTEM):
+            problems.append(f"{text[:60]!r} copies its own instructions ({echo!r})")
+    return problems
 
 
 def cache_lookup(recent_runs: list[dict], items: list[dict], cutoff_epoch: float) -> dict[str, dict]:
@@ -613,17 +738,8 @@ def _must_escalate(payload: dict) -> bool:
     )
 
 
-def _escalation_reason(payload: dict) -> str:
-    invoice = payload.get("invoice", {})
-    triggers = []
-    if _amount_number(invoice.get("balance")) > 50_000:
-        triggers.append(f"balance {invoice.get('balance')}")
-    if int(invoice.get("days_overdue") or 0) > 90:
-        triggers.append(f"{invoice.get('days_overdue')} days overdue")
-    return "Code escalation: " + " and ".join(triggers) + "."
-
-
 def _escalation_note(payload: dict) -> str:
+    """The internal manager note. Code writes it so its numbers are always real."""
     history = payload.get("customer_history", {})
     invoice = payload.get("invoice", {})
     name = history.get("company_name") or "Unknown customer"
@@ -632,6 +748,93 @@ def _escalation_note(payload: dict) -> str:
         f"{invoice.get('id')} ({invoice.get('balance')} balance; "
         f"{invoice.get('days_overdue')} days overdue) and decide next steps."
     )
+
+
+# text that belongs in an internal note, never in a message the customer reads
+_INTERNAL_NOTE_RE = re.compile(
+    r"(?i)\b(internal note|sales manager|escalat\w*|decide next steps|manager review)\b"
+)
+
+
+def _payload_blob(payload: dict) -> str:
+    return json.dumps(payload, sort_keys=True, default=str)
+
+
+def glued_problems(parsed: Any, payload: dict) -> list[str]:
+    """Draft text where the model glued words together ('todiscuss')."""
+    blob = _payload_blob(payload)
+    found: list[str] = []
+    for field in ("message_draft", "escalation_note"):
+        text = getattr(parsed, field, None)
+        if isinstance(text, str) and text:
+            glued = glued_words(text, payload_blob=blob)
+            if glued:
+                found.append(f"{field} has words without spaces: {glued}")
+    return found
+
+
+def repair_glued_text(parsed: Any, payload: dict) -> None:
+    """Put the missing spaces back (code fix, no LLM involved)."""
+    blob = _payload_blob(payload)
+    for field in ("message_draft", "escalation_note"):
+        text = getattr(parsed, field, None)
+        if isinstance(text, str) and text:
+            setattr(parsed, field, repair_glued_words(text, payload_blob=blob))
+
+
+def copied_field_problems(parsed: Any, payload: dict, kind: str) -> list[str]:
+    """Fields the model must COPY from the input (they are Python facts).
+
+    A mismatch costs one regeneration; if the model still mis-copies, code
+    writes the real value (see sync_copied_fields) instead of throwing the item
+    away - the amount in the draft text is what a human reads.
+    """
+    problems: list[str] = []
+    if kind == "negotiation":
+        expected = _amount_number(payload["quote"]["amount"])
+        if abs(getattr(parsed, "quote_amount", -1) - expected) > 0.005:
+            problems.append(
+                f"quote_amount {getattr(parsed, 'quote_amount', 0.0)} does not match the input"
+            )
+    elif kind == "collections":
+        expected = _amount_number(payload["invoice"]["balance"])
+        if abs(getattr(parsed, "balance", -1) - expected) > 0.005:
+            problems.append(
+                f"balance {getattr(parsed, 'balance', 0.0)} does not match the input"
+            )
+        if getattr(parsed, "tone", None) != payload["invoice"].get("tone"):
+            problems.append("tone is not the tone code picked from the days overdue")
+    elif kind == "lead_followup":
+        if list(getattr(parsed, "missing", []) or []) != list(
+            (payload.get("lead") or {}).get("missing_fields") or []
+        ):
+            problems.append("the missing list does not match the input missing_fields")
+    return problems
+
+
+def sync_copied_fields(parsed: Any, payload: dict, kind: str) -> None:
+    """Amounts, IDs and the Python-computed lists are code's, never the model's."""
+    if kind == "negotiation":
+        parsed.quote_id = int(payload["quote"]["id"])
+        parsed.quote_amount = _amount_number(payload["quote"]["amount"])
+    elif kind == "collections":
+        parsed.invoice_id = int(payload["invoice"]["id"])
+        parsed.balance = _amount_number(payload["invoice"]["balance"])
+        parsed.tone = payload["invoice"]["tone"]
+    elif kind == "lead_followup":
+        parsed.missing = list((payload.get("lead") or {}).get("missing_fields") or [])
+
+
+def draft_rules_problems(parsed: Any, payload: dict, kind: str) -> list[str]:
+    """Rules on the customer-facing text itself (blocking, not code-fixable)."""
+    if kind != "collections":
+        return []
+    draft = (getattr(parsed, "message_draft", "") or "").strip()
+    if not draft:
+        return ["the customer-facing reminder draft is empty"]
+    if _INTERNAL_NOTE_RE.search(draft):
+        return ["message_draft reads like an internal note; it must be customer-facing"]
+    return []
 
 
 async def _run_one(
@@ -663,7 +866,7 @@ async def _run_one(
         parsed, usage = await caller.ainvoke(messages)
 
         # deterministic cleanups BEFORE validation:
-        # 1) a greeting first name must exist in the contact data
+        # 1) a greeting name must exist in the contact data
         parsed.message_draft = sanitise_greeting(
             getattr(parsed, "message_draft", "") or "", payload
         )
@@ -674,13 +877,15 @@ async def _run_one(
             parsed.reason = normalise_money_text(parsed.reason, payload)
 
         problems: list[str] = []
-        invented = invented_amounts(parsed.message_draft, payload)
+        # only this item's own money fields may be mentioned in its draft
+        invented = invented_amounts(parsed.message_draft, payload, kind)
         if invented:
-            problems.append(f"amounts {invented} are not in the input data")
+            problems.append(f"amounts {invented} are not this item's amounts in the input")
         # phone / email / URL must appear verbatim in the item's input
         contacts = invented_contacts(parsed.message_draft, payload)
         if contacts:
             problems.append(f"contact details {contacts} are not in the input data")
+        problems += draft_rules_problems(parsed, payload, kind)
         return parsed, usage, problems
 
     async def guarded() -> dict:
@@ -690,34 +895,35 @@ async def _run_one(
                 parsed, usage, bad = await one_pass()
                 # defense in depth: the COPIED fields must equal the input too
                 # (payload amounts are formatted strings now - _amount_number parses them)
-                if kind == "negotiation" and abs(getattr(parsed, "quote_amount", -1) - _amount_number(payload["quote"]["amount"])) > 0.005:
-                    bad.append(
-                        f"quote_amount {getattr(parsed, 'quote_amount', 0.0)} does not match the input"
-                    )
-                if kind == "collections" and abs(getattr(parsed, "balance", -1) - _amount_number(payload["invoice"]["balance"])) > 0.005:
-                    bad.append(
-                        f"balance {getattr(parsed, 'balance', 0.0)} does not match the input"
-                    )
-                if kind == "lead_followup" and list(getattr(parsed, "missing", []) or []) != list(
-                    (payload.get("lead") or {}).get("missing_fields") or []
-                ):
-                    bad.append("the missing list does not match the input missing_fields")
+                fixable = copied_field_problems(parsed, payload, kind)
+                glued = glued_problems(parsed, payload)
                 regen = 0
-                while bad:
-                    if regen >= 1:
-                        break
+                while (bad or fixable or glued) and regen < 1:
                     regen += 1
                     parsed, usage, bad = await one_pass()  # regenerate once
-                if kind == "collections" and _must_escalate(payload):
-                    parsed.approach = "escalate_to_human"
-                    parsed.reason = _escalation_reason(payload)
-                    parsed.message_draft = _escalation_note(payload)
-                    # the escalation note is code-written: still check it like a draft
-                    bad = []
-                    if invented_amounts(parsed.message_draft, payload):
-                        bad.append("the escalation note mentions an amount not in the input")
-                    if invented_contacts(parsed.message_draft, payload):
-                        bad.append("the escalation note mentions contact details not in the input")
+                    fixable = copied_field_problems(parsed, payload, kind)
+                    glued = glued_problems(parsed, payload)
+                # amounts, ids and the missing list are facts Python already has:
+                # whatever the model finally said, code writes the real values
+                sync_copied_fields(parsed, payload, kind)
+                if glued and not bad:
+                    # still glued after the regen: the split is known, so code
+                    # writes the spaces instead of throwing a good draft away
+                    repair_glued_text(parsed, payload)
+                if kind == "collections":
+                    # escalation is an extra note on top of the customer reminder
+                    # draft, never a replacement for it
+                    note = _escalation_note(payload) if _must_escalate(payload) else (
+                        getattr(parsed, "escalation_note", None) or ""
+                    )
+                    parsed.escalation_note = note or None
+                    if note:
+                        if invented_amounts(note, payload, kind):
+                            bad.append("the escalation note mentions an amount not in the input")
+                        if invented_contacts(note, payload):
+                            bad.append(
+                                "the escalation note mentions contact details not in the input"
+                            )
                 result["source"] = "agent"
                 async with usage_lock:
                     regen_count[kind] += regen
@@ -732,7 +938,8 @@ async def _run_one(
                                 "confidence", "evidence", "likely_reason", "tactic",
                                 "approach", "quote_id", "quote_amount", "invoice_id",
                                 "balance", "reason", "blocker", "owner_team",
-                                "action_plan", "missing", "product",
+                                "action_plan", "missing", "product", "tone",
+                                "escalation_note",
                             )
                             if hasattr(parsed, key)
                         }
@@ -740,11 +947,14 @@ async def _run_one(
                 else:
                     model_dump = parsed.model_dump()
                     result.update(model_dump)
-                    unclear = (
-                        getattr(parsed, "likely_reason", None) == "unclear"
-                        or getattr(parsed, "owner_team", None) == "unclear"
-                    )
-                    result["flags"] = ["unclear"] if unclear else []
+                    flags: list[str] = []
+                    if getattr(parsed, "likely_reason", None) == "unclear":
+                        flags.append("unclear")
+                    if getattr(parsed, "owner_team", None) == "unclear":
+                        flags.append("unclear")
+                    if kind == "collections" and getattr(parsed, "escalation_note", None):
+                        flags.append("escalate")
+                    result["flags"] = flags
                 if kind == "lead_followup":
                     # ids and names are facts Python extracted, never model text
                     lead_row = entry.get("item") or {}
@@ -876,44 +1086,49 @@ async def master_node(state: RunState) -> RunState:
         "stuck_lead_count": len(state["lead_followup_out"]),
     }
     grouped = state["grouped"]
+    lead_items = state.get("leads_grouped") or []
     # raw numbers only - the LLM may copy but never compute totals
     master_input = {**state["signals_summary"], **payload_hint}
     parsed = None
     usage = empty_usage()
-    bad: list[float] = []
+    problems: list[str] = []
     attempt = 0
-    while True:
+    while attempt < 2:
         attempt += 1
         try:
             caller = state["_caller_factory"]("master")
             parsed, master_payload_used, usage = await run_master(
-                grouped, master_input, caller, state.get("leads_grouped") or []
+                grouped, master_input, caller, lead_items
             )
             # same money format in bullets / priorities / conflicts
             parsed = normalise_master_output(parsed, master_payload_used)
-            # numbers-only rule extends to the whole brief: no invented totals
-            # (validated against the exact formatted payload the master saw)
-            bad = master_invented_amounts(parsed.model_dump(), master_payload_used)
-            if not bad or attempt >= 2:
+            # the brief must only contain numbers Python sent the master, and no
+            # leftover thinking - validated against the exact formatted payload
+            problems = master_problems(parsed.model_dump(), master_payload_used)
+            if not problems:
                 break
         except Exception as exc:
-            if attempt >= 2:
-                return {
-                    "master": {"bullets": [], "priorities": [], "conflicts_resolved": [], "error": str(exc)},
-                    "errors": list(state.get("errors") or []) + [f"master failed: {exc}"],
-                }
-    master_dump = parsed.model_dump() if parsed is not None else {}
-    if bad:
-        master_dump["flags"] = ["needs_review"]
-        master_dump["rejected_reason"] = f"brief mentioned amounts {bad} that Python never computed"
-    else:
+            parsed = None
+            problems = [f"master call failed: {type(exc).__name__}: {exc}"]
+
+    errors = list(state.get("errors") or [])
+    if parsed is not None and not problems:
+        master_dump = parsed.model_dump()
         master_dump["flags"] = []
+    else:
+        # regenerate did not help: code writes a brief that cannot be wrong
+        brief = build_master_brief(grouped, master_input, lead_items)
+        master_dump = brief.model_dump()
+        master_dump["flags"] = []
+        master_dump["rejected_reason"] = "; ".join(problems)[:600] or "master produced no brief"
+        master_dump["generated_by"] = "code_template"
+        errors.append("master brief rebuilt from a code template: " + "; ".join(problems)[:300])
     # RETURN the update: node-side mutation does not persist in the graph
     return {
         "master": master_dump,
         "usage": add_usage(state.get("usage") or empty_usage(), usage),
         "calls": (state.get("calls") or 0) + attempt,
-        "errors": list(state.get("errors") or []),
+        "errors": errors,
     }
 
 

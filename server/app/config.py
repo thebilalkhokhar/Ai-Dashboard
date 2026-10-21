@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""
     MODEL_SUB: str = ""
     MODEL_MASTER: str = ""
+    # Reasoning effort per role. Sub-agents stay cheap ("minimal"); the Master
+    # brief and chat need "low", because "minimal" glues words together
+    # ("todiscuss", "daysoverdue") and leaves self-corrections in the text.
+    SUB_AGENT_REASONING_EFFORT: str = "minimal"
+    MASTER_REASONING_EFFORT: str = "low"
+    CHAT_REASONING_EFFORT: str = "low"
     AGENT_CACHE_HOURS: int = 24
     AGENT_CONCURRENCY: int = 5
     CHAT_DAILY_TOKEN_CAP: int = Field(default=1_000_000, ge=1)

@@ -187,8 +187,11 @@ def good_factory():
                     "invoice_id": inv["id"],
                     "balance": to_number(inv["balance"]),
                     "approach": "firm_nudge" if inv.get("overdue") else "soft_reminder",
+                    # the tone is picked by code, the model only copies it
+                    "tone": inv["tone"],
                     "reason": f"balance ${inv['balance']} on file, overdue={inv.get('overdue')}",
                     "message_draft": f"Friendly reminder: balance ${to_number(inv['balance']):,.2f} is open.",
+                    "escalation_note": None,
                     "confidence": "medium",
                     "evidence": "used balance, overdue flag and payment history counts",
                 }
@@ -535,3 +538,364 @@ async def test_second_run_reuses_cache():
     cached_lead = second["lead_followup"][0]
     assert cached_lead["source"] == "cache"
     assert cached_lead["lead_id"] == "L-1"
+
+
+# ---------------------------------------------------------------------------
+# PHASE 1 - output quality regressions seen in a real run
+# ---------------------------------------------------------------------------
+
+
+def polkadot_db(**quote_over):
+    """The real shape of the run: Polkadot quote 20791 with a $56,600 history.
+
+    The one paid order totals 56600, so '$56,600' IS in the payload - as a
+    lifetime total, never as this quote's price.
+    """
+    return FakeDatabase(
+        quotes=[
+            there_and_last_month(
+                id=20791,
+                ref="20021-2026-10",
+                amount=quote_over.pop("amount", 56800.0),
+                created_at=(NOW - timedelta(days=5)).isoformat(),
+                customer={"id": 3312, "company_name": "Polkadot"},
+                **quote_over,
+            )
+        ],
+        orders=[
+            order_row(
+                id=33349,
+                payment_status=2,
+                payment_status_label="Paid",
+                total_amount=56600.0,
+                amount_paid=56600.0,
+                invoice_date=(NOW - timedelta(days=120)).isoformat(),
+                customer={"id": 3312, "company_name": "Polkadot"},
+            )
+        ],
+        payments=[],
+        leads=[],
+    )
+
+
+def quote_field_factory(**over):
+    """Negotiation answer with a correct draft but a configurable quote_amount."""
+    base = good_factory()
+
+    def factory(k: str):
+        if k != "negotiation":
+            return base(k)
+
+        def answer(payload: dict) -> dict:
+            q = payload["quote"]
+            history = payload["customer_history"]
+            data = {
+                "customer_id": history["customer_id"],
+                "customer_name": history["company_name"],
+                "quote_id": q["id"],
+                "quote_amount": to_number(q["amount"]),
+                "likely_reason": "price",
+                "tactic": "follow_up",
+                "message_draft": over.get(
+                    "message_draft", f"Checking in on quote {q['amount']} - happy to walk through it."
+                ),
+                "confidence": "medium",
+                "evidence": "used the quote amount and the order count",
+            }
+            if "quote_amount" in over:
+                data["quote_amount"] = over["quote_amount"]
+            return data
+
+        return FakeCallerForTest(NegotiationOutput, answer)
+
+    return factory
+
+
+class CountingFactory:
+    """Wraps a caller factory and counts how often each kind was called."""
+
+    def __init__(self, factory):
+        self.factory = factory
+        self.calls: dict[str, int] = {}
+
+    def __call__(self, kind: str):
+        self.calls[kind] = self.calls.get(kind, 0) + 1
+        return self.factory(kind)
+
+
+@pytest.mark.asyncio
+async def test_draft_may_not_use_a_history_total_as_the_price():
+    """'$56,600' was the customer's lifetime spend, not this quote's 56800."""
+    database = polkadot_db(amount=56800.0)
+    counting = CountingFactory(
+        quote_field_factory(message_draft="Just checking in on the $56,600 estimate.")
+    )
+    await run_pipeline(run_id="run-history", database=database, caller_factory=counting, now_epoch=EPOCH)
+    item = database.agent_runs.saved[0]["negotiation"][0]
+    assert "needs_review" in item["flags"]
+    assert item["message_draft"] is None
+    assert "56600" in item["rejected_reason"]
+    assert counting.calls["negotiation"] == 2  # one regeneration, then review
+
+
+@pytest.mark.asyncio
+async def test_mis_copied_quote_amount_is_rewritten_by_code():
+    """The reported item: draft '$56,600' while the answer said quote_amount 56800.
+
+    The draft is right against the raw quote (56600), so the item is not thrown
+    away: the mismatch costs one regeneration and code writes the real amount.
+    """
+    database = polkadot_db(amount=56600.0)
+    counting = CountingFactory(quote_field_factory(quote_amount=56800.0))
+    await run_pipeline(run_id="run-field", database=database, caller_factory=counting, now_epoch=EPOCH)
+    item = database.agent_runs.saved[0]["negotiation"][0]
+    assert "needs_review" not in item["flags"]
+    assert item["quote_amount"] == 56600.0
+    assert item["quote_id"] == 20791
+    assert counting.calls["negotiation"] == 2  # the mismatch did cost a regeneration
+
+
+@pytest.mark.asyncio
+async def test_wrong_tone_and_missing_list_are_corrected_by_code():
+    """Facts Python already owns are rewritten, not rejected."""
+    base = good_factory()
+
+    def factory(k: str):
+        caller = base(k)
+        if k == "collections":
+            original = caller._answer
+
+            def collections_answer(payload: dict) -> dict:
+                data = original(payload)
+                data["tone"] = "gentle"  # code picked 'firm' for 326 days overdue
+                return data
+
+            return FakeCallerForTest(CollectionsOutput, collections_answer)
+        if k == "lead_followup":
+            original = caller._answer
+
+            def lead_answer(payload: dict) -> dict:
+                data = original(payload)
+                data["missing"] = ["artwork"]  # the input says something else
+                return data
+
+            return FakeCallerForTest(LeadFollowupOutput, lead_answer)
+        return caller
+
+    database = FakeDatabase(
+        quotes=[],
+        orders=[
+            order_row(
+                id=27608,
+                total_amount=357500.0,
+                amount_paid=0.0,
+                invoice_date=(NOW - timedelta(days=356)).isoformat(),
+            )
+        ],
+        payments=[],
+        leads=[lead_row()],
+    )
+    counting = CountingFactory(factory)
+    await run_pipeline(run_id="run-sync", database=database, caller_factory=counting, now_epoch=EPOCH)
+    doc = database.agent_runs.saved[0]
+    invoice_item = [item for item in doc["collections"] if item.get("invoice_id") == 27608][0]
+    lead_item = doc["lead_followup"][0]
+    assert invoice_item["tone"] == "firm"
+    assert invoice_item["message_draft"].startswith("Friendly reminder: balance $357,500 is open.")
+    assert "escalate" in invoice_item["flags"]
+    assert "Internal note to sales manager" in invoice_item["escalation_note"]
+    assert "needs_review" not in lead_item["flags"]
+    assert lead_item["missing"] == ["artwork", "size", "material", "finish"]
+    # the bad lead answer still costs its own one regeneration
+    assert counting.calls["lead_followup"] == 2
+
+
+@pytest.mark.asyncio
+async def test_glued_words_regen_once_and_are_repaired():
+    """'todiscuss' is a spacing bug: regenerate once, then fix it in code."""
+    base = good_factory()
+
+    def factory(k: str):
+        if k != "negotiation":
+            return base(k)
+
+        def answer(payload: dict) -> dict:
+            q = payload["quote"]
+            data = {
+                "customer_id": payload["customer_history"]["customer_id"],
+                "customer_name": payload["customer_history"]["company_name"],
+                "quote_id": q["id"],
+                "quote_amount": to_number(q["amount"]),
+                "likely_reason": "no_response",
+                "tactic": "follow_up",
+                "message_draft": "Happy to providenext step, and open todiscuss the requestartwork.",
+                "confidence": "medium",
+                "evidence": "used the quote amount only",
+            }
+            return data
+
+        return FakeCallerForTest(NegotiationOutput, answer)
+
+    database = polkadot_db(amount=56800.0)
+    counting = CountingFactory(factory)
+    await run_pipeline(run_id="run-glued", database=database, caller_factory=counting, now_epoch=EPOCH)
+    item = database.agent_runs.saved[0]["negotiation"][0]
+    assert item["flags"] == []
+    assert item["message_draft"] == "Happy to provide next step, and open to discuss the request artwork."
+    assert counting.calls["negotiation"] == 2
+
+
+@pytest.mark.asyncio
+async def test_collections_keeps_a_customer_draft_and_adds_an_escalation_note():
+    """Escalation is a note on top of the reminder, never a replacement."""
+    base = good_factory()
+
+    def factory(k: str):
+        if k != "collections":
+            return base(k)
+
+        def answer(payload: dict) -> dict:
+            inv = payload["invoice"]
+            history = payload["customer_history"]
+            return {
+                "customer_id": history["customer_id"],
+                "customer_name": history["company_name"],
+                "invoice_id": inv["id"],
+                "balance": to_number(inv["balance"]),
+                "approach": "firm_nudge",
+                "tone": inv["tone"],
+                "reason": f"{inv['days_overdue']} days overdue",
+                "message_draft": f"Reminder: the {inv['balance']} balance on invoice {inv['id']} is open.",
+                "escalation_note": None,
+                "confidence": "medium",
+                "evidence": "used balance and days overdue",
+            }
+
+        return FakeCallerForTest(CollectionsOutput, answer)
+
+    database = FakeDatabase(
+        quotes=[],
+        orders=[
+            order_row(
+                id=27608,
+                total_amount=357500.0,
+                amount_paid=0.0,
+                invoice_date=(NOW - timedelta(days=356)).isoformat(),
+            )
+        ],
+        payments=[],
+        leads=[],
+    )
+    await run_pipeline(run_id="run-escalate", database=database, caller_factory=factory, now_epoch=EPOCH)
+    item = database.agent_runs.saved[0]["collections"][0]
+    assert "needs_review" not in item["flags"]
+    assert "escalate" in item["flags"]
+    # customer-facing draft survived...
+    assert item["message_draft"].startswith("Reminder: the $357,500 balance")
+    # ...and the internal note is separate, written by code
+    assert item["escalation_note"].startswith("Internal note to sales manager")
+    assert "357500" not in item["message_draft"]
+
+
+@pytest.mark.asyncio
+async def test_collections_internal_note_in_the_draft_is_rejected():
+    """A draft addressed to a manager is not a payment reminder."""
+    base = good_factory()
+
+    def factory(k: str):
+        if k != "collections":
+            return base(k)
+
+        def answer(payload: dict) -> dict:
+            inv = payload["invoice"]
+            history = payload["customer_history"]
+            return {
+                "customer_id": history["customer_id"],
+                "customer_name": history["company_name"],
+                "invoice_id": inv["id"],
+                "balance": to_number(inv["balance"]),
+                "approach": "hold_off",
+                "tone": inv["tone"],
+                "reason": "no history",
+                "message_draft": "Internal note to sales manager: chase this later.",
+                "escalation_note": None,
+                "confidence": "low",
+                "evidence": "used the balance",
+            }
+
+        return FakeCallerForTest(CollectionsOutput, answer)
+
+    database = FakeDatabase(
+        quotes=[],
+        orders=[order_row(id=33544, total_amount=38700.0, amount_paid=0.0)],
+        payments=[],
+        leads=[],
+    )
+    await run_pipeline(run_id="run-internal", database=database, caller_factory=factory, now_epoch=EPOCH)
+    item = database.agent_runs.saved[0]["collections"][0]
+    assert "needs_review" in item["flags"]
+    assert "customer-facing" in item["rejected_reason"]
+
+
+@pytest.mark.asyncio
+async def test_master_garbage_bullet_falls_back_to_the_code_template():
+    """'invoice 27608 $357,500 and 33,045? (no)' must never reach the UI."""
+    base = good_factory()
+
+    def factory(k: str):
+        if k != "master":
+            return base(k)
+
+        def answer(payload: dict) -> dict:
+            return {
+                "bullets": [
+                    "Saba Enterprises LLC - open quote $59,488 (ID 20783)",
+                    "Pure 7 - collections: invoice 27608 $357,500 and 33,045? (no)",
+                    "Lead follow-ups: multiple leads awaiting specs",
+                ],
+                "priorities": [],
+                "conflicts_resolved": [
+                    "No customer appears in more than one sub-agent output with conflicting "
+                    "actions; if any, summarize here. If every customer appears only once, "
+                    "state that explicitly. - No conflicts detected in provided data."
+                ],
+            }
+
+        return FakeCallerForTest(MasterOutput, answer)
+
+    database = FakeDatabase(
+        quotes=[],
+        orders=[
+            order_row(id=27608, total_amount=357500.0, amount_paid=0.0, invoice_date=(NOW - timedelta(days=356)).isoformat())
+        ],
+        payments=[],
+        leads=[],
+    )
+    counting = CountingFactory(factory)
+    await run_pipeline(run_id="run-master", database=database, caller_factory=counting, now_epoch=EPOCH)
+    doc = database.agent_runs.saved[0]
+    master = doc["master"]
+    assert master["generated_by"] == "code_template"
+    assert master["flags"] == []
+    assert counting.calls["master"] == 2  # regenerated once, then replaced
+    assert all("?" not in bullet for bullet in master["bullets"])
+    joined = " ".join(master["bullets"] + master["conflicts_resolved"])
+    assert "state that explicitly" not in joined
+    assert "357,500" in joined  # the real money survived into the template
+    assert any("27608" in bullet for bullet in master["bullets"])
+    assert "33045" not in doc["master"]["bullets"][1]
+
+
+@pytest.mark.asyncio
+async def test_master_keeps_a_clean_model_brief():
+    """The template must not replace a brief that passes every rule."""
+    database = FakeDatabase(
+        quotes=[],
+        orders=[order_row(id=33544, total_amount=38700.0, amount_paid=0.0)],
+        payments=[],
+        leads=[],
+    )
+    await run_pipeline(run_id="run-master-ok", database=database, caller_factory=good_factory(), now_epoch=EPOCH)
+    master = database.agent_runs.saved[0]["master"]
+    assert "generated_by" not in master
+    assert master["bullets"][0].startswith("1 customers need a human touch")

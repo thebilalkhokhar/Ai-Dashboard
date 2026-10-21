@@ -325,9 +325,13 @@ export interface CollectionsOutput {
   evidence?: string;
   invoice_id?: number;
   balance?: number;
+  // runs saved before the customer-facing reminder existed can still say
+  // "escalate_to_human"; new runs keep a reminder draft plus an escalation note
   approach?: "soft_reminder" | "firm_nudge" | "hold_off" | "escalate_to_human";
+  tone?: "gentle" | "standard" | "firm";
   reason?: string;
   message_draft?: string | null;
+  escalation_note?: string | null;
   flags?: string[];
   source?: "agent" | "cache";
   rejected_reason?: string;
@@ -371,6 +375,8 @@ export interface MasterBriefing {
   conflicts_resolved: string[];
   flags?: string[];
   rejected_reason?: string;
+  // set when the model's brief failed validation and code wrote the brief
+  generated_by?: "code_template";
   error?: string;
 }
 

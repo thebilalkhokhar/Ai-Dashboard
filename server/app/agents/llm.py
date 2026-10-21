@@ -3,8 +3,9 @@
 Values come only from server/.env:
     LLM_PROVIDER  e.g. "openai"   (OpenAI chosen by the user in October 2026)
     LLM_API_KEY   the provider key - never logged, never printed
-    MODEL_SUB     e.g. "gpt-4o-mini"      (sub-agents)
-    MODEL_MASTER  e.g. "gpt-4o"           (Master CEO agent)
+    MODEL_SUB     e.g. "gpt-5-nano"     (sub-agents)
+    MODEL_MASTER  e.g. "gpt-5-nano"     (Master CEO agent and chat)
+    SUB_AGENT_REASONING_EFFORT / MASTER_REASONING_EFFORT / CHAT_REASONING_EFFORT
 
 Every agent answer is structured output validated against a Pydantic model in
 app/schemas/agents.py. The LLM never does math: it receives pre-computed JSON.
@@ -29,18 +30,42 @@ def _require(name: str) -> str:
     return value
 
 
+_REASONING_SETTING = {
+    "sub": "SUB_AGENT_REASONING_EFFORT",
+    "master": "MASTER_REASONING_EFFORT",
+    "chat": "CHAT_REASONING_EFFORT",
+}
+
+
+def reasoning_effort(role: str) -> Optional[str]:
+    """Reasoning effort for one role, straight from .env.
+
+    Only sub-agents run on "minimal"; the Master and chat use "low" because
+    "minimal" produces glued words and leftover self-corrections.
+    """
+    attr = _REASONING_SETTING.get(role, "MASTER_REASONING_EFFORT")
+    value = str(getattr(settings, attr, "") or "").strip().lower()
+    return value or None
+
+
 def build_model(role: str = "sub", temperature: float = TEMPERATURE, **kwargs: Any):
-    """One chat model. role: 'sub' -> MODEL_SUB, 'master' -> MODEL_MASTER."""
+    """One chat model. role: 'sub' -> MODEL_SUB, 'master'/'chat' -> MODEL_MASTER."""
     provider = _require("LLM_PROVIDER").strip().lower()
-    model_name = _require("MODEL_MASTER" if role == "master" else "MODEL_SUB").strip()
+    model_name = _require("MODEL_MASTER" if role != "sub" else "MODEL_SUB").strip()
     api_key = _require("LLM_API_KEY")
 
     from langchain.chat_models import init_chat_model
+
+    effort = reasoning_effort(role)
+    if effort is not None:
+        kwargs.setdefault("reasoning_effort", effort)
 
     return init_chat_model(
         f"{provider}:{model_name}",
         api_key=api_key,
         temperature=temperature,
+        timeout=60,
+        max_retries=1,
         **kwargs,
     )
 
