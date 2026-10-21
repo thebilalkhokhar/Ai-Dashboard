@@ -24,6 +24,7 @@ from app.api import live as live_api
 from app.api.security import require_api_key, warn_if_auth_disabled
 from app.config import settings
 from app.services.redis_client import close_redis
+from app.services.indexes import ensure_indexes
 from app.services.run_guard import mark_stale_runs_abandoned
 
 log = logging.getLogger("main")
@@ -36,9 +37,14 @@ def cors_origins() -> list[str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Open Mongo, clear stale runs, run the scheduler, then clean both up."""
+    """Open Mongo, prepare indexes, clear stale runs, run the scheduler, close."""
     db.get_client()
     warn_if_auth_disabled()
+    try:
+        created = await ensure_indexes(db.get_db())
+        log.info("mongo indexes ready: %s", created)
+    except Exception:  # a hiccup here must not stop the API from serving
+        log.exception("could not create the Mongo indexes")
     try:
         await mark_stale_runs_abandoned(db.get_db())
     except Exception:  # a hiccup here must not stop the API from serving

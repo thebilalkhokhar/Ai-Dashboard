@@ -98,6 +98,9 @@ class SignalsSummary(Base):
     stale_quotes: StaleQuoteSummary = Field(default_factory=StaleQuoteSummary)
     unpaid_invoices: UnpaidSummary = Field(default_factory=UnpaidSummary)
     stalled_orders: StalledOrderSummary = Field(default_factory=StalledOrderSummary)
+    # how many rows per list the endpoint returns at most (the summary counts
+    # always cover everything); None for reports built before the cap existed
+    item_limit: Optional[int] = None
 
 
 class StalledOrderList(Base):

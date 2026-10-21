@@ -8,19 +8,18 @@ GET /api/live     - event stream. On connect: event "snapshot" (the current
 GET /api/metrics  - the latest snapshot as plain JSON (mock data for the
                     Next.js client during local development).
 
-At most LIVE_MAX_CLIENTS (20) streams at once; every subscription is closed
-when its client disconnects.
+At most LIVE_MAX_CLIENTS streams at once; the count is kept in Redis so the
+cap is shared by every worker, and every subscription is closed when its client
+disconnects.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
-import uuid
 from contextlib import suppress
-from typing import Any, AsyncIterator, Optional, Set
+from typing import Any, AsyncIterator, Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -29,6 +28,7 @@ from starlette.background import BackgroundTask
 from app import db as app_db
 from app.config import settings
 from app.services import metrics
+from app.services.limits import SlotCounter
 from app.services.redis_client import get_redis
 from app.services.scheduler import SNAPSHOT_KEY, UPDATES_CHANNEL
 
@@ -38,10 +38,14 @@ router = APIRouter(tags=["live"])
 
 HEARTBEAT_SECONDS = 15
 
-# Concurrent SSE clients, one token per connection (a set, not a counter, so a
-# late cleanup can never free somebody else's slot).
-_active_clients: Set[str] = set()
-_clients_lock = asyncio.Lock()
+# Concurrent SSE clients, one token per connection. The count lives in Redis so
+# the cap holds across workers; slots expire on their own if a worker dies
+# without releasing (see app/services/limits.py).
+_sse_slots = SlotCounter(
+    "live:clients",
+    int(settings.LIVE_MAX_CLIENTS),
+    int(settings.LIVE_CLIENT_SLOT_TTL_SECONDS),
+)
 
 
 def _sse(event: str, data: Any) -> str:
@@ -96,17 +100,11 @@ async def _latest_briefing() -> Optional[dict]:
 
 async def _acquire_client() -> Optional[str]:
     """Reserve a slot; returns its token, or None when the limit is reached."""
-    async with _clients_lock:
-        if len(_active_clients) >= int(settings.LIVE_MAX_CLIENTS):
-            return None
-        token = uuid.uuid4().hex
-        _active_clients.add(token)
-        return token
+    return await _sse_slots.acquire()
 
 
 async def _release_client(token: str) -> None:
-    async with _clients_lock:
-        _active_clients.discard(token)
+    await _sse_slots.release(token)
 
 
 async def _event_stream(client_token: str) -> AsyncIterator[str]:

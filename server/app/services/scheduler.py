@@ -16,7 +16,11 @@ document. Only when something is new or changed does the scheduler call the
 pipeline once; inside the pipeline the existing 24h cache skips every
 unchanged item. No changes -> zero LLM calls.
 
-A Redis lock (`dashboard:scheduler:lock`) makes sure two cycles never overlap.
+A Redis lock (`dashboard:scheduler:lock`) makes sure two cycles never overlap,
+and a second one (`dashboard:scheduler:leader`, renewed while work runs) means
+only ONE worker out of many even tries: with `uvicorn --workers 4` the other
+three stand by and take over within a TTL if the leader dies.
+
 Every job has its own try/except: one failure is logged and the loop keeps
 running. Only agent failures publish an "error" event.
 """
@@ -33,7 +37,7 @@ from typing import Any, Callable, Optional
 
 from app import db as app_db
 from app.config import settings
-from app.services import metrics, refresh
+from app.services import metrics, refresh, signals
 from app.services.erp_client import ERPClient
 from app.services.redis_client import get_redis
 
@@ -43,6 +47,8 @@ log = logging.getLogger("scheduler")
 SNAPSHOT_KEY = "dashboard:snapshot"
 UPDATES_CHANNEL = "dashboard:updates"
 LOCK_KEY = "dashboard:scheduler:lock"
+# one worker is the leader and runs the schedule; the others stand by
+LEADER_KEY = "dashboard:scheduler:leader"
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +84,9 @@ class DashboardScheduler:
         self._task: Optional[asyncio.Task] = None
         self._stop: Optional[asyncio.Event] = None
         self._last_daily_day: Optional[str] = None  # e.g. "2026-10-20"
+        # this process' identity in the leader election
+        self._leader_token = str(uuid.uuid4())
+        self.is_leader = False
 
     # ----------------------------------------------------------- plumbing
 
@@ -96,6 +105,67 @@ class DashboardScheduler:
         # that a crashed process does not block the dashboard for long.
         return max(900, self.interval_seconds() * 3)
 
+    def leader_ttl_seconds(self) -> int:
+        return max(30, int(settings.SCHEDULER_LEADER_TTL_SECONDS))
+
+    # ------------------------------------------------------- leader election
+
+    async def claim_leadership(self) -> bool:
+        """True when this process may run the schedule.
+
+        First call wins the Redis key (SET NX with a TTL). Later calls renew it
+        only while we still own it, so a worker that stops renewing is replaced
+        by a standby within one TTL.
+        """
+        ttl = self.leader_ttl_seconds()
+        try:
+            redis = self._redis()
+            if await redis.set(LEADER_KEY, self._leader_token, nx=True, ex=ttl):
+                self.is_leader = True
+                return True
+            held = await redis.get(LEADER_KEY)
+            if isinstance(held, bytes):
+                held = held.decode()
+            if held == self._leader_token:
+                await redis.set(LEADER_KEY, self._leader_token, ex=ttl)
+                self.is_leader = True
+                return True
+            self.is_leader = False
+            return False
+        except Exception:
+            # no Redis, no election: nobody runs, which is the safe answer
+            log.exception("could not reach Redis for the scheduler leader key")
+            self.is_leader = False
+            return False
+
+    async def step_down(self) -> None:
+        """Give leadership back so a standby takes over immediately."""
+        if not self.is_leader:
+            return
+        self.is_leader = False
+        try:
+            redis = self._redis()
+            held = await redis.get(LEADER_KEY)
+            if isinstance(held, bytes):
+                held = held.decode()
+            if held == self._leader_token:
+                await redis.delete(LEADER_KEY)
+        except Exception:
+            log.debug("could not release scheduler leadership", exc_info=True)
+
+    def leader_renew_seconds(self) -> int:
+        """How often the lease is renewed: three chances inside one TTL."""
+        return max(1, self.leader_ttl_seconds() // 3)
+
+    async def _renew_while_working(self) -> None:
+        """Keep the leader key alive through a long cycle."""
+        every = self.leader_renew_seconds()
+        while True:
+            await asyncio.sleep(every)
+            if not await self.claim_leadership():
+                log.warning("scheduler lost leadership during a cycle")
+                return
+
     # ---------------------------------------------------------- start/stop
 
     async def start(self) -> None:
@@ -112,13 +182,23 @@ class DashboardScheduler:
             with suppress(asyncio.CancelledError):
                 await self._task
             self._task = None
+        await self.step_down()
 
     async def _loop(self) -> None:
         loop = asyncio.get_running_loop()
         while True:
             started = loop.time()
             try:
-                await self.run_cycle()
+                if await self.claim_leadership():
+                    renewal = asyncio.create_task(self._renew_while_working())
+                    try:
+                        await self.run_cycle()
+                    finally:
+                        renewal.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await renewal
+                else:
+                    log.info("scheduler: another worker leads this dashboard, standing by")
             except asyncio.CancelledError:
                 raise
             except Exception:  # a bad cycle must never kill the loop
@@ -168,6 +248,7 @@ class DashboardScheduler:
                 "at": now.isoformat(),
                 "refresh": await self._job_refresh(),
                 "snapshot": await self._job_snapshot(now),
+                "signals": await self._job_signals(now),
                 "agents": await self._job_agents(now),
             }
             return summary
@@ -200,6 +281,22 @@ class DashboardScheduler:
         await self._redis().set(
             SNAPSHOT_KEY, json.dumps({"event": "snapshot", "data": snapshot}, default=str)
         )
+
+    # -------------------------------------------------------- job: signals
+
+    async def _job_signals(self, now: datetime) -> dict:
+        """Refresh the cached GET /api/signals report the API serves from Redis.
+
+        Doing it here means the expensive read happens once per interval in the
+        leader instead of once per dashboard request.
+        """
+        try:
+            payload = await signals.build_signals_payload(self._db(), now)
+            await signals.cache_store(payload)
+            return {"ok": True, "generated_at": payload.get("generated_at")}
+        except Exception as exc:
+            log.exception("signals cache job failed")
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     # ---------------------------------------------------------- job: agents
 

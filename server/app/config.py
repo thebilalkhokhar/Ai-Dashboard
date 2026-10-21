@@ -74,6 +74,21 @@ class Settings(BaseSettings):
     # --- One agent run at a time (Redis lock + Mongo 'running' doc) ---
     AGENT_RUN_LOCK_TTL_SECONDS: int = 1800
 
+    # --- Limits that live in Redis so every worker shares them ---
+    # POST /api/chat: sliding window.
+    CHAT_RATE_LIMIT_REQUESTS: int = 30
+    CHAT_RATE_LIMIT_WINDOW_SECONDS: int = 60
+    # GET /api/live: a slot is also dropped after this many seconds, so a
+    # worker that dies cannot hold the SSE capacity hostage.
+    LIVE_CLIENT_SLOT_TTL_SECONDS: int = 3600
+    # Only the leader scheduler runs the refresh cycle; renewed every third of
+    # this TTL, so a lost worker is replaced within about that long.
+    SCHEDULER_LEADER_TTL_SECONDS: int = 60
+
+    # --- /api/signals: how many rows per signal come back at most ---
+    # The summary counts always cover the whole collection (Mongo aggregates).
+    SIGNALS_ITEM_LIMIT: int = 200
+
     # --- Dashboard scheduler (in-process asyncio tasks) ---
     REFRESH_LOOKBACK_DAYS: int = 2      # only this many days get re-pulled from the ERP
     REFRESH_MINUTES: int = 10           # dashboard refresh interval

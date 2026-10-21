@@ -21,9 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import json
-import time
 import uuid
-from collections import deque
 from datetime import datetime, timezone
 from typing import Annotated, Dict, Any, Optional, Set
 
@@ -34,47 +32,17 @@ from app.db import get_db
 from app.config import settings
 from app.schemas.signals import (
     SignalsReport,
-    SignalsSummary,
-    StaleQuoteSummary,
-    StalledOrderSummary,
     StuckLead,
     StuckLeadsResponse,
-    UnpaidSummary,
 )
 from app.schemas.customer import CustomerContext
 from app.schemas.chat import ChatRequest
 from app.services.erp_client import ERPClient, ERPError
-from app.services import processors
-from app.services import run_guard
+from app.services import processors, signals
+from app.services.limits import RateLimiter
+from app.services.run_guard import acquire_run, release_run
 
 router = APIRouter()
-
-
-def _round2(value: Any) -> float:
-    return processors.to_number(value)
-
-
-def summarize(row_list: list[dict]) -> tuple[int, float]:
-    """count + amount for a signal list."""
-    return len(row_list), round(sum(_round2(row["amount"]) for row in row_list), 2)
-
-
-def summarize_unpaid(row_list: list[dict]) -> tuple[int, float, int, int, int]:
-    """count, balance total, overdue count, not-paid count, partially-paid count."""
-    count = len(row_list)
-    balance = round(sum(_round2(row["balance"]) for row in row_list), 2)
-    overdue = sum(1 for row in row_list if row["overdue"])
-    not_paid = sum(
-        1
-        for row in row_list
-        if row["payment_status"] in (0, None) and row["payment_status_label"] != "Partially Paid"
-    )
-    partial = sum(1 for row in row_list if row["payment_status"] == 1)
-    return count, balance, overdue, not_paid, partial
-
-
-def summarize_stalled(row_list: list[dict]) -> tuple[int, float]:
-    return len(row_list), round(sum(_round2(row["total_amount"]) for row in row_list), 2)
 
 
 @router.get("/signals", response_model=SignalsReport)
@@ -84,51 +52,29 @@ async def get_signals(
     overdue_days: Annotated[int | None, Query(ge=0)] = None,
     include_stalled: bool = True,
 ) -> SignalsReport:
-    """Everything that needs attention, in one deterministic JSON."""
+    """Everything that needs attention, in one deterministic JSON.
+
+    Served from the Redis copy the scheduler leader refreshes every
+    REFRESH_MINUTES, so reading it costs one cache lookup instead of copying
+    the ERP collections into memory. A custom window or a cold cache builds the
+    report straight from Mongo (projections, streaming cursors, $sort + $limit).
+    """
     db = get_db()
-    now = datetime.now(timezone.utc)
+    key = signals.cache_key(stale_days, stalled_days, overdue_days, include_stalled)
+    cached = await signals.cache_load(key)
+    if cached is not None:
+        return SignalsReport(**cached)
 
-    quotes = await db.quotes_flat.find().to_list(100_000)
-    orders = await db.orders_flat.find().to_list(100_000)
-
-    # quotes that already converted into an order must not count as stale
-    order_quote_ids = {row["quote_id"] for row in orders if row.get("quote_id") is not None}
-    stale = processors.stale_quotes(quotes, now, days=stale_days, order_quote_ids=order_quote_ids)
-    unpaid = processors.unpaid_invoices(orders, now, overdue_days=overdue_days)
-    stalled = processors.stalled_orders(orders, now, days=stalled_days)
-
-    stale_count, stale_amount = summarize(stale)
-    unpaid_count, unpaid_balance, overdue_count, not_paid, partial = summarize_unpaid(unpaid)
-    stalled_count, stalled_amount = summarize_stalled(stalled)
-
-    quote_dates = sorted(d for d in (processors.iso_or_none(q.get("created_at")) for q in quotes) if d)
-    order_dates = sorted(d for d in (processors.iso_or_none(o.get("invoice_date")) for o in orders) if d)
-
-    return SignalsReport(
-        generated_at=now.isoformat(),
-        stale_quotes=stale,
-        unpaid_invoices=unpaid,
-        stalled_orders={"reliable": False, "items": stalled if include_stalled else []},
-        summary=SignalsSummary(
-            quotes_scanned=len(quotes),
-            orders_scanned=len(orders),
-            data_from=min(quote_dates or order_dates or [""]),
-            data_to=max(quote_dates or order_dates or [""]),
-            stale_quotes=StaleQuoteSummary(count=stale_count, total_amount=stale_amount),
-            unpaid_invoices=UnpaidSummary(
-                count=unpaid_count,
-                total_amount=unpaid_balance,
-                overdue_count=overdue_count,
-                unpaid_count=not_paid,
-                partially_paid_count=partial,
-            ),
-            stalled_orders=StalledOrderSummary(
-                count=stalled_count,
-                total_amount=stalled_amount,
-                reliable=False,
-            ),
-        ),
+    payload = await signals.build_signals_payload(
+        db,
+        datetime.now(timezone.utc),
+        stale_days=stale_days,
+        stalled_days=stalled_days,
+        overdue_days=overdue_days,
+        include_stalled=include_stalled,
     )
+    await signals.cache_store(payload, key)
+    return SignalsReport(**payload)
 
 
 _running_tasks: Set[asyncio.Task] = set()
@@ -159,7 +105,7 @@ async def _background_run(run_id: str) -> None:
             pass
     finally:
         # whatever happened, the next run must be allowed to start
-        await run_guard.release_run(run_id, database)
+        await release_run(run_id, database)
 
 
 @router.post("/agents/run")
@@ -173,7 +119,7 @@ async def run_agents() -> dict:
     """
     run_id = str(uuid.uuid4())
     database = get_db()
-    already_running: Optional[str] = await run_guard.acquire_run(run_id, database)
+    already_running: Optional[str] = await acquire_run(run_id, database)
     if already_running:
         _run_log.info("agent run refused: %s is still running", already_running)
         return JSONResponse(
@@ -244,20 +190,18 @@ async def get_customer_context(
     return CustomerContext(**data)
 
 
-_chat_request_times: deque[float] = deque()
-_chat_rate_lock = asyncio.Lock()
+# Chat limit: CHAT_RATE_LIMIT_REQUESTS per CHAT_RATE_LIMIT_WINDOW_SECONDS, in
+# Redis so every worker shares it (process-local deque when Redis is down).
+_chat_limiter = RateLimiter(
+    "chat:rate-limit",
+    int(settings.CHAT_RATE_LIMIT_REQUESTS),
+    int(settings.CHAT_RATE_LIMIT_WINDOW_SECONDS),
+)
 
 
 async def _chat_rate_allowed() -> bool:
-    """One process-wide limit shared by all callers: 30 requests per minute."""
-    now = time.monotonic()
-    async with _chat_rate_lock:
-        while _chat_request_times and now - _chat_request_times[0] >= 60:
-            _chat_request_times.popleft()
-        if len(_chat_request_times) >= 30:
-            return False
-        _chat_request_times.append(now)
-        return True
+    """One limit shared by all workers, straight from Redis."""
+    return await _chat_limiter.allow()
 
 
 def _sse(event: str, data: dict) -> str:

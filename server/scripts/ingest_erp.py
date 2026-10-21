@@ -189,28 +189,18 @@ async def fetch_payments_window(
 
 
 # ---------------------------------------------------------------------------
-# index creation
+# index creation (the definitions live in app/services/indexes.py, which the
+# FastAPI lifespan also runs, so an ingest is never the only way to get them)
 # ---------------------------------------------------------------------------
-
-INDEXES: dict[str, list[tuple]] = {
-    "quotes_flat": [("customer.id", 1), ("status", 1), ("created_at", 1)],
-    "orders_flat": [
-        ("customer.id", 1),
-        ("status_label", 1),
-        ("payment_status", 1),
-        ("quote_id", 1),
-    ],
-    "payments_flat": [("customer_id", 1)],
-    "leads": [("status", 1), ("lastActivityAt", 1)],
-}
 
 
 async def create_indexes(database) -> None:
-    for name, keys in INDEXES.items():
-        collection = database[name]
-        for key in keys:
-            await collection.create_index([key])
-        print(f"  indexes ok: {name} ({', '.join(k for k, _ in keys)})")
+    from app.services.indexes import INDEXES, ensure_indexes
+
+    created = await ensure_indexes(database)
+    for name, indexes in INDEXES.items():
+        keys = ", ".join(suffix for suffix, _ in indexes)
+        print(f"  indexes ok: {name} ({keys}) - {created.get(name, 0)} created")
 
 
 async def prune_not_fetched_records(database, fetched_ids: dict[str, set]) -> int:

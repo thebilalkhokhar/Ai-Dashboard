@@ -88,6 +88,9 @@ export interface SignalsSummary {
   stale_quotes: StaleQuoteSummary;
   unpaid_invoices: UnpaidSummary;
   stalled_orders: StalledOrderSummary;
+  // maximum rows per list in the report; the counts above always cover
+  // everything. Absent on reports saved before the cap existed.
+  item_limit?: number | null;
 }
 
 export interface SignalsReport {

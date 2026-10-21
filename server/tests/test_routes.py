@@ -15,7 +15,8 @@ from app.api import routes
 from app.api.security import key_matches
 from app.config import settings
 from app.main import app, cors_origins
-from app.services import metrics, run_guard
+from app.services import metrics, run_guard, signals
+from mongo_fake import FakeAggCollection
 
 
 @pytest.fixture
@@ -89,6 +90,15 @@ class FakeSignalDatabase:
         self.quotes_flat = FakeCollection(quotes)
         self.orders_flat = FakeCollection(orders)
         self.leads = FakeCollection(leads)
+
+
+class AggregationDatabase:
+    """quotes_flat / orders_flat that answer aggregations, like the real ones."""
+
+    def __init__(self, quotes=(), orders=(), leads=()):
+        self.quotes_flat = FakeAggCollection(quotes, "quotes_flat")
+        self.orders_flat = FakeAggCollection(orders, "orders_flat")
+        self.leads = FakeSignalDatabase(leads=leads).leads
 
 
 class RunCursor:
@@ -178,6 +188,75 @@ class BrokenRedis:
 
 
 # ------------------------------------------------------------------ API keys
+
+
+class IndexCollection:
+    def __init__(self, name):
+        self.name = name
+        self.created: list[tuple[str, tuple]] = []
+
+    async def create_index(self, keys, name=None):
+        self.created.append((name, tuple(tuple(key) for key in keys)))
+        return name
+
+
+class IndexDatabase:
+    def __init__(self, names):
+        self._collections = {name: IndexCollection(name) for name in names}
+
+    def __getitem__(self, name):
+        return self._collections[name]
+
+
+def test_every_declared_index_is_created():
+    from app.services.indexes import INDEXES, ensure_indexes
+
+    database = IndexDatabase(list(INDEXES))
+    created = asyncio.run(ensure_indexes(database))
+
+    assert set(created) == set(INDEXES)
+    for name, indexes in INDEXES.items():
+        collection = database[name]
+        assert created[name] == len(indexes)
+        for suffix, keys in indexes:
+            assert (f"{name}_{suffix}", tuple(keys)) in collection.created, name
+    # the run guard, the briefing query and the 24h hash cache are all indexed
+    agent_runs = {entry[0] for entry in database["agent_runs"].created}
+    assert {"agent_runs_by_finished", "agent_runs_by_started", "agent_runs_open_run"} <= agent_runs
+    assert "agent_runs_collections_hash" in agent_runs
+    assert "orders_flat_by_quote" in {entry[0] for entry in database["orders_flat"].created}
+
+
+def test_indexes_are_idempotent_and_survive_a_refusal():
+    """A collection that rejects an index must not stop the rest of them."""
+    from app.services.indexes import INDEXES, ensure_indexes
+
+    database = IndexDatabase(list(INDEXES))
+
+    async def refuse(keys, name=None):
+        raise RuntimeError("index in progress")
+
+    database["agent_runs"].create_index = refuse
+    created = asyncio.run(ensure_indexes(database))
+    assert created["agent_runs"] == 0
+    assert created["quotes_flat"] == len(INDEXES["quotes_flat"])
+
+    asyncio.run(ensure_indexes(database))  # second startup changes nothing
+
+
+def test_startup_creates_the_indexes(monkeypatch):
+    import app.main as main_module
+
+    prepare_test_client(monkeypatch)
+    seen: dict[str, int] = {}
+
+    async def record(database):
+        seen["called"] = 1
+        return {}
+
+    monkeypatch.setattr(main_module, "ensure_indexes", record)
+    with TestClient(app):
+        assert seen.get("called") == 1
 
 
 def test_health_needs_no_key_and_api_routes_do(monkeypatch):
@@ -304,8 +383,21 @@ def prepare_test_client(monkeypatch):
     monkeypatch.setattr(app_db, "close", close_db)
 
 
+def no_signals_cache(monkeypatch):
+    """Force /api/signals to build from Mongo instead of serving the Redis copy."""
+
+    async def miss(_key):
+        return None
+
+    async def store(_payload, _key=""):
+        return None
+
+    monkeypatch.setattr(signals, "cache_load", miss)
+    monkeypatch.setattr(signals, "cache_store", store)
+
+
 def test_signals_can_omit_stalled_items_without_changing_summary(monkeypatch):
-    database = FakeSignalDatabase(
+    database = AggregationDatabase(
         orders=[
             {
                 "id": 9,
@@ -317,6 +409,7 @@ def test_signals_can_omit_stalled_items_without_changing_summary(monkeypatch):
         ]
     )
     prepare_test_client(monkeypatch)
+    no_signals_cache(monkeypatch)
     monkeypatch.setattr(routes, "get_db", lambda: database)
 
     with TestClient(app) as client:
@@ -408,9 +501,10 @@ def test_metrics_and_signals_open_quote_totals_match_for_same_fixture(monkeypatc
         },
     ]
     orders = []
-    database = FakeSignalDatabase(quotes, orders)
+    database = AggregationDatabase(quotes, orders)
 
     prepare_test_client(monkeypatch)
+    no_signals_cache(monkeypatch)
     monkeypatch.setattr(routes, "datetime", FrozenDateTime)
     monkeypatch.setattr(routes, "get_db", lambda: database)
     monkeypatch.setattr(settings, "STALE_QUOTE_DAYS", 3)

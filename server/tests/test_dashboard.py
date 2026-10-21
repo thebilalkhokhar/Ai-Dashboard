@@ -24,7 +24,15 @@ from app.api import live as live_api
 from app.main import app
 from app.services import metrics
 from app.services.refresh import run_incremental_refresh
-from app.services.scheduler import LOCK_KEY, SNAPSHOT_KEY, UPDATES_CHANNEL, DashboardScheduler
+import asyncio
+
+from app.services.scheduler import (
+    LEADER_KEY,
+    LOCK_KEY,
+    SNAPSHOT_KEY,
+    UPDATES_CHANNEL,
+    DashboardScheduler,
+)
 
 # 2026-10-20 15:00 UTC == 10:00 US Central (the ERP's business day).
 NOW = datetime(2026, 10, 20, 15, 0, tzinfo=timezone.utc)
@@ -161,6 +169,10 @@ class FakeCollection:
         query = query or {}
         return FakeCursor([row for row in self.docs if _matches(row, query)])
 
+    def aggregate(self, pipeline, batchSize=None):
+        # the signals service must not be reached by these scheduler tests
+        raise AssertionError("this fake does not answer aggregations")
+
     async def insert_one(self, doc: dict) -> None:
         self.docs.append(dict(doc))
 
@@ -269,9 +281,34 @@ class FakePubSub:
         return None
 
 
+class FakePipeline:
+    """Queues commands against the same FakeRedis, like a real pipeline does."""
+
+    def __init__(self, redis: "FakeRedis"):
+        self.redis = redis
+        self._stack = []
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        method = getattr(self.redis, name)
+
+        def queued(*args, **kwargs):
+            self._stack.append(lambda: method(*args, **kwargs))
+            return self
+
+        return queued
+
+    async def execute(self):
+        results = [await call() for call in self._stack]
+        self._stack.clear()
+        return results
+
+
 class FakeRedis:
     def __init__(self):
         self.store: dict[str, str] = {}
+        self.zsets: dict[str, dict[str, float]] = {}
         self.published: list[tuple[str, str]] = []
         self.subscribers: set[FakePubSub] = set()
         self.pubsubs: list[FakePubSub] = []
@@ -288,7 +325,35 @@ class FakeRedis:
 
     async def delete(self, key: str):
         self.store.pop(key, None)
+        self.zsets.pop(key, None)
         return 1
+
+    # --- sorted sets: the shared rate limit and the SSE slot counter ---
+
+    async def zadd(self, key: str, mapping: dict):
+        members = self.zsets.setdefault(key, {})
+        for member, score in mapping.items():
+            members[member] = float(score)
+        return len(mapping)
+
+    async def zrem(self, key: str, member: str):
+        return 1 if self.zsets.get(key, {}).pop(member, None) is not None else 0
+
+    async def zcard(self, key: str):
+        return len(self.zsets.get(key, {}))
+
+    async def zremrangebyscore(self, key: str, low: float, high: float):
+        members = self.zsets.setdefault(key, {})
+        doomed = [member for member, score in members.items() if low <= score <= high]
+        for member in doomed:
+            members.pop(member)
+        return len(doomed)
+
+    async def expire(self, key: str, seconds: int):
+        return True
+
+    def pipeline(self) -> FakePipeline:
+        return FakePipeline(self)
 
     async def publish(self, channel: str, message: str):
         self.published.append((channel, message))
@@ -650,8 +715,15 @@ def prepare_live(monkeypatch) -> FakeRedis:
 
     monkeypatch.setattr(app_db, "close", close_db)
     monkeypatch.setattr(app_db, "get_db", lambda: database)
-    live_api._active_clients.clear()
+    # the SSE slot counter must use this fake too, or it would hit real Redis
+    monkeypatch.setattr(live_api._sse_slots, "redis_factory", lambda: redis)
+    live_api._sse_slots.reset()
     return redis
+
+
+def live_slots(redis: FakeRedis) -> int:
+    """How many SSE slots are currently held in the shared counter."""
+    return len(redis.zsets.get(live_api._sse_slots.key, {}))
 
 
 def read_events(response, limit: int) -> list[tuple[str, dict]]:
@@ -715,7 +787,7 @@ def test_live_disconnect_cleans_up_the_subscription(monkeypatch):
 
             assert events[0] == "snapshot"
             # while the client is connected it owns one slot and one subscription
-            assert len(live_api._active_clients) == 1
+            assert live_slots(redis) == 1
             pubsub = redis.pubsubs[-1]
             assert pubsub.channels == {UPDATES_CHANNEL}
 
@@ -723,4 +795,123 @@ def test_live_disconnect_cleans_up_the_subscription(monkeypatch):
 
         # disconnecting must drop the subscription and free the slot
         assert wait_for(lambda: pubsub.closed and not pubsub.channels)
-        assert wait_for(lambda: len(live_api._active_clients) == 0)
+        assert wait_for(lambda: live_slots(redis) == 0)
+
+
+# ---------------------------------------------------------------------------
+# 7. leader election: with several workers only one scheduler runs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_only_one_scheduler_claims_leadership():
+    redis = FakeRedis()
+    leader = make_scheduler(redis, scheduler_db())
+    standby = make_scheduler(redis, scheduler_db())
+
+    assert await leader.claim_leadership() is True
+    assert await standby.claim_leadership() is False
+    assert redis.store[LEADER_KEY] == leader._leader_token
+
+    # the leader keeps its lease, the standby still cannot take it
+    assert await leader.claim_leadership() is True
+    assert await standby.claim_leadership() is False
+
+    # when the leader steps down, a standby takes over at once
+    await leader.step_down()
+    assert LEADER_KEY not in redis.store
+    assert await standby.claim_leadership() is True
+
+
+@pytest.mark.asyncio
+async def test_a_leaderless_worker_never_runs_a_cycle(monkeypatch):
+    redis = FakeRedis()
+    leader = make_scheduler(redis, scheduler_db())
+    standby = make_scheduler(redis, scheduler_db())
+    await leader.claim_leadership()
+
+    cycles: list[str] = []
+
+    async def counted_cycle(self, now=None):
+        cycles.append(self._leader_token)
+        return {"ran": True}
+
+    monkeypatch.setattr(DashboardScheduler, "run_cycle", counted_cycle)
+
+    # one pass of the loop each, then stop
+    for scheduler in (standby, leader):
+        scheduler._stop = asyncio.Event()
+        scheduler._stop.set()
+        scheduler.interval_seconds = lambda: 1
+        await scheduler._loop()
+
+    assert cycles == [leader._leader_token]  # only the leader worked
+
+
+@pytest.mark.asyncio
+async def test_leadership_is_renewed_during_a_long_cycle(monkeypatch):
+    """A slow cycle must not let the lease expire under the leader's feet."""
+    redis = FakeRedis()
+    scheduler = make_scheduler(redis, scheduler_db())
+    monkeypatch.setattr(scheduler, "leader_renew_seconds", lambda: 0)  # renew immediately
+    await scheduler.claim_leadership()
+
+    renewals: list[bool] = []
+    original = scheduler.claim_leadership
+
+    async def spy():
+        result = await original()
+        renewals.append(result)
+        return result
+
+    monkeypatch.setattr(scheduler, "claim_leadership", spy)
+
+    task = asyncio.create_task(scheduler._renew_while_working())
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+        if len(renewals) >= 2:
+            break
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert renewals and all(renewals)
+    assert redis.store[LEADER_KEY] == scheduler._leader_token
+    assert scheduler.is_leader is True
+
+
+@pytest.mark.asyncio
+async def test_losing_the_lease_stops_the_renewal(monkeypatch):
+    """Once another worker owns the key, this one stops pretending to lead."""
+    redis = FakeRedis()
+    scheduler = make_scheduler(redis, scheduler_db())
+    monkeypatch.setattr(scheduler, "leader_renew_seconds", lambda: 0)
+    await scheduler.claim_leadership()
+
+    task = asyncio.create_task(scheduler._renew_while_working())
+    await asyncio.sleep(0.02)
+    # a standby takes over (the leader's lease would have expired in reality)
+    redis.store[LEADER_KEY] = "someone-else"
+
+    await asyncio.wait_for(task, timeout=2)  # the renewal loop returns on its own
+    assert scheduler.is_leader is False
+
+
+@pytest.mark.asyncio
+async def test_stop_gives_leadership_back(monkeypatch):
+    redis = FakeRedis()
+    scheduler = make_scheduler(redis, scheduler_db())
+
+    async def no_cycle(now=None):
+        return {"ran": False}
+
+    monkeypatch.setattr(scheduler, "run_cycle", no_cycle)
+    await scheduler.start()
+    await asyncio.sleep(0.05)  # let the loop claim leadership
+    assert redis.store[LEADER_KEY] == scheduler._leader_token
+
+    await scheduler.stop()
+    assert LEADER_KEY not in redis.store
+    assert scheduler.is_leader is False
