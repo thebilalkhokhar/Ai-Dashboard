@@ -706,6 +706,7 @@ export interface TreeToolStage {
   counts: TreeToolCounts | null;
   filter: { matched: number; returned: number; remaining: number | null; complete: boolean } | null;
   aggregation: { aggregate: string } | null;
+  pagination: { pages: number; lastOffset: number } | null;
 }
 
 export interface TreeBranch {
@@ -773,6 +774,18 @@ export function deriveExecutionTree(
           }
         : null;
 
+    // Pagination is real only when the backend walked pages: every
+    // tool.completed for this tool carries the offset it served, so more
+    // than one page (or a page that starts past zero) is a shown stage.
+    const pageOffsets = ordered
+      .filter((entry) => entry.type === "tool.completed" && entry.toolName === tool)
+      .map((entry) => numberOrNull(details[entry.event_id]?.offset))
+      .filter((value): value is number => value !== null);
+    const pagination =
+      pageOffsets.length > 1 || (pageOffsets.length === 1 && pageOffsets[0] > 0)
+        ? { pages: Math.max(pageOffsets.length, 1), lastOffset: pageOffsets[pageOffsets.length - 1] ?? 0 }
+        : null;
+
     const aggregationEntry = ordered.find(
       (entry) => entry.type === "data.aggregation_completed" && entry.toolName === tool,
     );
@@ -789,6 +802,7 @@ export function deriveExecutionTree(
       counts,
       filter,
       aggregation,
+      pagination,
     };
   };
 
