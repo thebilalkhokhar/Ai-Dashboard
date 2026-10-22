@@ -494,7 +494,12 @@ export type TaskEventType =
   | "tool.completed"
   | "erp.sync_started"
   | "erp.sync_completed"
-  | "erp.sync_failed";
+  | "erp.sync_failed"
+  | "data.filter_completed"
+  | "data.aggregation_completed"
+  | "chat.validation_started"
+  | "chat.validation_completed"
+  | "chat.response_started";
 
 export interface TaskEventPayload {
   // agent.progress uses cached=true (boolean); agent.completed reports the
