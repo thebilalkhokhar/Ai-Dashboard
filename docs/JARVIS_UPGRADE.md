@@ -126,3 +126,35 @@ records). On top of that store:
   requires a fresh data tool call. This is retrieval over stored
   history — no model training or fine-tuning is involved, per the
   project's standing decision.
+
+## Payment timestamps and the calendar policy
+
+Root cause of the "5:00 AM PKT" failure: the ERP also keeps a separate
+date-only `payment_date`, and for date-recorded payments its
+`received_at` is that date at midnight in the ERP's offset
+(`2026-10-22T00:00:00-05:00`, identical across unrelated payments). The
+mirror stores ERP rows as returned; the chat passed the raw string
+through, and the model converted midnight into a clock time - a
+precision the source never had.
+
+The contract now:
+
+- Every payment result classifies its timestamp: `instant` (a real
+  time component; the backend also computes `received_time_pkt`, so
+  the model never does timezone arithmetic), `date` (midnight - a
+  date, reported as `received_date` with a result-level note that the
+  exact arrival time is not recorded), or `missing` (dated by
+  `payment_date` only). The raw midnight is never exposed as a receipt
+  time, in list results or in `get_record`.
+- The answer guard rejects any exact clock-time claim when the turn's
+  payment evidence is date-only, unless the answer itself discloses
+  that the time is unavailable.
+- Calendars: relative dates in chat ("today", "yesterday", named
+  periods) resolve on the USER's calendar, Asia/Karachi, and payment
+  instants are bucketed by their PKT calendar date - a payment at
+  11:30 PM at the ERP is 9:30 AM the next day in Lahore and belongs
+  to that day. ERP business-date fields (invoice dates, quote and
+  order dates) keep ERP-calendar semantics; the dashboard KPI tool
+  keeps its ERP business date. October 23 questions return October 23
+  records only - an empty day is reported as empty, never backfilled
+  with October 22.
