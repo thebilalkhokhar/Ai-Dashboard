@@ -6,9 +6,12 @@
 
 import type {
   AgentRunStarted,
+  AgentsResponse,
+  TasksResponse,
   ChatDoneEvent,
   ChatRequest,
   ChatStreamEvent,
+  ChatToolResultEvent,
   CustomerContext,
   DashboardSnapshot,
   HealthResponse,
@@ -16,7 +19,9 @@ import type {
   SignalsQuery,
   SignalsReport,
   StuckLeadsResponse,
+  TaskEvent,
 } from "@/types/api";
+import { parseTaskEventBlock, taskEventsUrl } from "@/lib/task-events";
 
 // Where the browser sends backend calls.
 //
@@ -208,6 +213,101 @@ export function fetchLatestBriefing(): Promise<LatestBriefingResponse> {
   return apiFetch<LatestBriefingResponse>("/api/briefing/latest");
 }
 
+// ---------------------------------------------------------- command center
+
+export function fetchAgents(): Promise<AgentsResponse> {
+  return apiFetch<AgentsResponse>("/api/agents");
+}
+
+export function fetchTasks(limit = 20): Promise<TasksResponse> {
+  return apiFetch<TasksResponse>(`/api/tasks?limit=${limit}`);
+}
+
+// GET /api/tasks/{id}/events?after={seq} - replay then live, as SSE.
+//
+// Uses fetch + AbortController through the same-origin proxy (which injects the
+// X-API-Key server-side), not EventSource: that gives controlled reconnection
+// with a cursor, a clean abort when the task changes or the view unmounts, and
+// a real HTTP status to distinguish an auth failure (401) or unknown task (404)
+// from a dropped stream. Resolves when the stream ends; throws ApiError with the
+// status on an error response so the caller can show the right state.
+export async function openTaskEventStream(
+  taskId: string,
+  after: number,
+  options: { signal: AbortSignal; onEvent: (event: TaskEvent) => void },
+): Promise<void> {
+  const { signal, onEvent } = options;
+  let response: Response;
+  try {
+    response = await fetch(taskEventsUrl(API_BASE_URL, taskId, after), {
+      cache: "no-store",
+      headers: { Accept: "text/event-stream" },
+      signal,
+    });
+  } catch (error) {
+    if (isAbort(error)) throw error;
+    throw new ApiError(
+      `Cannot reach the backend at ${API_BASE_URL}. Start FastAPI and try again.`,
+      0,
+    );
+  }
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const body = await response.json();
+      if (body && typeof body === "object" && "detail" in body) {
+        detail = describeDetail((body as { detail: unknown }).detail);
+      }
+    } catch {
+      // non-JSON error body: fall back to the status
+    }
+    throw new ApiError(
+      detail || `Task-event stream failed (HTTP ${response.status}).`,
+      response.status,
+    );
+  }
+  if (!response.body) {
+    throw new ApiError("Task-event stream did not include a readable body.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  function dispatch(block: string) {
+    let event: TaskEvent | null;
+    try {
+      event = parseTaskEventBlock(block);
+    } catch {
+      return; // a malformed frame is skipped, never fatal to the stream
+    }
+    if (event) onEvent(event);
+  }
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const blocks = buffer.split(/\r?\n\r?\n/);
+      buffer = blocks.pop() ?? "";
+      for (const block of blocks) dispatch(block);
+      if (done) break;
+    }
+    if (buffer.trim()) dispatch(buffer);
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function isAbort(error: unknown): boolean {
+  return (
+    (error instanceof DOMException && error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError")
+  );
+}
+
+
 // ---------------------------------------------------------------- chat (SSE)
 
 const CHAT_THREAD_STORAGE_KEY = "biztek-chat-thread-id";
@@ -265,11 +365,58 @@ function parseChatEvent(block: string): ChatStreamEvent | null {
   }
 
   switch (eventName) {
+    case "task": {
+      // First frame of the turn: the id this turn's real events are stored
+      // under. Older backends never send it, so an unknown name is ignored.
+      const frame = data as { task_id?: unknown; thread_id?: unknown };
+      if (typeof frame.task_id === "string") {
+        return {
+          event: "task",
+          data: {
+            task_id: frame.task_id,
+            thread_id: typeof frame.thread_id === "string" ? frame.thread_id : "",
+          },
+        };
+      }
+      break;
+    }
     case "tool":
       if ("name" in data && typeof data.name === "string") {
         return { event: "tool", data: { name: data.name } };
       }
       break;
+    case "tool_result": {
+      // Verified facts about one completed lookup. Only known-typed fields are
+      // kept so a changed backend shape cannot put junk into the UI.
+      const frame = data as Record<string, unknown>;
+      if (typeof frame.tool !== "string") break;
+      const num = (value: unknown) =>
+        typeof value === "number" && Number.isFinite(value) ? value : undefined;
+      const window = frame.window as Record<string, unknown> | undefined;
+      const result: ChatToolResultEvent = { tool: frame.tool };
+      const total = num(frame.records_total);
+      const returned = num(frame.records_returned);
+      const remaining = num(frame.records_remaining);
+      if (total !== undefined) result.records_total = total;
+      if (returned !== undefined) result.records_returned = returned;
+      if (remaining !== undefined) result.records_remaining = remaining;
+      const recordCount = num(frame.record_count);
+      if (recordCount !== undefined) result.record_count = recordCount;
+      if (typeof frame.complete === "boolean") result.complete = frame.complete;
+      if (typeof frame.money_label === "string") result.money_label = frame.money_label;
+      const money = num(frame.money_total);
+      if (money !== undefined) result.money_total = money;
+      if (typeof frame.money_covers === "string") {
+        result.money_covers = frame.money_covers;
+      }
+      if (window) {
+        result.window = {
+          date_from: typeof window.date_from === "string" ? window.date_from : null,
+          date_to: typeof window.date_to === "string" ? window.date_to : null,
+        };
+      }
+      return { event: "tool_result", data: result };
+    }
     case "token":
       if ("text" in data && typeof data.text === "string") {
         return { event: "token", data: { text: data.text } };
@@ -277,19 +424,20 @@ function parseChatEvent(block: string): ChatStreamEvent | null {
       break;
     case "reset":
       return { event: "reset", data: {} };
-    case "done":
-      if (
-        "text" in data &&
-        typeof data.text === "string" &&
-        "thread_id" in data &&
-        typeof data.thread_id === "string"
-      ) {
+    case "done": {
+      const frame = data as { text?: unknown; thread_id?: unknown; task_id?: unknown };
+      if (typeof frame.text === "string" && typeof frame.thread_id === "string") {
         return {
           event: "done",
-          data: { text: data.text, thread_id: data.thread_id },
+          data: {
+            text: frame.text,
+            thread_id: frame.thread_id,
+            ...(typeof frame.task_id === "string" ? { task_id: frame.task_id } : {}),
+          },
         };
       }
       break;
+    }
     case "error":
       if ("message" in data && typeof data.message === "string") {
         return { event: "error", data: { message: data.message } };

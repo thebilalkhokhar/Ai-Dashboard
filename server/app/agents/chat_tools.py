@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app import db as app_db
 from app.config import settings
-from app.services import metrics, processors
+from app.services import metrics, periods, processors
 
 log = logging.getLogger("chat_tools")
 
@@ -32,6 +32,16 @@ def format_money(value: Any) -> str:
     return f"${amount:,.2f}"
 
 
+def _is_number(value: Any) -> bool:
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, str):
+        return bool(re.fullmatch(r"-?[\d,]+(?:\.\d+)?", value.strip()))
+    return False
+
+
 def format_chat_result(value: Any, key: str = "") -> Any:
     """Format money and counts before a tool result is sent to the model."""
     lowered = key.casefold()
@@ -42,7 +52,11 @@ def format_chat_result(value: Any, key: str = "") -> Any:
         return {name: format_chat_result(item, name) for name, item in value.items()}
     if isinstance(value, list):
         return [format_chat_result(item, key) for item in value]
-    if is_money and isinstance(value, (int, float, str)) and value is not None:
+    # A key named "..._amount" can still hold prose ("sum_amount_covers" says
+    # what the total spans). Formatting that as money turned the sentence into
+    # "$0", a figure the model would then have repeated - so only numbers are
+    # money-formatted, whatever their key looks like.
+    if is_money and _is_number(value):
         return format_money(value)
     if is_count and isinstance(value, (int, float)) and not isinstance(value, bool):
         return int(value)
@@ -67,12 +81,56 @@ class CustomerContextArgs(ToolArgs):
     customer_id: int = Field(ge=1)
 
 
-class DateRangeArgs(ToolArgs):
-    date_from: date
-    date_to: date
+class PeriodMixin(BaseModel):
+    """One shared `period` argument, resolved server-side into the date pair.
+
+    The model chooses which *name* the user meant; the server decides what that
+    name spans, on the ERP business calendar. That keeps "this week" identical
+    for every tool and every turn instead of a range the model invents from its
+    own clock, and it means the resolved dates are backend-computed facts the
+    numeric guard will accept.
+
+    Explicit `date_from`/`date_to` always win, so a follow-up continuing a
+    recorded range is never redirected. Passing both a name and a date is
+    refused rather than silently preferring one.
+    """
+
+    # `exclude` keeps it out of model_dump(), which invoke_tool splats straight
+    # into the tool function - none of which take a period argument, because the
+    # validator has already turned the name into the date pair they do take.
+    # It still appears in the JSON schema, so the model can use it.
+    period: str | None = Field(
+        default=None,
+        max_length=32,
+        exclude=True,
+        description=periods.PERIOD_HINT + " Prefer this over guessing dates; omit it if the user gave an exact range.",
+    )
+
+    @model_validator(mode="after")
+    def period_resolves_to_dates(self):
+        raw = (self.period or "").strip()
+        if not raw:
+            return self
+        if self.date_from is not None or self.date_to is not None:
+            raise ValueError("period and an explicit date_from/date_to cannot be combined - use one")
+        try:
+            start, end = periods.resolve_period(raw)
+        except KeyError:
+            raise ValueError(
+                f"unknown period {raw!r}; choose one of {', '.join(periods.PERIOD_NAMES)}"
+            )
+        self.date_from, self.date_to = start, end
+        return self
+
+
+class DateRangeArgs(PeriodMixin):
+    date_from: date | None = None
+    date_to: date | None = None
 
     @model_validator(mode="after")
     def date_range_is_ordered(self):
+        if self.date_from is None or self.date_to is None:
+            raise ValueError("date_from and date_to are required unless a named period is given")
         if self.date_to < self.date_from:
             raise ValueError("date_to must be on or after date_from")
         return self
@@ -121,11 +179,69 @@ def _database(database: Any = None) -> Any:
     return database if database is not None else app_db.get_db()
 
 
+def _collection(database: Any, name: str) -> Any:
+    """A collection, or None when this database genuinely does not have it."""
+    try:
+        return database[name]
+    except (TypeError, KeyError, AttributeError):
+        return getattr(database, name, None)
+
+
 def _serializable(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
 
 
 ROW_KEYS = ("items", "results", "drafts", "records", "priorities", "briefing")
+
+# The three specialist drafts one agent run stores, in the order they are paged.
+DRAFT_KINDS = ("negotiation", "collections", "lead_followup")
+
+
+def _page_metadata(offset: int, limit: int, total: int, delivered: int) -> dict:
+    """The pagination block one page of rows deserves, computed from what survived.
+
+    ``delivered`` is the number of rows actually in the response, which can be
+    smaller than the page that was sliced when the context budget trims rows off
+    the end. Deriving every count from it is what keeps ``next_offset`` honest.
+
+    ``all_records_returned`` describes the walk, not the page: it is true once
+    nothing remains after it, which is why the counts of every page must be read
+    together before claiming the whole set was listed.
+    """
+    next_offset = offset + delivered
+    has_more = next_offset < total
+    # A page that starts past the end delivered nothing and covered nothing, so
+    # it cannot testify that the whole set was returned - even though there is
+    # genuinely nothing left to fetch from that offset. Only a page that begins
+    # inside (or exactly at the end of) the result set can close the walk. An
+    # empty result set still counts: offset 0 of total 0 covered everything.
+    covers_the_set = not has_more and offset <= total
+    # "page 1 of 7" is arithmetic over the page contract, and the model may only
+    # write numbers the backend computed - so the backend does this dividing too.
+    # The divisor is the number of rows a page actually carried (``delivered``),
+    # not the size that was asked for: a page the context budget trimmed from 50
+    # to 28 really is one of ceil(29/28)=2 pages, and calling it "1 of 1" while a
+    # row still remained told the model the walk was over when it was not.
+    effective_page = delivered if delivered else (limit or 1)
+    pages_total = max(1, -(-total // effective_page)) if total else 1
+    page = min(pages_total, (offset // effective_page) + 1) if effective_page else 1
+    metadata = {
+        "offset": offset,
+        "limit": limit,
+        "total_count": total,
+        "returned": delivered,
+        "remaining_count": max(0, total - next_offset),
+        "has_more": has_more,
+        "next_offset": next_offset if has_more else None,
+        "all_records_returned": covers_the_set,
+        "page": page,
+        "pages_total": pages_total,
+    }
+    if delivered < limit and has_more:
+        # the page came back shorter than asked: say why, and what to ask for
+        metadata["page_shorter_than_requested"] = True
+        metadata["suggested_limit"] = delivered
+    return metadata
 
 
 def _bounded(value: dict, max_chars: int = 10_500) -> dict:
@@ -133,11 +249,13 @@ def _bounded(value: dict, max_chars: int = 10_500) -> dict:
 
     A too-large answer loses rows from the end (and says so) rather than losing
     its counts: the totals are computed over every matched row and the model
-    must always be able to tell "this is a page" from "this is everything".
+    must always be able to tell "this is a page" from "this is everything". A
+    response that already carries a page is recomputed after trimming, because a
+    stale ``next_offset`` would make the caller skip rows it never received.
     """
     clean = _serializable(value)
     if len(json.dumps(clean, ensure_ascii=False, separators=(",", ":"))) <= max_chars:
-        return clean
+        return _repage(clean)
 
     trimmed = dict(clean)
     lists = {key: trimmed[key] for key in ROW_KEYS if isinstance(trimmed.get(key), list)}
@@ -152,11 +270,68 @@ def _bounded(value: dict, max_chars: int = 10_500) -> dict:
             if lists[key]:
                 lists[key].pop()
                 trimmed[key] = lists[key]
-        if any(key in trimmed for key in ("returned",)):
-            trimmed["returned"] = sum(len(rows) for rows in lists.values() if isinstance(rows, list))
         trimmed["truncated"] = True
     trimmed.setdefault("truncated", True)
-    return trimmed
+    return _repage(trimmed)
+
+
+def _repage(result: dict) -> dict:
+    """Recompute a page's metadata from the rows that are still in the response."""
+    if not isinstance(result.get("items"), list) or "has_more" not in result:
+        return result
+    for key in ("offset", "limit", "total_count"):
+        if not isinstance(result.get(key), int):
+            return result
+    result.update(
+        _page_metadata(
+            result["offset"],
+            result["limit"],
+            result["total_count"],
+            len(result["items"]),
+        )
+    )
+    return result
+
+
+def _paginate(
+    result: dict,
+    *,
+    total: int,
+    offset: int,
+    limit: int,
+    items_key: str = "items",
+    delivered: int | None = None,
+) -> dict:
+    """Attach truthful pagination metadata to one page of record rows.
+
+    The page is sliced by ``offset``/``limit``, but ``_bounded`` may then drop
+    trailing rows to keep the response inside the model's context budget. Every
+    count below is therefore recomputed from the rows that actually survived, so
+    ``next_offset`` always continues where this page stopped - no row is ever
+    repeated or skipped, and the model can never claim the full set was fetched
+    when it was not.
+
+    ``delivered`` overrides that count for pages whose rows are not stored under
+    one flat list key.
+    """
+    if delivered is None:
+        delivered = len(result.get(items_key) or [])
+    result.update(_page_metadata(offset, limit, total, delivered))
+    return result
+
+
+def _top_n(result: dict, *, total: int, items_key: str = "items") -> dict:
+    """Say plainly whether a ranked answer is the whole set or only its head.
+
+    These tools are deliberately not paged - they answer "top N" - so they carry
+    counts but no cursor, and must still never imply the model saw everything.
+    """
+    delivered = len(result.get(items_key) or [])
+    result["total_count"] = total
+    result["returned"] = delivered
+    result["has_more"] = delivered < total
+    result["all_records_returned"] = delivered >= total
+    return result
 
 
 def _same_id(left: Any, right: Any) -> bool:
@@ -415,12 +590,14 @@ async def get_top_unpaid(limit: int = 5, database: Any = None) -> dict:
         "id", "inv_ref", "status_label", "payment_status_label", "total_amount",
         "amount_paid", "balance", "overdue", "invoice_date", "due_date", "customer", "sale_rep",
     )
-    return {
-        "total_count": len(rows),
-        "largest_owing_customer": largest_customer_debt,
-        "items": [{key: row.get(key) for key in fields} for row in rows[: args.limit]],
-        "order_fields_not_available": list(processors.ORDER_MISSING_FIELDS),
-    }
+    return _top_n(
+        {
+            "largest_owing_customer": largest_customer_debt,
+            "items": [{key: row.get(key) for key in fields} for row in rows[: args.limit]],
+            "order_fields_not_available": list(processors.ORDER_MISSING_FIELDS),
+        },
+        total=len(rows),
+    )
 
 
 async def get_stuck_leads(
@@ -454,11 +631,13 @@ async def get_stuck_leads(
         }
         for row in stuck[: args.limit or 10]
     ]
-    return {
-        "days": args.days or settings.LEAD_ACTIVE_DAYS,
-        "total_count": len(stuck),
-        "items": items,
-    }
+    return _top_n(
+        {
+            "days": args.days or settings.LEAD_ACTIVE_DAYS,
+            "items": items,
+        },
+        total=len(stuck),
+    )
 
 
 async def get_top_open_quotes(limit: int = 5, database: Any = None) -> dict:
@@ -474,7 +653,10 @@ async def get_top_open_quotes(limit: int = 5, database: Any = None) -> dict:
     ]
     rows.sort(key=lambda row: processors.to_number(row.get("amount")), reverse=True)
     fields = ("id", "ref", "status", "created_at", "amount", "customer", "sale_rep")
-    return {"total_count": len(rows), "items": [{key: row.get(key) for key in fields} for row in rows[: args.limit]]}
+    return _top_n(
+        {"items": [{key: row.get(key) for key in fields} for row in rows[: args.limit]]},
+        total=len(rows),
+    )
 
 
 async def _resolve_rep(rep_id: int | None, rep_name: str | None, database: Any) -> dict:
@@ -540,13 +722,33 @@ async def get_rep_summary(
 # record-level read-only tools
 #
 # The aggregate tools above answer "how much"; these answer "who, which record".
-# Each one filters in Python over projected rows, returns at most `limit`
-# (never more than MAX_TOOL_ROWS) items, and always reports the full
-# total_count so the model can never claim it saw everything.
+# Each one filters in Python over projected rows, sorts them with a stable id
+# tiebreaker, slices one `offset`-based page of at most MAX_TOOL_ROWS rows, and
+# describes that page with counts computed from the rows it really delivered.
 # ---------------------------------------------------------------------------
 
 DEFAULT_TOOL_ROWS = 10
 MAX_TOOL_ROWS = 50
+
+PAGING_NOTE = (
+    " Paged: the answer gives offset, limit, total_count, returned, remaining_count, has_more,"
+    " next_offset and the page position (page, pages_total). To continue the same query, re-call it"
+    " with identical filters and offset=next_offset."
+    " Never say you listed every record while has_more is true, and never add up rows yourself - report the"
+    " counts exactly as the tool returned them."
+)
+
+# Confirmed against the live view: no payments_flat row carries any of these,
+# so "paid" here can only mean a stored payment row. There is no status to
+# filter, no refund or reversal to net off, and no second currency to keep
+# apart - the tool must say so rather than let the model imply a filter it
+# cannot perform.
+PAYMENT_UNAVAILABLE_FIELDS = (
+    "payment method",
+    "payment status (pending, failed, voided or reversed are not represented)",
+    "refund or reversal records (a payment row is never negative)",
+    "currency (no row carries a currency field; amounts are presented as USD)",
+)
 
 PAYMENT_FIELDS = {
     "id": 1, "amount": 1, "payment_date": 1, "received_at": 1, "payment_ref": 1,
@@ -585,7 +787,21 @@ RECORD_COLLECTIONS = {
 
 class RowsArgs(ToolArgs):
     # a model asking for 500 rows gets the safe maximum, not a validation error
-    limit: int = Field(default=DEFAULT_TOOL_ROWS, ge=1)
+    limit: int = Field(
+        default=DEFAULT_TOOL_ROWS,
+        ge=1,
+        description="Rows for this one page (maximum 50). A larger row count may come back truncated; "
+        "the response always says how many rows it actually delivered.",
+    )
+    # records are paged forward with `offset`; the previous page's `next_offset`
+    # is the only valid value, so a follow-up can continue without repeating
+    # or skipping rows.
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="How many matching rows to skip before this page. To fetch the rest of a result set, "
+        "re-call the same tool with the same filters and the previous page's next_offset.",
+    )
 
     @field_validator("limit")
     @classmethod
@@ -593,7 +809,7 @@ class RowsArgs(ToolArgs):
         return min(value, MAX_TOOL_ROWS)
 
 
-class DateFilterArgs(RowsArgs):
+class DateFilterArgs(PeriodMixin, RowsArgs):
     date_from: date | None = None
     date_to: date | None = None
 
@@ -651,6 +867,14 @@ class SearchArgs(RowsArgs):
 
 class BriefingArgs(RowsArgs):
     customer: str | None = Field(default=None, max_length=120)
+
+
+class CompareArgs(ToolArgs):
+    """Compare two stored lead pulls. With no ids the two newest complete,
+    time-stamped snapshots are used; pass the ids to compare specific pulls."""
+
+    previous_pull_id: str | None = Field(default=None, max_length=120)
+    latest_pull_id: str | None = Field(default=None, max_length=120)
 
 
 def _customer_id_of(row: dict) -> Any:
@@ -732,6 +956,7 @@ async def get_payments(
     max_amount: float | None = None,
     method: str | None = None,
     limit: int = DEFAULT_TOOL_ROWS,
+    offset: int = 0,
     database: Any = None,
 ) -> dict:
     """Individual payment records: who paid, how much, when, against which invoice."""
@@ -739,7 +964,7 @@ async def get_payments(
         {
             "date_from": date_from, "date_to": date_to, "customer": customer,
             "min_amount": min_amount, "max_amount": max_amount, "method": method,
-            "limit": limit,
+            "limit": limit, "offset": offset,
         }
     )
     db = _database(database)
@@ -760,12 +985,19 @@ async def get_payments(
                 continue
             matched.append(row)
 
-    matched.sort(key=lambda row: str(row.get("received_at") or ""), reverse=True)
+    # a stable, total order: without the id tiebreaker two rows sharing a
+    # timestamp could swap between pages and be served twice or skipped
+    matched.sort(
+        key=lambda row: (str(row.get("received_at") or ""), str(row.get("id") or "")),
+        reverse=True,
+    )
     result = {
-        "total_count": len(matched),
-        "returned": len(matched[: args.limit]),
+        # the totals cover every matched row; `items` is one page of them
         "sum_amount": round(sum(processors.to_number(row.get("amount")) for row in matched), 2),
-        "items": [_payment_row(row) for row in matched[: args.limit]],
+        "sum_amount_covers": (
+            "every matched payment record, not only the rows on this page"
+        ),
+        "items": [_payment_row(row) for row in matched[args.offset : args.offset + args.limit]],
         "filters_applied": {
             "date_from": args.date_from.isoformat() if args.date_from else None,
             "date_to": args.date_to.isoformat() if args.date_to else None,
@@ -780,7 +1012,12 @@ async def get_payments(
         result["method_filter_not_applied"] = (
             "Payment records do not store a payment method field."
         )
-    return _bounded(result)
+    result = _paginate(
+        _bounded(result), total=len(matched), offset=args.offset, limit=args.limit
+    )
+    if args.offset and not result["items"]:
+        result["note"] = "That offset is past the end of this result set; nothing more to fetch."
+    return result
 
 
 def _invoice_row(row: dict, now: datetime) -> dict:
@@ -814,13 +1051,14 @@ async def get_invoices(
     date_from: date | None = None,
     date_to: date | None = None,
     limit: int = DEFAULT_TOOL_ROWS,
+    offset: int = 0,
     database: Any = None,
 ) -> dict:
     """Invoice (order) rows with balance, due date and days overdue computed in Python."""
     args = InvoiceArgs.model_validate(
         {
             "status": status, "customer": customer, "overdue_only": overdue_only,
-            "date_from": date_from, "date_to": date_to, "limit": limit,
+            "date_from": date_from, "date_to": date_to, "limit": limit, "offset": offset,
         }
     )
     db = _database(database)
@@ -846,14 +1084,16 @@ async def get_invoices(
                 continue
             matched.append(_invoice_row(row, now))
 
-    matched.sort(key=lambda item: (item["balance"], item["days_invoice_age"]), reverse=True)
+    # id tiebreaker keeps the order total, so pages never repeat or skip a row
+    matched.sort(
+        key=lambda item: (item["balance"], item["days_invoice_age"], str(item["invoice_id"])),
+        reverse=True,
+    )
     total_balance = round(sum(item["balance"] for item in matched), 2)
     result = {
-        "total_count": len(matched),
-        "returned": len(matched[: args.limit]),
         "sum_balance": total_balance,
         "overdue_threshold_days": settings.OVERDUE_INVOICE_DAYS,
-        "items": matched[: args.limit],
+        "items": matched[args.offset : args.offset + args.limit],
         "filters_applied": {
             "status": args.status, "customer": wanted_label or None,
             "overdue_only": args.overdue_only,
@@ -863,7 +1103,12 @@ async def get_invoices(
     }
     if note:
         result["note"] = note
-    return _bounded(result)
+    result = _paginate(
+        _bounded(result), total=len(matched), offset=args.offset, limit=args.limit
+    )
+    if args.offset and not result["items"]:
+        result["note"] = "That offset is past the end of this result set; nothing more to fetch."
+    return result
 
 
 async def get_quotes(
@@ -873,13 +1118,14 @@ async def get_quotes(
     date_from: date | None = None,
     date_to: date | None = None,
     limit: int = DEFAULT_TOOL_ROWS,
+    offset: int = 0,
     database: Any = None,
 ) -> dict:
     """Quote rows; `stale_only` uses the same rules as the dashboard's open quotes."""
     args = QuoteArgs.model_validate(
         {
             "status": status, "customer": customer, "stale_only": stale_only,
-            "date_from": date_from, "date_to": date_to, "limit": limit,
+            "date_from": date_from, "date_to": date_to, "limit": limit, "offset": offset,
         }
     )
     db = _database(database)
@@ -922,12 +1168,11 @@ async def get_quotes(
                 }
             )
 
-    matched.sort(key=lambda item: item["amount"], reverse=True)
+    # quote_id tiebreaker: equal amounts must not shuffle between pages
+    matched.sort(key=lambda item: (item["amount"], str(item["quote_id"])), reverse=True)
     result = {
-        "total_count": len(matched),
-        "returned": len(matched[: args.limit]),
         "sum_amount": round(sum(item["amount"] for item in matched), 2),
-        "items": matched[: args.limit],
+        "items": matched[args.offset : args.offset + args.limit],
         "filters_applied": {
             "status": args.status, "customer": wanted_label or None, "stale_only": args.stale_only,
             "date_from": args.date_from.isoformat() if args.date_from else None,
@@ -936,7 +1181,12 @@ async def get_quotes(
     }
     if note:
         result["note"] = note
-    return _bounded(result)
+    result = _paginate(
+        _bounded(result), total=len(matched), offset=args.offset, limit=args.limit
+    )
+    if args.offset and not result["items"]:
+        result["note"] = "That offset is past the end of this result set; nothing more to fetch."
+    return result
 
 
 async def get_orders(
@@ -946,13 +1196,14 @@ async def get_orders(
     date_from: date | None = None,
     date_to: date | None = None,
     limit: int = DEFAULT_TOOL_ROWS,
+    offset: int = 0,
     database: Any = None,
 ) -> dict:
     """Order rows. `stalled_only` is the ERP's unreliable signal (no status timestamps)."""
     args = OrderArgs.model_validate(
         {
             "status": status, "customer": customer, "stalled_only": stalled_only,
-            "date_from": date_from, "date_to": date_to, "limit": limit,
+            "date_from": date_from, "date_to": date_to, "limit": limit, "offset": offset,
         }
     )
     db = _database(database)
@@ -976,12 +1227,16 @@ async def get_orders(
                 continue
             matched.append(_invoice_row(row, now))
 
-    matched.sort(key=lambda item: (item["days_invoice_age"], item["total_amount"]), reverse=True)
+    # invoice_id tiebreaker keeps equal rows from moving between pages
+    matched.sort(
+        key=lambda item: (
+            item["days_invoice_age"], item["total_amount"], str(item["invoice_id"])
+        ),
+        reverse=True,
+    )
     result = {
-        "total_count": len(matched),
-        "returned": len(matched[: args.limit]),
         "sum_amount": round(sum(item["total_amount"] for item in matched), 2),
-        "items": matched[: args.limit],
+        "items": matched[args.offset : args.offset + args.limit],
         "stalled_signal_reliable": False,
         "filters_applied": {
             "status": args.status, "customer": wanted_label or None, "stalled_only": args.stalled_only,
@@ -991,7 +1246,12 @@ async def get_orders(
     }
     if note:
         result["note"] = note
-    return _bounded(result)
+    result = _paginate(
+        _bounded(result), total=len(matched), offset=args.offset, limit=args.limit
+    )
+    if args.offset and not result["items"]:
+        result["note"] = "That offset is past the end of this result set; nothing more to fetch."
+    return result
 
 
 async def get_leads(
@@ -999,11 +1259,12 @@ async def get_leads(
     stuck_only: bool = False,
     search: str | None = None,
     limit: int = DEFAULT_TOOL_ROWS,
+    offset: int = 0,
     database: Any = None,
 ) -> dict:
     """Lead rows. Stuck leads reuse processors.stuck_leads; no contacts are returned."""
     args = LeadArgs.model_validate(
-        {"status": status, "stuck_only": stuck_only, "search": search, "limit": limit}
+        {"status": status, "stuck_only": stuck_only, "search": search, "limit": limit, "offset": offset}
     )
     db = _database(database)
     now = datetime.now(timezone.utc)
@@ -1049,18 +1310,26 @@ async def get_leads(
             continue
         matched.append(item)
 
-    matched.sort(key=lambda item: item.get("days_since_activity") if item.get("days_since_activity") is not None else 9e9)
-    return _bounded(
-        {
-            "total_count": len(matched),
-            "returned": len(matched[: args.limit]),
-            "stuck_lead_window_days": settings.LEAD_ACTIVE_DAYS,
-            "items": matched[: args.limit],
-            "filters_applied": {
-                "status": args.status, "stuck_only": args.stuck_only, "search": args.search,
-            },
-        }
+    # lead_id tiebreaker keeps equal ages from moving between pages
+    matched.sort(
+        key=lambda item: (
+            item["days_since_activity"] if item["days_since_activity"] is not None else 9e9,
+            str(item["lead_id"]),
+        )
     )
+    result = {
+        "stuck_lead_window_days": settings.LEAD_ACTIVE_DAYS,
+        "items": matched[args.offset : args.offset + args.limit],
+        "filters_applied": {
+            "status": args.status, "stuck_only": args.stuck_only, "search": args.search,
+        },
+    }
+    result = _paginate(
+        _bounded(result), total=len(matched), offset=args.offset, limit=args.limit
+    )
+    if args.offset and not result["items"]:
+        result["note"] = "That offset is past the end of this result set; nothing more to fetch."
+    return result
 
 
 async def get_customer_profile(name_or_id: str, database: Any = None) -> dict:
@@ -1096,14 +1365,23 @@ async def get_customer_profile(name_or_id: str, database: Any = None) -> dict:
             "unpaid_invoices": {
                 "total_count": unpaid["total_count"],
                 "sum_balance": unpaid["sum_balance"],
+                "returned": unpaid["returned"],
+                "has_more": unpaid["has_more"],
                 "items": unpaid["items"],
             },
             "recent_payments": {
                 "total_count": payments["total_count"],
                 "sum_amount": payments["sum_amount"],
+                "returned": payments["returned"],
+                "has_more": payments["has_more"],
                 "items": payments["items"],
             },
-            "recent_quotes": {"total_count": quotes["total_count"], "items": quotes["items"]},
+            "recent_quotes": {
+                "total_count": quotes["total_count"],
+                "returned": quotes["returned"],
+                "has_more": quotes["has_more"],
+                "items": quotes["items"],
+            },
             "notes": context.get("notes") or [],
         }
     )
@@ -1138,26 +1416,400 @@ async def search_records(
     query: str,
     collections: list[str] | None = None,
     limit: int = DEFAULT_TOOL_ROWS,
+    offset: int = 0,
     database: Any = None,
 ) -> dict:
     """Substring search over the business records the agent is allowed to read."""
     wanted = collections or list(RECORD_COLLECTIONS)
-    args = SearchArgs.model_validate({"query": query, "collections": wanted, "limit": limit})
+    args = SearchArgs.model_validate(
+        {"query": query, "collections": wanted, "limit": limit, "offset": offset}
+    )
     db = _database(database)
     needle = args.query.strip()
-    per_collection: dict[str, list[dict]] = {}
-    total = 0
+    # one flat, deterministic sequence (collection order, then document order) so
+    # a page offset advances over the whole hit set instead of restarting per
+    # collection - that is what makes every match reachable without repeats.
+    matched: list[dict] = []
+    collection_counts: dict[str, int] = {}
     for name in args.collections:
         rows = await getattr(db, RECORD_COLLECTIONS[name]).find({}, {"_id": 0}).to_list(50_000)
         hits = [_strip_private(row) for row in rows if _text_matches(row, needle)]
-        total += len(hits)
-        per_collection[name] = hits[: args.limit]
+        collection_counts[name] = len(hits)
+        matched.extend({"collection": name, **row} for row in hits)
+
+    result = _paginate(
+        _bounded(
+            {
+                "query": needle,
+                "collections_searched": args.collections,
+                "matches_by_collection": collection_counts,
+                "items": matched[args.offset : args.offset + args.limit],
+            }
+        ),
+        total=len(matched),
+        offset=args.offset,
+        limit=args.limit,
+    )
+    if args.offset and not result["items"]:
+        result["note"] = "That offset is past the end of this result set; nothing more to fetch."
+    return result
+
+
+# ---------------------------------------------------------------------------
+# historical lead pulls
+#
+# A lead pull is only comparable when each pull was retained as its own
+# snapshot. The current `leads` collection is upserted in place and therefore
+# cannot answer "what changed since the previous pull". This tool reads the
+# dedicated `lead_pulls` history when it exists; otherwise it reports the real
+# limitation and the minimum capability needed, never a fabricated comparison.
+# ---------------------------------------------------------------------------
+
+LEAD_PULL_COMPARE_FIELDS = (
+    "status",
+    "company",
+    "product",
+    "quantity",
+    "size",
+    "material",
+    "finish",
+)
+_MAX_LEAD_PULLS = 200
+_MAX_CHANGE_ROWS = 25
+
+
+def _clean_lead_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _lead_identity(row: dict) -> str:
+    for key in ("lead_id", "zohoLeadId", "lead_ref", "id"):
+        value = _clean_lead_value(row.get(key))
+        if value:
+            return value
+    return ""
+
+
+async def _lead_pull_snapshots(database: Any) -> list[dict]:
+    """Stored pull snapshots, oldest first. Missing collection means none."""
+    collection = _collection(database, "lead_pulls")
+    if collection is None:
+        return []
+    try:
+        rows = await collection.find({}, {"_id": 0}).to_list(_MAX_LEAD_PULLS)
+    except Exception:
+        log.exception("could not read the lead_pulls history")
+        return []
+    dated: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        moment = processors.parse_date(row.get("pulled_at"))
+        dated.append({**row, "_pulled_at_dt": moment})
+    dated.sort(
+        key=lambda row: (
+            row["_pulled_at_dt"].timestamp() if row.get("_pulled_at_dt") else 0.0,
+            str(row.get("pull_id") or ""),
+        )
+    )
+    return dated
+
+
+async def _count_collection(database: Any, name: str) -> int | None:
+    collection = _collection(database, name)
+    if collection is None:
+        return None
+    try:
+        return int(await collection.count_documents({}))
+    except Exception:
+        return None
+
+
+def _snapshot_header(snapshot: dict | None) -> dict | None:
+    if not snapshot:
+        return None
+    leads = snapshot.get("leads") if isinstance(snapshot.get("leads"), list) else []
+    return {
+        "pull_id": snapshot.get("pull_id"),
+        "pulled_at": processors.iso_or_none(snapshot.get("pulled_at")),
+        "source": _clean_lead_value(snapshot.get("source")),
+        "leads_recorded": len(leads),
+        "complete": snapshot.get("complete", True) is not False,
+    }
+
+
+def _lead_pull_unavailable(
+    snapshots: list[dict],
+    current_lead_count: int | None,
+    reason: str,
+) -> dict:
     return _bounded(
         {
-            "query": needle,
-            "collections_searched": args.collections,
-            "total_count": total,
-            "results": {name: rows for name, rows in per_collection.items() if rows},
+            "available": False,
+            "snapshots_found": len(snapshots),
+            "latest_pull": _snapshot_header(snapshots[-1] if snapshots else None),
+            "current_lead_count": current_lead_count,
+            "reason": reason,
+            "required_capability": (
+                "Lead-pull snapshots are persisted automatically: each scheduler cycle "
+                "stores one immutable lead_pulls document (pull_id, pulled_at UTC, "
+                "source, and a leads array carrying the stable lead_id (zohoLeadId) plus "
+                "status, company, product, quantity, size, material and finish). "
+                "Comparison needs at least two such snapshots; history is captured "
+                "going forward and the current upserted leads rows cannot reconstruct a "
+                "pull that was never stored."
+            ),
+            "suggested_next_step": (
+                "Use get_leads for the current lead state. A comparison becomes possible "
+                "once a second complete lead pull has been retained by the scheduler; "
+                "comparison runs only from the first stored snapshot onward - yesterday's "
+                "state is never invented."
+            ),
+        }
+    )
+
+
+def _lead_snapshot_index(snapshot: dict) -> tuple[dict[str, dict], set[str], int]:
+    """lead_id -> row, duplicate ids to exclude, rows without a usable id."""
+    index: dict[str, dict] = {}
+    duplicates: set[str] = set()
+    incomplete = 0
+    leads = snapshot.get("leads") if isinstance(snapshot.get("leads"), list) else []
+    for row in leads:
+        if not isinstance(row, dict):
+            incomplete += 1
+            continue
+        lead_id = _lead_identity(row)
+        if not lead_id:
+            incomplete += 1
+            continue
+        if lead_id in index:
+            duplicates.add(lead_id)
+            continue
+        index[lead_id] = row
+    for lead_id in duplicates:
+        index.pop(lead_id, None)
+    return index, duplicates, incomplete
+
+
+def _lead_change_row(lead_id: str, row: dict | None, **extra: Any) -> dict:
+    return {
+        "lead_id": lead_id,
+        "company": _clean_lead_value((row or {}).get("company")),
+        "status": _clean_lead_value((row or {}).get("status")),
+        **extra,
+    }
+
+
+async def compare_lead_pulls(
+    database: Any = None,
+    previous_pull_id: str | None = None,
+    latest_pull_id: str | None = None,
+) -> dict:
+    """Compare two retained lead pulls, column by column.
+
+    With no ids, the two newest complete, time-stamped snapshots are compared.
+    Pass ``previous_pull_id`` / ``latest_pull_id`` to compare specific pulls.
+    Only fields present in the stored snapshots are compared. An id duplicated
+    within either pull is excluded and reported rather than guessed; a field
+    missing on one side makes the record incomplete instead of "unchanged". A
+    pull the capture marked incomplete is never treated as a full picture: leads
+    absent from it are reported as indeterminate, not "removed". Every count and
+    timestamp comes from the stored snapshots.
+    """
+    args = CompareArgs.model_validate(
+        {"previous_pull_id": previous_pull_id, "latest_pull_id": latest_pull_id}
+    )
+    db = _database(database)
+    snapshots = await _lead_pull_snapshots(db)
+    current_count = await _count_collection(db, "leads")
+
+    if not snapshots:
+        return _lead_pull_unavailable(
+            snapshots, current_count,
+            "No historical lead pulls are retained, so the two most recent pulls "
+            "cannot be compared.",
+        )
+
+    if args.previous_pull_id or args.latest_pull_id:
+        by_id = {str(s.get("pull_id")): s for s in snapshots}
+        wanted = [pid for pid in (args.previous_pull_id, args.latest_pull_id) if pid]
+        missing = [pid for pid in wanted if pid not in by_id]
+        if missing or len(wanted) < 2:
+            detail = f"requested pull(s) {', '.join(missing)} are not retained" if missing \
+                else "both previous_pull_id and latest_pull_id are required to compare specific pulls"
+            return _lead_pull_unavailable(
+                snapshots, current_count,
+                f"The specified lead pulls cannot be compared: {detail}. "
+                f"Retained pull ids: {', '.join(sorted(by_id))}.",
+            )
+        previous = by_id[args.previous_pull_id]
+        latest = by_id[args.latest_pull_id]
+    else:
+        if len(snapshots) < 2:
+            return _lead_pull_unavailable(
+                snapshots, current_count,
+                "Only one lead pull is retained; a comparison needs at least two.",
+            )
+        # the two newest that finished completely and carry a usable pull time
+        comparable = [
+            s for s in snapshots
+            if s.get("complete", True) is not False and s.get("_pulled_at_dt") is not None
+        ]
+        if len(comparable) < 2:
+            return _lead_pull_unavailable(
+                snapshots, current_count,
+                "Comparison needs two complete, time-stamped lead pulls; "
+                f"only {len(comparable)} of the {len(snapshots)} retained snapshots are usable.",
+            )
+        previous, latest = comparable[-2], comparable[-1]
+
+    if previous.get("_pulled_at_dt") is None or latest.get("_pulled_at_dt") is None:
+        return _lead_pull_unavailable(
+            snapshots,
+            current_count,
+            "The two newest lead pulls do not both have a usable pulled_at timestamp, "
+            "so their time window cannot be trusted.",
+        )
+
+    # An incomplete latest pull is missing rows for reasons other than removal,
+    # so its absences must not be reported as removed leads.
+    latest_complete = latest.get("complete", True) is not False
+    previous_complete = previous.get("complete", True) is not False
+
+    previous_index, previous_duplicates, previous_incomplete = _lead_snapshot_index(previous)
+    latest_index, latest_duplicates, latest_incomplete = _lead_snapshot_index(latest)
+    duplicate_ids = previous_duplicates | latest_duplicates
+
+    previous_ids = set(previous_index)
+    latest_ids = set(latest_index)
+    raw_added = sorted(latest_ids - previous_ids)
+    raw_removed = sorted(previous_ids - latest_ids)
+    # A lead only counts as added/removed when the pull it is absent from was
+    # itself complete; otherwise its absence is indeterminate, not a real change.
+    added_ids = raw_added if previous_complete else []
+    removed_ids = raw_removed if latest_complete else []
+    indeterminate_added = 0 if previous_complete else len(raw_added)
+    indeterminate_removed = 0 if latest_complete else len(raw_removed)
+    common_ids = sorted(previous_ids & latest_ids)
+
+    all_fields = set(LEAD_PULL_COMPARE_FIELDS)
+    fields_present = {
+        field
+        for field in LEAD_PULL_COMPARE_FIELDS
+        if any(field in row for row in (*previous_index.values(), *latest_index.values()))
+    }
+    comparable_fields = sorted(fields_present - {"status"})
+
+    reclassified: list[dict] = []
+    changed: list[dict] = []
+    unchanged = 0
+    incomplete = previous_incomplete + latest_incomplete
+    missing_field_notes: set[str] = set()
+
+    for lead_id in common_ids:
+        before = previous_index[lead_id]
+        after = latest_index[lead_id]
+        before_status = _clean_lead_value(before.get("status"))
+        after_status = _clean_lead_value(after.get("status"))
+
+        if before_status is None or after_status is None:
+            incomplete += 1
+            missing_field_notes.add("status")
+            continue
+        if before_status.casefold() != after_status.casefold():
+            reclassified.append(
+                _lead_change_row(
+                    lead_id, after, previous_status=before_status, current_status=after_status
+                )
+            )
+            continue
+
+        differences: dict[str, dict[str, str | None]] = {}
+        missing_on_one_side = False
+        for field in comparable_fields:
+            if field not in before and field not in after:
+                continue
+            before_value = _clean_lead_value(before.get(field))
+            after_value = _clean_lead_value(after.get(field))
+            if before_value is None or after_value is None:
+                missing_on_one_side = True
+                missing_field_notes.add(field)
+                continue
+            if before_value != after_value:
+                differences[field] = {"from": before_value, "to": after_value}
+        if differences:
+            changed.append(_lead_change_row(lead_id, after, fields=differences))
+        elif missing_on_one_side:
+            incomplete += 1
+        else:
+            unchanged += 1
+
+    if fields_present != all_fields:
+        for field in sorted(all_fields - fields_present):
+            missing_field_notes.add(field)
+
+    summary = {
+        "added": len(added_ids),
+        "removed": len(removed_ids),
+        "reclassified": len(reclassified),
+        "changed": len(changed),
+        "unchanged": unchanged,
+        "incomplete": incomplete,
+        "duplicate_ids_excluded": len(duplicate_ids),
+    }
+    if indeterminate_added:
+        summary["indeterminate_added"] = indeterminate_added
+    if indeterminate_removed:
+        summary["indeterminate_removed"] = indeterminate_removed
+    notes = [
+        "Comparisons use only fields present in the stored snapshots.",
+        "Records with duplicate lead ids were excluded instead of guessed.",
+        "Records missing a lead id are counted as incomplete.",
+    ]
+    if not previous_complete:
+        notes.append(
+            "The earlier pull was flagged incomplete, so leads present only in the "
+            "newer pull are reported as indeterminate additions, not confirmed new."
+        )
+    if not latest_complete:
+        notes.append(
+            "The later pull was flagged incomplete, so leads present only in the "
+            "earlier pull are reported as indeterminate, not confirmed removals."
+        )
+    if missing_field_notes:
+        notes.append(
+            "Some records could not be compared for: "
+            + ", ".join(sorted(missing_field_notes))
+            + "."
+        )
+
+    return _bounded(
+        {
+            "available": True,
+            "window": {
+                "from": processors.iso_or_none(previous.get("pulled_at")),
+                "to": processors.iso_or_none(latest.get("pulled_at")),
+            },
+            "previous_pull": _snapshot_header(previous),
+            "latest_pull": _snapshot_header(latest),
+            "fields_compared": comparable_fields,
+            "summary": summary,
+            "added": [_lead_change_row(lead_id, latest_index[lead_id]) for lead_id in added_ids[:_MAX_CHANGE_ROWS]],
+            "removed": [_lead_change_row(lead_id, previous_index[lead_id]) for lead_id in removed_ids[:_MAX_CHANGE_ROWS]],
+            "reclassified": reclassified[:_MAX_CHANGE_ROWS],
+            "changed": changed[:_MAX_CHANGE_ROWS],
+            "duplicate_ids": sorted(duplicate_ids)[:_MAX_CHANGE_ROWS],
+            "rows_truncated": (
+                len(added_ids) > _MAX_CHANGE_ROWS
+                or len(removed_ids) > _MAX_CHANGE_ROWS
+                or len(reclassified) > _MAX_CHANGE_ROWS
+                or len(changed) > _MAX_CHANGE_ROWS
+            ),
+            "notes": notes,
         }
     )
 
@@ -1168,10 +1820,7 @@ async def describe_data(database: Any = None) -> dict:
     db = _database(database)
 
     def collection(name: str):
-        try:
-            return db[name]
-        except TypeError:
-            return getattr(db, name)
+        return _collection(db, name)
 
     described: dict[str, Any] = {}
     for name, (source, date_field) in (
@@ -1196,9 +1845,28 @@ async def describe_data(database: Any = None) -> dict:
                 bounds.append(processors.iso_or_none((edge or [{}])[0].get(date_field)))
             described[name]["date_range"] = {date_field: bounds}
 
+    # Lead-pull history is a separate capability from the current lead rows.
+    # Report it explicitly so "compare the last two pulls" cannot be answered
+    # as if the current snapshot were a historical comparison.
+    pull_rows = await _lead_pull_snapshots(db)
+    described["lead_pull_history"] = {
+        "snapshots_retained": len(pull_rows),
+        "comparison_available": len(pull_rows) >= 2,
+        "latest_pull_at": (
+            processors.iso_or_none(pull_rows[-1].get("pulled_at")) if pull_rows else None
+        ),
+    }
     described["not_available"] = {
         "orders": list(processors.ORDER_MISSING_FIELDS),
-        "payments": ["payment method"],
+        "payments": list(PAYMENT_UNAVAILABLE_FIELDS),
+        "lead_pull_history": (
+            []
+            if len(pull_rows) >= 2
+            else [
+                "Stored snapshots of each lead pull (lead_pulls). The current leads "
+                "collection alone cannot be compared with an earlier pull."
+            ]
+        ),
     }
     described["business_timezone"] = str(processors.ERP_TZ)
     return _bounded(described)
@@ -1207,10 +1875,11 @@ async def describe_data(database: Any = None) -> dict:
 async def get_agent_briefing(
     customer: str | None = None,
     limit: int = DEFAULT_TOOL_ROWS,
+    offset: int = 0,
     database: Any = None,
 ) -> dict:
     """The latest CEO brief and the draft recommendations behind it."""
-    args = BriefingArgs.model_validate({"customer": customer, "limit": limit})
+    args = BriefingArgs.model_validate({"customer": customer, "limit": limit, "offset": offset})
     db = _database(database)
     rows = await db.agent_runs.find(
         {"finished_epoch": {"$exists": True}}, {"_id": 0}
@@ -1219,8 +1888,11 @@ async def get_agent_briefing(
         return {"run_id": None, "note": "No agent run has been saved yet."}
     run = rows[0]
     master = run.get("master") or {}
-    items: dict[str, list[dict]] = {}
-    for kind in ("negotiation", "collections", "lead_followup"):
+    # drafts are paged as one flat sequence in a fixed kind order, then re-grouped
+    # for the response, so next_offset advances the whole set without repeats.
+    flat: list[tuple[str, dict]] = []
+    draft_totals: dict[str, int] = {}
+    for kind in DRAFT_KINDS:
         rows_out = run.get(kind) or []
         if args.customer:
             needle = args.customer.strip().casefold()
@@ -1228,19 +1900,32 @@ async def get_agent_briefing(
                 row for row in rows_out
                 if needle in str(row.get("customer_name") or row.get("company") or row.get("contact_name") or "").casefold()
             ]
-        items[kind] = [_strip_private(row) for row in rows_out[: args.limit]]
-    return _bounded(
-        {
-            "run_id": run.get("run_id"),
-            "started_at": run.get("started_at"),
-            "counts": run.get("counts"),
-            "briefing": master.get("bullets", []),
-            "priorities": master.get("priorities", []),
-            "conflicts_resolved": master.get("conflicts_resolved", []),
-            "drafts": items,
-            "drafts_are_text_only": True,
-        }
+        draft_totals[kind] = len(rows_out)
+        flat.extend((kind, _strip_private(row)) for row in rows_out)
+    page = flat[args.offset : args.offset + args.limit]
+    items = {kind: [row for row_kind, row in page if row_kind == kind] for kind in DRAFT_KINDS}
+    result = _paginate(
+        _bounded(
+            {
+                "run_id": run.get("run_id"),
+                "started_at": run.get("started_at"),
+                "counts": run.get("counts"),
+                "briefing": master.get("bullets", []),
+                "priorities": master.get("priorities", []),
+                "conflicts_resolved": master.get("conflicts_resolved", []),
+                "drafts": items,
+                "draft_totals": draft_totals,
+                "drafts_are_text_only": True,
+            }
+        ),
+        total=len(flat),
+        offset=args.offset,
+        limit=args.limit,
+        delivered=len(page),
     )
+    if args.offset and not page:
+        result["note"] = "That offset is past the end of this result set; nothing more to fetch."
+    return result
 
 
 CHAT_TOOLS = [
@@ -1266,31 +1951,31 @@ CHAT_TOOLS = [
     ),
     ChatTool(
         "get_payments",
-        "List individual payment records (who paid): customer name and ID, amount, payment date, received timestamp, payment reference and the invoice numbers the payment was applied to. Filters: received-date range, customer name or ID, min/max amount. Answer 'who paid today' with this tool.",
+        "List individual payment records (who paid): customer name and ID, amount, payment date, received timestamp, payment reference and the invoice numbers the payment was applied to. Filters: received-date range, customer name or ID, min/max amount. Answer 'who paid today' with this tool." + PAGING_NOTE,
         PaymentArgs,
         get_payments,
     ),
     ChatTool(
         "get_invoices",
-        "List invoices with balance, due date, days overdue and customer. Filters: payment status text, customer, overdue_only, invoice-date range. Up to 50 rows with the full total_count.",
+        "List invoices with balance, due date, days overdue and customer. Filters: payment status text, customer, overdue_only, invoice-date range." + PAGING_NOTE,
         InvoiceArgs,
         get_invoices,
     ),
     ChatTool(
         "get_quotes",
-        "List quotes with amount, status, age and customer. Filters: status text, customer, stale_only (the same open-quote rules the dashboard uses), created-date range.",
+        "List quotes with amount, status, age and customer. Filters: status text, customer, stale_only (the same open-quote rules the dashboard uses), created-date range." + PAGING_NOTE,
         QuoteArgs,
         get_quotes,
     ),
     ChatTool(
         "get_orders",
-        "List orders with amounts, status and customer. Filters: order status text, customer, stalled_only (this signal is unreliable - the ERP stores no order status timestamps), invoice-date range.",
+        "List orders with amounts, status and customer. Filters: order status text, customer, stalled_only (this signal is unreliable - the ERP stores no order status timestamps), invoice-date range." + PAGING_NOTE,
         OrderArgs,
         get_orders,
     ),
     ChatTool(
         "get_leads",
-        "List lead records with parsed product/quantity/size/material/finish and the missing-field list. Filters: status text, stuck_only, search text. No contact details are returned.",
+        "List lead records with parsed product/quantity/size/material/finish and the missing-field list. Filters: status text, stuck_only, search text. No contact details are returned." + PAGING_NOTE,
         LeadArgs,
         get_leads,
     ),
@@ -1308,19 +1993,25 @@ CHAT_TOOLS = [
     ),
     ChatTool(
         "search_records",
-        "Substring search across payments, invoices, orders, quotes and leads for a name, reference or amount text. Returns matched rows and how many there are.",
+        "Substring search across payments, invoices, orders, quotes and leads for a name, reference or amount text. Returns one flat list of matched rows, each tagged with its collection, plus matches_by_collection." + PAGING_NOTE,
         SearchArgs,
         search_records,
     ),
     ChatTool(
+        "compare_lead_pulls",
+        "Compare two retained lead-pull snapshots and report added, removed, reclassified (status changed) and changed (product/quantity/size/material/finish) leads, plus unchanged counts, aligned by the stable lead id. Use for 'compare today's leads with yesterday's', 'what new leads were added since yesterday', 'which leads were removed', 'which leads changed status or product', or 'show the changes between two lead pulls'. With no arguments it uses the two newest complete snapshots; pass previous_pull_id and latest_pull_id to compare specific pulls (the pull ids and timestamps come back in previous_pull / latest_pull). Cite only the counts, ids and status changes this tool returned. When it returns available=false it names exactly what is missing (how many complete snapshots are retained) - explain that history is captured going forward and comparison becomes possible after the second stored snapshot; never describe that as a failed figure check and never invent yesterday's state.",
+        CompareArgs,
+        compare_lead_pulls,
+    ),
+    ChatTool(
         "describe_data",
-        "Describe what data exists: collections, row counts, their field names, date ranges, and the fields that are genuinely not stored. Call this before saying something is unavailable.",
+        "Describe what data exists: collections, row counts, their field names, date ranges, retained lead-pull history, and the fields that are genuinely not stored. Call this before saying something is unavailable.",
         EmptyArgs,
         describe_data,
     ),
     ChatTool(
         "get_agent_briefing",
-        "Get the latest saved CEO brief plus the agent drafts behind it (negotiation, collections, lead follow-up), optionally filtered by customer, so a question like 'what did the collections agent suggest for X?' can be answered. Drafts are stored text only.",
+        "Get the latest saved CEO brief plus the agent drafts behind it (negotiation, collections, lead follow-up), optionally filtered by customer, so a question like 'what did the collections agent suggest for X?' can be answered. Drafts are stored text only. The draft rows are one paged set across the three kinds." + PAGING_NOTE,
         BriefingArgs,
         get_agent_briefing,
     ),

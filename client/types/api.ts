@@ -268,6 +268,23 @@ export interface ChatToolEvent {
   name: string;
 }
 
+// Sent after a tool succeeds: the pagination and aggregate facts the backend
+// actually computed for that call. Every field is optional because a tool only
+// reports what it really knows - the UI must not imply more.
+export interface ChatToolResultEvent {
+  tool: string;
+  records_total?: number;
+  records_returned?: number;
+  records_remaining?: number | null;
+  complete?: boolean;
+  // a count the aggregate tool itself computed (get_revenue's payment_count)
+  record_count?: number;
+  money_label?: string;
+  money_total?: number | null;
+  money_covers?: string;
+  window?: { date_from?: string | null; date_to?: string | null };
+}
+
 export interface ChatTokenEvent {
   text: string;
 }
@@ -275,10 +292,20 @@ export interface ChatTokenEvent {
 export interface ChatDoneEvent {
   text: string;
   thread_id: string;
+  // the task id this turn's events are recorded under (announced by the first
+  // `task` event); absent on a backend that predates task correlation
+  task_id?: string;
 }
 
 export interface ChatErrorEvent {
   message: string;
+}
+
+// First frame of a chat turn: the id the backend records this turn's real
+// task events under, so the UI can watch that stream while it works.
+export interface ChatTaskEvent {
+  task_id: string;
+  thread_id: string;
 }
 
 // Sent when provisional streamed text must be discarded (for example the model
@@ -288,7 +315,9 @@ export interface ChatResetEvent {
 }
 
 export type ChatStreamEvent =
+  | { event: "task"; data: ChatTaskEvent }
   | { event: "tool"; data: ChatToolEvent }
+  | { event: "tool_result"; data: ChatToolResultEvent }
   | { event: "token"; data: ChatTokenEvent }
   | { event: "reset"; data: ChatResetEvent }
   | { event: "done"; data: ChatDoneEvent }
@@ -444,3 +473,120 @@ export type LiveConnectionStatus =
   | "live"
   | "reconnecting"
   | "offline";
+
+// ---------------------------------------------------------------- task events
+// These mirror server/app/schemas/events.py and the registry/service endpoints.
+// They are the only source of agent/task state in the Command Center: nothing
+// here is synthesised on the client.
+
+export type TaskEventType =
+  | "task.created"
+  | "task.started"
+  | "task.completed"
+  | "task.failed"
+  | "task.cancelled"
+  | "agent.queued"
+  | "agent.started"
+  | "agent.progress"
+  | "agent.completed"
+  | "agent.failed"
+  | "tool.started"
+  | "tool.completed"
+  | "erp.sync_started"
+  | "erp.sync_completed"
+  | "erp.sync_failed";
+
+export interface TaskEventPayload {
+  // agent.progress uses cached=true (boolean); agent.completed reports the
+  // number of cached items, so `cached` is genuinely both depending on the type.
+  cached?: boolean | number;
+  status?: string;
+  index?: number;
+  tool?: string;
+  ok?: boolean;
+  error?: string;
+  duration_ms?: number;
+  total?: number;
+  fresh?: number;
+  processed?: number;
+  failed?: number;
+  needs_review?: number;
+  generated_by?: string;
+  counts?: Record<string, number>;
+  total_tokens?: number;
+  [key: string]: unknown;
+}
+
+export interface TaskEvent {
+  v: number;
+  event_id: string;
+  task_id: string;
+  seq: number;
+  ts: string;
+  type: TaskEventType;
+  agent_id: string | null;
+  payload: TaskEventPayload;
+}
+
+// GET /api/agents (server/app/agents/registry.py)
+export type AgentKind = "orchestrator" | "specialist" | "assistant";
+
+// The status the registry derives from persisted events; `idle` means no agent
+// event has ever been recorded, never "working".
+export type RegistryAgentStatus =
+  | "idle"
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "unknown";
+
+export interface RegistryAgent {
+  id: string;
+  name: string;
+  kind: AgentKind;
+  purpose: string;
+  tools: string[];
+  enabled: boolean;
+  status: RegistryAgentStatus;
+  status_source: "events" | "none";
+}
+
+export interface AgentsResponse {
+  agents: RegistryAgent[];
+}
+
+// GET /api/tasks (server/app/services/events.py: recent_tasks)
+// "unknown" is a real backend answer: the task has no terminal event and its
+// newest one is too old to call it live. The UI must not paint that as running.
+export type TaskListStatus =
+  | "created"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "unknown";
+
+export interface TaskSummary {
+  task_id: string;
+  last_seq: number;
+  last_type: TaskEventType;
+  status: TaskListStatus;
+  ts: string | null;
+  // the user's own request, recorded on task.created (chat tasks only)
+  prompt?: string | null;
+  // what started a pipeline task ("scheduler", "manual", ...)
+  trigger?: string | null;
+  // all four below come from the task's own stored events; null means the
+  // events never recorded it, and the UI must not fill the gap
+  created_at?: string | null;
+  updated_at?: string | null;
+  duration_ms?: number | null;
+  agents?: string[];
+  // exception type name from a failed terminal event, never its message
+  error_kind?: string | null;
+}
+
+export interface TasksResponse {
+  tasks: TaskSummary[];
+}

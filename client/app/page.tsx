@@ -8,6 +8,10 @@ import { CustomerContextPanel } from "@/components/customer-context";
 import { AISidebar } from "@/components/ai-sidebar";
 import { SystemHealthBadge, SystemHealthProvider } from "@/components/system-health";
 import { LiveDataProvider } from "@/hooks/use-live-data";
+import {
+  ExecutionControllerProvider,
+} from "@/components/command-center/execution-context";
+import { ExecutionOverlay } from "@/components/command-center/execution-overlay";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 
 export default function Home() {
@@ -15,6 +19,10 @@ export default function Home() {
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [selectedCustomerId, setSelectedCustomerId] = useState<number | null>(null);
+  const [activeTab, setActiveTab] = useState("command-center");
+  // The Command Center has its own primary conversation. Showing the global AI
+  // sidebar at the same time would duplicate that single conversation.
+  const showAssistantSidebar = activeTab !== "command-center";
 
   function openCustomerContext(customerId: number | null) {
     setSelectedCustomerId(customerId);
@@ -24,13 +32,16 @@ export default function Home() {
   return (
     <SystemHealthProvider>
       <LiveDataProvider>
+        <ExecutionControllerProvider>
         <Sheet open={isCustomerSheetOpen} onOpenChange={setIsCustomerSheetOpen}>
           <main className="mx-auto w-full max-w-[1920px] px-4 xl:px-8">
             <div
               className={`grid transition-all duration-300 ease-in-out ${
-                isSidebarOpen
-                  ? "gap-6 xl:grid-cols-[minmax(0,1fr)_400px]"
-                  : "gap-2 xl:grid-cols-[minmax(0,1fr)_40px]"
+                !showAssistantSidebar
+                  ? "gap-2 xl:grid-cols-[minmax(0,1fr)]"
+                  : isSidebarOpen
+                    ? "gap-6 xl:grid-cols-[minmax(0,1fr)_400px]"
+                    : "gap-2 xl:grid-cols-[minmax(0,1fr)_40px]"
               }`}
             >
               <div className="min-w-0 pt-6">
@@ -59,15 +70,18 @@ export default function Home() {
                 <Dashboard
                   actionCenter={<AgentReview />}
                   onSelectCustomer={openCustomerContext}
+                  onTabChange={setActiveTab}
                 />
               </div>
-              <div id="ai-sidebar" className="hidden min-w-0 xl:block">
-                <AISidebar
-                  isOpen={isSidebarOpen}
-                  onOpen={() => setIsSidebarOpen(true)}
-                  onClose={() => setIsSidebarOpen(false)}
-                />
-              </div>
+              {showAssistantSidebar && (
+                <div id="ai-sidebar" className="hidden min-w-0 xl:block">
+                  <AISidebar
+                    isOpen={isSidebarOpen}
+                    onOpen={() => setIsSidebarOpen(true)}
+                    onClose={() => setIsSidebarOpen(false)}
+                  />
+                </div>
+              )}
             </div>
           </main>
           <SheetContent side="right" className="sm:max-w-[600px] xl:max-w-[800px]">
@@ -93,15 +107,20 @@ export default function Home() {
             />
           </SheetContent>
         </Sheet>
-        <button
-          type="button"
-          onClick={() => setIsMobileSidebarOpen(true)}
-          className="fixed bottom-5 right-5 z-40 inline-flex items-center gap-2 rounded-full bg-accent px-4 py-3 text-sm font-semibold text-[#11150b] shadow-lg xl:hidden"
-          aria-label="Open chat and voice panel"
-        >
-          <MessageSquareText size={17} aria-hidden="true" />
-          Chat
-        </button>
+        {showAssistantSidebar && (
+          <button
+            type="button"
+            onClick={() => setIsMobileSidebarOpen(true)}
+            className="fixed bottom-5 right-5 z-40 inline-flex items-center gap-2 rounded-full bg-accent px-4 py-3 text-sm font-semibold text-[#11150b] shadow-lg xl:hidden"
+            aria-label="Open chat and voice panel"
+          >
+            <MessageSquareText size={17} aria-hidden="true" />
+            Chat
+          </button>
+        )}
+          {/* One overlay for every chat entry point */}
+          <ExecutionOverlay />
+        </ExecutionControllerProvider>
       </LiveDataProvider>
     </SystemHealthProvider>
   );

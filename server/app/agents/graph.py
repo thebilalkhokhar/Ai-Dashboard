@@ -35,7 +35,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional, TypedDict
 
@@ -44,6 +46,7 @@ from langgraph.graph import END, START, StateGraph
 from app import db as app_db
 from app.config import settings
 from app.services import processors
+from app.services.events import EventService, get_event_service
 from app.services.processors import money_text, to_number
 from app.services.erp_client import ERPClient
 from app.agents.llm import (
@@ -85,6 +88,39 @@ MAX_ITEMS = int(settings.MAX_ITEMS_PER_AGENT)
 AGENT_KINDS = ("negotiation", "collections", "lead_followup")
 
 
+@dataclass
+class RunContext:
+    """Per-run, non-persisted collaborators shared by every node.
+
+    One task id (the run_id), one event service, and a single semaphore and
+    usage accumulator shared across ALL parallel specialist branches - so
+    AGENT_CONCURRENCY is the system-wide bound on concurrent LLM calls, not a
+    per-branch limit that multiplies when the branches fan out.
+    """
+
+    task_id: str
+    events: EventService
+    caller_factory: Callable
+    started: float = field(default_factory=time.monotonic)
+    sema: Optional[asyncio.Semaphore] = None
+    usage_lock: Optional[asyncio.Lock] = None
+    usage: dict = field(default_factory=dict)
+    regen: dict = field(default_factory=dict)
+    errors: list = field(default_factory=list)
+
+    async def emit(self, type: str, agent_id: Optional[str] = None, payload: Optional[dict] = None) -> None:
+        """Fire one task event. The service never raises, but this guard means
+        even a misbehaving/instrumentation-only service cannot corrupt a run."""
+        try:
+            await self.events.emit(
+                task_id=self.task_id, type=type, agent_id=agent_id, payload=payload or {}
+            )
+        except Exception:  # observability must never break business execution
+            import logging
+
+            logging.getLogger("graph").warning("could not emit %s", type, exc_info=True)
+
+
 class RunState(TypedDict, total=False):
     run_id: str
     started_at: str
@@ -110,6 +146,7 @@ class RunState(TypedDict, total=False):
     _erp: Any
     _caller_factory: Callable
     _use_cache: bool
+    _ctx: Any
 
 
 # ---------------------------------------------------------------------------
@@ -838,18 +875,25 @@ def draft_rules_problems(parsed: Any, payload: dict, kind: str) -> list[str]:
 
 
 async def _run_one(
+    ctx: RunContext,
     entry: dict,
     kind: str,
-    caller_factory: Callable,
-    usage_total: dict,
-    usage_lock: asyncio.Lock,
-    errors: list[str],
-    regen_count: dict,
+    index: int,
 ) -> dict:
-    """One item through (call -> validate -> one regen -> needs_review)."""
+    """One item through (call -> validate -> one regen -> needs_review).
+
+    The shared semaphore, usage accumulator and event stream all come from the
+    run context, so every parallel branch obeys ONE system-wide concurrency
+    bound and reports real per-item activity.
+    """
     skeleton = _item_skeleton(kind, entry)
     payload = entry["payload"]
-    semaphore = getattr(_run_one, "_sema", None) or asyncio.Semaphore(CONCURRENCY)
+    semaphore = ctx.sema or asyncio.Semaphore(CONCURRENCY)
+    caller_factory = ctx.caller_factory
+    usage_total = ctx.usage
+    usage_lock = ctx.usage_lock
+    errors = ctx.errors
+    regen_count = ctx.regen
 
     async def one_pass() -> Tuple[Any, dict, list[str]]:
         # send the EXACT payload that the input hash covers (no rebuilds)
@@ -890,6 +934,7 @@ async def _run_one(
 
     async def guarded() -> dict:
         async with semaphore:
+            item_started = time.monotonic()
             result = dict(skeleton)
             try:
                 parsed, usage, bad = await one_pass()
@@ -926,7 +971,7 @@ async def _run_one(
                             )
                 result["source"] = "agent"
                 async with usage_lock:
-                    regen_count[kind] += regen
+                    regen_count[kind] = regen_count.get(kind, 0) + regen
                 if bad:
                     result["flags"] = ["needs_review"]
                     result["message_draft"] = None
@@ -975,99 +1020,118 @@ async def _run_one(
                 result["traceback"] = tb[-800:]
                 errors.append(f"{kind} item {skeleton}: {exc}")
             result.setdefault("flags", [])
+            flags = result["flags"]
+            status = "error" if "error" in flags else (
+                "needs_review" if "needs_review" in flags else "ok"
+            )
+            # real per-item progress: only safe metadata (no customer names)
+            await ctx.emit(
+                "agent.progress",
+                agent_id=kind,
+                payload={
+                    "index": index,
+                    "status": status,
+                    "cached": False,
+                    "duration_ms": round((time.monotonic() - item_started) * 1000),
+                },
+            )
             return result
 
     return await guarded()
 
 
-async def negotiation_node(state: RunState) -> RunState:
-    """One structured LLM call per fresh stale quote (cached ones skipped)."""
-    fresh = [entry for entry in state["negotiation_input"] if entry["input_hash"] not in (state["cached_hashes"] or {})]
-    cached_items = []
-    for entry in state["negotiation_input"]:
-        if entry["input_hash"] in (state["cached_hashes"] or {}):
-            cached = dict(_item_skeleton("negotiation", entry))
-            cached.update(state["cached_hashes"][entry["input_hash"]])
-            cached["source"] = "cache"
-            cached_items.append(cached)
-
-    caller_factory = state["_caller_factory"]
-    usage_total = state.get("usage") or empty_usage()
-    usage_lock = asyncio.Lock()
-    errors: list[str] = []
-    regen_count = {"negotiation": 0, "collections": 0}
-    _run_one._sema = asyncio.Semaphore(CONCURRENCY)
-
-    done = await asyncio.gather(
-        *(_run_one(entry, "negotiation", caller_factory, usage_total, usage_lock, errors, regen_count) for entry in fresh)
-    )
+def _branch_summary(kind: str, results: list[dict]) -> dict:
+    """Safe counts describing one specialist branch's outcome (no PII)."""
     return {
-        "negotiation_out": cached_items + list(done),
-        "usage": usage_total,
-        "errors": errors,
-        "regen_counts": regen_count,
+        "processed": len(results),
+        "cached": sum(1 for r in results if r.get("source") == "cache"),
+        "needs_review": sum(1 for r in results if "needs_review" in (r.get("flags") or [])),
+        "failed": sum(1 for r in results if "error" in (r.get("flags") or [])),
     }
 
 
-async def collections_node(state: RunState) -> RunState:
-    fresh = [entry for entry in state["collections_input"] if entry["input_hash"] not in (state["cached_hashes"] or {})]
-    cached_items = []
-    for entry in state["collections_input"]:
-        if entry["input_hash"] in (state["cached_hashes"] or {}):
-            cached = dict(_item_skeleton("collections", entry))
-            cached.update(state["cached_hashes"][entry["input_hash"]])
-            cached["source"] = "cache"
-            cached_items.append(cached)
+def _make_specialist_node(kind: str, input_key: str, out_key: str):
+    """Build one parallel specialist branch node with real event reporting.
 
-    caller_factory = state["_caller_factory"]
-    usage_total = state.get("usage") or empty_usage()
-    usage_lock = asyncio.Lock()
-    errors: list[str] = list(state.get("errors") or [])
-    regen_count = dict(state.get("regen_counts") or {"negotiation": 0, "collections": 0})
-    _run_one._sema = asyncio.Semaphore(CONCURRENCY)
+    Cached items are reused without any LLM call; fresh items go through the
+    shared semaphore. A branch that fails records the failure and still returns
+    its results, so one specialist never cancels its siblings at the join.
+    """
 
-    done = await asyncio.gather(
-        *(_run_one(entry, "collections", caller_factory, usage_total, usage_lock, errors, regen_count) for entry in fresh)
-    )
-    return {
-        "collections_out": cached_items + list(done),
-        "usage": usage_total,
-        "errors": errors,
-        "regen_counts": regen_count,
-    }
+    async def node(state: RunState) -> RunState:
+        ctx: RunContext = state["_ctx"]
+        inputs = state.get(input_key) or []
+        cached_hashes = state.get("cached_hashes") or {}
+
+        cached_items: list[dict] = []
+        fresh: list[dict] = []
+        for entry in inputs:
+            if entry["input_hash"] in cached_hashes:
+                cached = dict(_item_skeleton(kind, entry))
+                cached.update(cached_hashes[entry["input_hash"]])
+                cached["source"] = "cache"
+                cached_items.append(cached)
+            else:
+                fresh.append(entry)
+
+        await ctx.emit(
+            "agent.queued",
+            agent_id=kind,
+            payload={"total": len(inputs), "cached": len(cached_items), "fresh": len(fresh)},
+        )
+        branch_started = time.monotonic()
+        await ctx.emit(
+            "agent.started", agent_id=kind, payload={"total": len(inputs), "fresh": len(fresh)}
+        )
+
+        # cached reuse is real activity too, but never a new LLM call
+        for position, _item in enumerate(cached_items):
+            await ctx.emit(
+                "agent.progress",
+                agent_id=kind,
+                payload={"index": position, "status": "cached", "cached": True},
+            )
+
+        try:
+            done = await asyncio.gather(
+                *(
+                    _run_one(ctx, entry, kind, len(cached_items) + position)
+                    for position, entry in enumerate(fresh)
+                )
+            )
+        except Exception as exc:  # branch isolation: never propagate to siblings
+            async with ctx.usage_lock:
+                ctx.errors.append(f"{kind} branch failed: {type(exc).__name__}: {exc}")
+            await ctx.emit("agent.failed", agent_id=kind, payload={"error": type(exc).__name__})
+            return {out_key: cached_items}
+
+        results = cached_items + list(done)
+        summary = _branch_summary(kind, results)
+        await ctx.emit(
+            "agent.completed",
+            agent_id=kind,
+            payload={**summary, "duration_ms": round((time.monotonic() - branch_started) * 1000)},
+        )
+        return {out_key: results}
+
+    return node
 
 
-async def lead_followup_node(state: RunState) -> RunState:
-    """One structured LLM call per fresh stuck lead (cached ones skipped)."""
-    fresh = [entry for entry in state["lead_followup_input"] if entry["input_hash"] not in (state["cached_hashes"] or {})]
-    cached_items = []
-    for entry in state["lead_followup_input"]:
-        if entry["input_hash"] in (state["cached_hashes"] or {}):
-            cached = dict(_item_skeleton("lead_followup", entry))
-            cached.update(state["cached_hashes"][entry["input_hash"]])
-            cached["source"] = "cache"
-            cached_items.append(cached)
-
-    caller_factory = state["_caller_factory"]
-    usage_total = state.get("usage") or empty_usage()
-    usage_lock = asyncio.Lock()
-    errors: list[str] = list(state.get("errors") or [])
-    regen_count = dict(state.get("regen_counts") or {})
-    regen_count.setdefault("lead_followup", 0)
-    _run_one._sema = asyncio.Semaphore(CONCURRENCY)
-
-    done = await asyncio.gather(
-        *(_run_one(entry, "lead_followup", caller_factory, usage_total, usage_lock, errors, regen_count) for entry in fresh)
-    )
-    return {
-        "lead_followup_out": cached_items + list(done),
-        "usage": usage_total,
-        "errors": errors,
-        "regen_counts": regen_count,
-    }
+negotiation_node = _make_specialist_node("negotiation", "negotiation_input", "negotiation_out")
+collections_node = _make_specialist_node("collections", "collections_input", "collections_out")
+lead_followup_node = _make_specialist_node(
+    "lead_followup", "lead_followup_input", "lead_followup_out"
+)
 
 
 async def group_by_customer_node(state: RunState) -> RunState:
+    """Join of the three parallel branches, then group customers (code only).
+
+    Runs only after every branch returned, so it snapshots the shared usage /
+    errors / regen accumulated concurrently into the state the master and the
+    save stage read.
+    """
+    ctx: RunContext = state["_ctx"]
     outputs = list(state["negotiation_out"]) + list(state["collections_out"])
     outputs = [o for o in outputs if "needs_review" not in (o.get("flags") or []) and "error" not in (o.get("flags") or [])]
     # Leads are NOT customers: they travel to the master as their own section
@@ -1076,19 +1140,44 @@ async def group_by_customer_node(state: RunState) -> RunState:
         o for o in state["lead_followup_out"]
         if "needs_review" not in (o.get("flags") or []) and "error" not in (o.get("flags") or [])
     ]
-    return {"grouped": group_by_customer(outputs), "leads_grouped": lead_outputs}
+    return {
+        "grouped": group_by_customer(outputs),
+        "leads_grouped": lead_outputs,
+        "usage": dict(ctx.usage),
+        "errors": list(ctx.errors),
+        "regen_counts": dict(ctx.regen),
+    }
 
 
 async def master_node(state: RunState) -> RunState:
+    ctx: RunContext = state["_ctx"]
+    # explicit partial-failure counts, so the brief knows a branch fell short
+    failed_by_branch = {
+        kind: sum(
+            1 for item in (state.get(out_key) or [])
+            if "needs_review" in (item.get("flags") or []) or "error" in (item.get("flags") or [])
+        )
+        for kind, out_key in (
+            ("negotiation", "negotiation_out"),
+            ("collections", "collections_out"),
+            ("lead_followup", "lead_followup_out"),
+        )
+    }
     payload_hint = {
         "stale_quote_count": len(state["negotiation_out"]),
         "unpaid_count": len(state["collections_out"]),
         "stuck_lead_count": len(state["lead_followup_out"]),
+        "items_needing_review_or_failed": failed_by_branch,
     }
     grouped = state["grouped"]
     lead_items = state.get("leads_grouped") or []
     # raw numbers only - the LLM may copy but never compute totals
     master_input = {**state["signals_summary"], **payload_hint}
+
+    await ctx.emit("agent.queued", agent_id="master", payload={"customers": len(grouped)})
+    master_started = time.monotonic()
+    await ctx.emit("agent.started", agent_id="master", payload={"customers": len(grouped)})
+
     parsed = None
     usage = empty_usage()
     problems: list[str] = []
@@ -1115,14 +1204,30 @@ async def master_node(state: RunState) -> RunState:
     if parsed is not None and not problems:
         master_dump = parsed.model_dump()
         master_dump["flags"] = []
+        generated_by = "model"
     else:
         # regenerate did not help: code writes a brief that cannot be wrong
-        brief = build_master_brief(grouped, master_input, lead_items)
+        try:
+            brief = build_master_brief(grouped, master_input, lead_items)
+        except Exception as exc:  # the fallback itself broke: report and re-raise
+            await ctx.emit("agent.failed", agent_id="master", payload={"error": type(exc).__name__})
+            raise
         master_dump = brief.model_dump()
         master_dump["flags"] = []
         master_dump["rejected_reason"] = "; ".join(problems)[:600] or "master produced no brief"
         master_dump["generated_by"] = "code_template"
+        generated_by = "code_template"
         errors.append("master brief rebuilt from a code template: " + "; ".join(problems)[:300])
+    await ctx.emit(
+        "agent.completed",
+        agent_id="master",
+        payload={
+            "generated_by": generated_by,
+            "attempts": attempt,
+            "priority_count": len(master_dump.get("priorities") or []),
+            "duration_ms": round((time.monotonic() - master_started) * 1000),
+        },
+    )
     # RETURN the update: node-side mutation does not persist in the graph
     return {
         "master": master_dump,
@@ -1180,9 +1285,14 @@ def build_graph() -> Any:
     graph.add_node("master", master_node)
     graph.add_node("save", save_node)
     graph.add_edge(START, "load_signals")
+    # negotiation, collections and lead_followup fan out from load_signals and
+    # run as independent parallel branches; each keeps its own *_out key so the
+    # fan-in at group_by_customer has no state to overwrite.
     graph.add_edge("load_signals", "negotiation")
-    graph.add_edge("negotiation", "collections")
-    graph.add_edge("collections", "lead_followup")
+    graph.add_edge("load_signals", "collections")
+    graph.add_edge("load_signals", "lead_followup")
+    graph.add_edge("negotiation", "group_by_customer")
+    graph.add_edge("collections", "group_by_customer")
     graph.add_edge("lead_followup", "group_by_customer")
     graph.add_edge("group_by_customer", "master")
     graph.add_edge("master", "save")
@@ -1208,8 +1318,17 @@ async def run_pipeline(
     caller_factory: Optional[Callable] = None,
     now_epoch: Optional[float] = None,
     ignore_cache: bool = False,
+    trigger: Optional[str] = None,
+    events: Optional[EventService] = None,
 ) -> dict:
-    """Run the whole pipeline once. Returns the saved agent_runs doc."""
+    """Run the whole pipeline once. Returns the saved agent_runs doc.
+
+    The run's existing ``run_id`` is reused as the task id, so task identity
+    stays consistent with the ``agent_runs`` document and with the scheduler's
+    run guard. Real task/agent/tool events are emitted throughout; a broken
+    event stream never changes what the pipeline actually does (the service's
+    ``emit`` never raises).
+    """
     if database is None:
         database = app_db.get_db()
     if caller_factory is None:
@@ -1218,8 +1337,19 @@ async def run_pipeline(
     client = ERPClient() if erp_owned else None
 
     now_epoch = now_epoch if now_epoch is not None else datetime.now(timezone.utc).timestamp()
+    task_id = run_id or str(uuid.uuid4())
+    context = RunContext(
+        task_id=task_id,
+        events=events or get_event_service(),
+        caller_factory=caller_factory,
+        sema=asyncio.Semaphore(CONCURRENCY),
+        usage_lock=asyncio.Lock(),
+        usage=empty_usage(),
+        regen={kind: 0 for kind in AGENT_KINDS},
+        errors=[],
+    )
     initial: RunState = {
-        "run_id": run_id or str(uuid.uuid4()),
+        "run_id": task_id,
         "started_at": datetime.fromtimestamp(now_epoch, tz=timezone.utc).isoformat(),
         "usage": empty_usage(),
         "calls": 0,
@@ -1229,21 +1359,43 @@ async def run_pipeline(
         "_erp": client if erp is None else erp,
         "_caller_factory": caller_factory,
         "_use_cache": not ignore_cache,
+        "_ctx": context,
     }
+    await context.emit(
+        "task.created",
+        payload={"trigger": trigger or "manual", "ignore_cache": bool(ignore_cache)},
+    )
+    await context.emit("task.started", payload={"now_epoch": now_epoch})
     try:
         app = build_graph()
         final = await app.ainvoke(initial)
-        return {
-            "run_id": final["run_id"],
-            "started_at": final["started_at"],
-            "counts": final.get("saved_counts", {}),
-            "master": final.get("master"),
-            "negotiation": final.get("negotiation_out", []),
-            "collections": final.get("collections_out", []),
-            "lead_followup": final.get("lead_followup_out", []),
-            "usage": final.get("usage"),
-            "errors": final.get("errors", []),
-        }
+    except Exception as exc:
+        await context.emit("task.failed", payload={"error": type(exc).__name__})
+        raise
     finally:
         if erp_owned and client is not None:
             await client.close()
+    result = {
+        "run_id": final["run_id"],
+        "started_at": final["started_at"],
+        "counts": final.get("saved_counts", {}),
+        "master": final.get("master"),
+        "negotiation": final.get("negotiation_out", []),
+        "collections": final.get("collections_out", []),
+        "lead_followup": final.get("lead_followup_out", []),
+        "usage": final.get("usage"),
+        "errors": final.get("errors", []),
+    }
+    await context.emit(
+        "task.completed",
+        payload={
+            "counts": result["counts"],
+            "total_tokens": (result.get("usage") or {}).get("total_tokens", 0),
+            "calls": final.get("calls", 0),
+            "duration_ms": round((time.monotonic() - context.started) * 1000),
+            "master_generated_by": (result.get("master") or {}).get("generated_by", "model"),
+            "had_errors": bool(result["errors"]),
+        },
+    )
+    return result
+

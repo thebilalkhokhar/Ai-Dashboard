@@ -68,6 +68,17 @@ INDEXES: dict[str, tuple[tuple[str, tuple[tuple[str, int], ...]], ...]] = {
         ("by_run_id", (("run_id", A),)),
     ),
     "snapshots": (("by_generated", (("generated_at", DESC),)),),
+    # --- retained lead-pull history: the comparison tool reads the newest two
+    #     snapshots, ordered by their real pull time. ---
+    "lead_pulls": (
+        ("by_pulled_at", (("pulled_at", DESC),)),
+        ("by_pull_id", (("pull_id", A),)),
+    ),
+    # --- task events: the replay cursor index (task_id, seq unique) is created
+    #     by the event service (app/services/events.py) because it must be
+    #     UNIQUE; here we only add the newest-first read index the task list
+    #     uses. ---
+    "task_events": (("by_ts", (("ts", DESC),)),),
 }
 
 
@@ -96,7 +107,12 @@ async def ensure_indexes(database: Any) -> dict[str, int]:
     """
     created: dict[str, int] = {}
     for name, indexes in INDEXES.items():
-        collection = _collection(database, name)
+        try:
+            collection = _collection(database, name)
+        except Exception as exc:  # a collection the test double / db lacks must not stop the rest
+            log.warning("could not reach collection %s for indexing: %s", name, exc)
+            created[name] = 0
+            continue
         existing = await _existing_keys(collection)
         count = 0
         for suffix, keys in indexes:

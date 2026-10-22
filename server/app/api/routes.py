@@ -247,3 +247,29 @@ async def chat(request: ChatRequest) -> StreamingResponse:
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )
+
+
+@router.get("/agents")
+async def get_agents() -> dict:
+    """The agents that actually exist, plus a status derived from real events.
+
+    Only registered capabilities are listed (Master, the three specialists and
+    the single chat agent). A never-run agent reads as idle, never as working:
+    there is no fabricated state here.
+    """
+    from app.agents.registry import agents_with_status  # noqa: PLC0415 - keeps import light
+    from app.services.events import get_event_service
+
+    return {"agents": await agents_with_status(get_event_service())}
+
+
+@router.get("/tasks")
+async def get_tasks(
+    limit: Annotated[int | None, Query(ge=1, le=100)] = None,
+) -> dict:
+    """Recent known tasks, collapsed from their newest persisted events."""
+    from app.services.events import get_event_service
+
+    service = get_event_service()
+    return {"tasks": await service.recent_tasks(limit or 20)}
+

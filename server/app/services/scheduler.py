@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -37,8 +38,9 @@ from typing import Any, Callable, Optional
 
 from app import db as app_db
 from app.config import settings
-from app.services import metrics, refresh, signals
+from app.services import lead_pulls, metrics, refresh, signals
 from app.services.erp_client import ERPClient
+from app.services.events import get_event_service
 from app.services.redis_client import get_redis
 
 log = logging.getLogger("scheduler")
@@ -72,6 +74,7 @@ class DashboardScheduler:
         redis: Any = None,
         refresh_func: Optional[Callable] = None,
         snapshot_func: Optional[Callable] = None,
+        lead_snapshot_func: Optional[Callable] = None,
         pipeline_func: Optional[Callable] = None,
         interval_seconds: Optional[int] = None,
     ) -> None:
@@ -79,6 +82,7 @@ class DashboardScheduler:
         self.redis = redis
         self._refresh_func = refresh_func or refresh.run_incremental_refresh
         self._snapshot_func = snapshot_func or metrics.build_snapshot
+        self._lead_snapshot_func = lead_snapshot_func or lead_pulls.capture_lead_snapshot
         self._pipeline_func = pipeline_func or _default_pipeline
         self._interval = interval_seconds
         self._task: Optional[asyncio.Task] = None
@@ -248,6 +252,7 @@ class DashboardScheduler:
                 "at": now.isoformat(),
                 "refresh": await self._job_refresh(),
                 "snapshot": await self._job_snapshot(now),
+                "lead_snapshots": await self._job_lead_snapshots(),
                 "signals": await self._job_signals(now),
                 "agents": await self._job_agents(now),
             }
@@ -258,11 +263,75 @@ class DashboardScheduler:
     # --------------------------------------------------------- job: refresh
 
     async def _job_refresh(self) -> dict:
+        """One incremental ERP refresh, wrapped in real lifecycle events.
+
+        The task id is fresh per refresh cycle (documented task-id strategy:
+        batch runs key on run_id, chat turns on a per-turn uuid, ERP syncs on a
+        per-cycle uuid). `task.completed` / `task.failed` are emitted only after
+        the refresh call has actually returned, so a sync is never reported as
+        finished while it is still running. A Redis/event failure is never fatal
+        - emit() swallows it - so the refresh cadence and error handling are
+        unchanged.
+        """
+        service = get_event_service()
+        task_id = str(uuid.uuid4())
+        await service.emit(
+            task_id=task_id, type="task.created",
+            payload={"trigger": "erp_refresh", "lookback_days": int(settings.REFRESH_LOOKBACK_DAYS)},
+        )
+        await service.emit(
+            task_id=task_id, type="erp.sync_started",
+            payload={"lookback_days": int(settings.REFRESH_LOOKBACK_DAYS)},
+        )
+        started = time.monotonic()
         try:
-            return await self._refresh_func(database=self._db())
+            report = await self._refresh_func(database=self._db())
         except Exception as exc:
             log.exception("refresh job failed")
+            duration_ms = round((time.monotonic() - started) * 1000)
+            await service.emit(
+                task_id=task_id, type="erp.sync_failed",
+                payload={"error_kind": type(exc).__name__, "duration_ms": duration_ms},
+            )
+            # the operation is genuinely over (with an exception): now it is
+            # correct to close the task
+            await service.emit(
+                task_id=task_id, type="task.failed",
+                payload={"error": type(exc).__name__, "duration_ms": duration_ms},
+            )
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+        duration_ms = round((time.monotonic() - started) * 1000)
+        if report.get("ok"):
+            await service.emit(
+                task_id=task_id, type="erp.sync_completed",
+                payload={
+                    "window": report.get("window"),
+                    "new_quotes": (report.get("quotes") or {}).get("new", 0),
+                    "new_orders": (report.get("orders") or {}).get("new", 0),
+                    "new_payments": (report.get("payments") or {}).get("new", 0),
+                    "duration_ms": duration_ms,
+                },
+            )
+            await service.emit(
+                task_id=task_id, type="task.completed",
+                payload={"trigger": "erp_refresh", "duration_ms": duration_ms},
+            )
+        else:
+            # only the exception type name - never the message, which can carry
+            # an ERP URL; there is no token in it, but the event is broadcast.
+            error_text = str(report.get("error") or "")
+            await service.emit(
+                task_id=task_id, type="erp.sync_failed",
+                payload={"error_kind": error_text.split(":")[0] or "refresh_failed",
+                         "duration_ms": duration_ms},
+            )
+            await service.emit(
+                task_id=task_id, type="task.failed",
+                payload={"error": error_text.split(":")[0] or "refresh_failed",
+                         "duration_ms": duration_ms},
+            )
+        return report
 
     # -------------------------------------------------------- job: snapshot
 
@@ -281,6 +350,23 @@ class DashboardScheduler:
         await self._redis().set(
             SNAPSHOT_KEY, json.dumps({"event": "snapshot", "data": snapshot}, default=str)
         )
+
+    # ---------------------------------------------------- job: lead snapshots
+
+    async def _job_lead_snapshots(self) -> dict:
+        """Retain an immutable snapshot of the current lead state for history.
+
+        The `leads` collection is upserted in place, so without this there is no
+        way to answer "what changed since the previous pull". `capture_lead_snapshot`
+        is idempotent per UTC day (keyed on pull_id) and never raises: an
+        incomplete or failed capture is reported, not silently marked success, so
+        history is never fabricated.
+        """
+        try:
+            return await self._lead_snapshot_func(database=self._db())
+        except Exception as exc:  # a lead-snapshot failure must not stop the cycle
+            log.exception("lead snapshot job failed")
+            return {"ok": False, "complete": False, "stored": False, "error": f"{type(exc).__name__}: {exc}"}
 
     # -------------------------------------------------------- job: signals
 
@@ -430,6 +516,7 @@ class DashboardScheduler:
                 run_id=run_id,
                 database=self._db(),
                 ignore_cache=ignore_cache,
+                trigger=trigger,
             )
         except Exception as exc:
             log.exception("agent run %s failed", run_id)

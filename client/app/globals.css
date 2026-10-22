@@ -117,3 +117,2071 @@ button {
     @apply font-sans;
   }
 }
+
+/* ================================================================
+   JARVIS Command Center
+   Deep black-navy environment, glass surfaces and one iridescent
+   focal orb. Colour, position and motion always carry a matching
+   text label, and every animation is disabled under
+   prefers-reduced-motion.
+   ================================================================ */
+
+/* ------------------------------------------------ glass surfaces */
+
+.jstage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  isolation: isolate;
+}
+
+.cc-panel,
+.jglass {
+  border-radius: var(--radius-2xl);
+  border: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0)) padding-box,
+    color-mix(in oklab, var(--surface) 82%, transparent);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 24px 70px rgba(3, 5, 14, 0.55);
+}
+
+.cc-panel-title {
+  border-bottom: 1px solid var(--border);
+  padding: 0.9rem 1.1rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.cc-panel-body {
+  max-height: 460px;
+  overflow-y: auto;
+}
+
+/* ------------------------------------------------------ the orb */
+
+.jo {
+  --jo-size: clamp(190px, 34vw, 340px);
+  --jo-glow: 0.58;
+  z-index: 1;
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: var(--jo-size);
+  aspect-ratio: 1 / 1;
+  color-scheme: dark;
+  isolation: isolate;
+}
+
+.jo--hero {
+  --jo-size: clamp(215px, min(40vw, 46vh), 400px);
+}
+
+/* Atmospheric light spilling around the sphere. The canvas draws the body;
+   this is the pale bloom that makes it sit in the room rather than on the card.
+   The orb itself is bright, so the halo is a soft white wash with just enough
+   hue to pick up the colours rotating inside it. */
+.jo-atmosphere {
+  position: absolute;
+  inset: -22%;
+  z-index: -1;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 46%, rgba(236, 252, 255, calc(0.4 * var(--jo-glow))), transparent 62%),
+    radial-gradient(circle at 68% 62%, rgba(255, 214, 170, calc(0.26 * var(--jo-glow))), transparent 64%),
+    radial-gradient(circle at 34% 66%, rgba(178, 240, 255, calc(0.3 * var(--jo-glow))), transparent 62%),
+    radial-gradient(circle at 56% 22%, rgba(255, 198, 232, calc(0.2 * var(--jo-glow))), transparent 58%);
+  filter: blur(34px);
+  animation: jo-breathe 9s ease-in-out infinite;
+  transition: opacity 900ms ease;
+}
+
+.jo-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  border-radius: 50%;
+  filter: drop-shadow(0 12px 40px rgba(198, 240, 255, 0.22));
+}
+
+.jo-caption {
+  position: absolute;
+  bottom: -2.15rem;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--muted) 88%, #c7f9ff);
+  text-shadow: 0 0 18px rgba(125, 240, 255, 0.3);
+}
+
+.jo--hero .jo-caption {
+  bottom: -2.6rem;
+  font-size: 0.76rem;
+}
+
+/* State character only changes the halo around the canvas. The sphere's own
+   speed and colour energy are interpolated inside the renderer, so a state
+   change never restarts the animation. */
+
+.jo[data-state="idle"] { --jo-glow: 0.44; }
+.jo[data-state="listening"] { --jo-glow: 0.7; }
+.jo[data-state="thinking"] { --jo-glow: 0.82; }
+.jo[data-state="executing"] { --jo-glow: 1; }
+.jo[data-state="responding"] { --jo-glow: 0.88; }
+.jo[data-state="completed"] { --jo-glow: 0.6; }
+.jo[data-state="failed"] { --jo-glow: 0.26; }
+
+@keyframes jo-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.82; }
+  50% { transform: scale(1.08); opacity: 1; }
+}
+
+/* ------------------------------------------------- neural network */
+/* The stage is square, so the SVG geometry and the percentage-positioned HTML
+   labels always line up at any size. */
+
+.jstage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: min(100%, 620px);
+  aspect-ratio: 1 / 1;
+}
+
+.jstage--hero {
+  width: min(100%, 680px);
+}
+
+.jn-stage {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.jn-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.jn-halo {
+  opacity: 0.62;
+  animation: jn-breathe 8s ease-in-out infinite;
+}
+
+.jn-orbit {
+  fill: none;
+  stroke: rgba(125, 240, 255, 0.11);
+  stroke-width: 0.28;
+  stroke-dasharray: 0.25 1.4;
+  animation: jn-orbit 34s linear infinite;
+}
+
+.jn-orbit--outer {
+  stroke: rgba(167, 139, 250, 0.09);
+  stroke-width: 0.22;
+  animation-duration: 52s;
+  animation-direction: reverse;
+}
+
+.jn-ambient {
+  stroke: rgba(167, 139, 250, 0.16);
+  stroke-width: 0.3;
+  stroke-dasharray: 0.08 1.55;
+  animation: jn-ambient 22s linear infinite;
+}
+
+.jn-ambient--reverse {
+  stroke: rgba(125, 240, 255, 0.1);
+  animation-direction: reverse;
+  animation-duration: 29s;
+}
+
+.jn-link {
+  fill: none;
+  transition: stroke 600ms ease, stroke-width 600ms ease, opacity 600ms ease;
+}
+
+.jn-link-echo {
+  stroke: rgba(167, 139, 250, 0.1);
+  stroke-width: 0.22;
+}
+
+.jn-link-primary {
+  stroke: rgba(146, 170, 208, 0.24);
+  stroke-width: 0.38;
+  animation: jn-shimmer 9s ease-in-out infinite alternate;
+}
+
+.jn-link-group[data-working="true"] .jn-link-primary {
+  stroke: rgba(125, 240, 255, 0.62);
+  stroke-width: 0.52;
+  animation: none;
+}
+
+.jn-link-group[data-working="true"] .jn-link-echo {
+  stroke: rgba(244, 114, 182, 0.22);
+  stroke-width: 0.36;
+}
+
+.jn-link-group[data-state="completed"] .jn-link-primary {
+  stroke: rgba(94, 234, 212, 0.46);
+  stroke-width: 0.4;
+  animation: none;
+}
+
+.jn-link-group[data-state="failed"] .jn-link-primary {
+  stroke: rgba(248, 113, 113, 0.42);
+  stroke-width: 0.4;
+  animation: none;
+}
+
+.jn-link-group[data-state="queued"] .jn-link-primary {
+  stroke: rgba(167, 139, 250, 0.32);
+}
+
+.jn-link-group[data-cached="true"] .jn-link-primary {
+  stroke-dasharray: 0.06 0.08;
+  stroke: rgba(251, 191, 36, 0.46);
+}
+
+.jn-link-flow {
+  stroke-width: 0.72;
+  stroke-linecap: round;
+  stroke-dasharray: 0.075 0.925;
+  animation: jn-flow 1.55s linear infinite;
+  opacity: 0.9;
+}
+
+.jn-traveler {
+  fill: #e9fdff;
+  filter: drop-shadow(0 0 1.2px rgba(125, 240, 255, 0.95));
+}
+
+.jn-node {
+  position: absolute;
+  z-index: 2;
+  transform: translate(-50%, -50%);
+  display: grid;
+  justify-items: center;
+  gap: 0.3rem;
+  max-width: 112px;
+  transition: transform 600ms ease;
+}
+
+.jn-node[data-placement="above"] .jn-text {
+  order: -1;
+}
+
+.jn-node[data-placement="above"] {
+  transform: translate(-50%, -100%);
+}
+
+.jn-dot {
+  position: relative;
+  display: block;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #46536e;
+  box-shadow: 0 0 0 6px rgba(146, 170, 208, 0.06);
+  transition: background 600ms ease, box-shadow 600ms ease, width 600ms ease, height 600ms ease;
+}
+
+.jn-node--master .jn-dot {
+  width: 19px;
+  height: 19px;
+  box-shadow:
+    0 0 0 8px rgba(125, 240, 255, 0.07),
+    0 0 22px rgba(125, 240, 255, 0.28);
+}
+
+.jn-node--master .jn-name {
+  font-size: 0.8rem;
+  letter-spacing: 0.02em;
+}
+
+.jn-node[data-state="queued"] .jn-dot {
+  background: #a78bfa;
+  box-shadow: 0 0 0 6px rgba(167, 139, 250, 0.13);
+}
+
+.jn-node[data-state="running"] .jn-dot {
+  background: #7df0ff;
+  box-shadow: 0 0 0 7px rgba(125, 240, 255, 0.15), 0 0 20px rgba(125, 240, 255, 0.45);
+}
+
+.jn-node[data-state="completed"] .jn-dot {
+  background: #5eead4;
+  box-shadow: 0 0 0 6px rgba(94, 234, 212, 0.13), 0 0 16px rgba(94, 234, 212, 0.22);
+}
+
+.jn-node[data-state="failed"] .jn-dot {
+  background: #f87171;
+  box-shadow: 0 0 0 6px rgba(248, 113, 113, 0.14);
+}
+
+.jn-pulse {
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  border: 1px solid rgba(125, 240, 255, 0.58);
+  animation: jn-pulse 2.1s ease-out infinite;
+}
+
+/* ------------------------------------------------ assistant avatars */
+/* Each registered assistant has a looping clip in /public, so its node is a
+   circle of video with a status ring rather than a plain dot. The ring colour
+   is the real event state, and the state is still written as text below. */
+
+.jn-node[data-clip="true"] .jn-dot {
+  width: clamp(40px, 7.4vw, 58px);
+  height: clamp(40px, 7.4vw, 58px);
+  overflow: hidden;
+  background: #0a1120;
+  box-shadow:
+    0 0 0 2px rgba(146, 170, 208, 0.3),
+    0 8px 22px rgba(2, 6, 18, 0.55);
+}
+
+.jn-node--master[data-clip="true"] .jn-dot {
+  width: clamp(48px, 9vw, 70px);
+  height: clamp(48px, 9vw, 70px);
+  box-shadow:
+    0 0 0 2px rgba(125, 240, 255, 0.42),
+    0 0 26px rgba(125, 240, 255, 0.22),
+    0 8px 22px rgba(2, 6, 18, 0.55);
+}
+
+.jn-clip {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+}
+
+.jn-node[data-clip="true"][data-state="queued"] .jn-dot {
+  box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.8), 0 8px 22px rgba(2, 6, 18, 0.55);
+}
+
+.jn-node[data-clip="true"][data-state="running"] .jn-dot {
+  box-shadow:
+    0 0 0 3px rgba(125, 240, 255, 0.92),
+    0 0 26px rgba(125, 240, 255, 0.45),
+    0 8px 22px rgba(2, 6, 18, 0.55);
+}
+
+.jn-node[data-clip="true"][data-state="completed"] .jn-dot {
+  box-shadow: 0 0 0 3px rgba(94, 234, 212, 0.85), 0 8px 22px rgba(2, 6, 18, 0.55);
+}
+
+.jn-node[data-clip="true"][data-state="failed"] .jn-dot {
+  box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.9), 0 8px 22px rgba(2, 6, 18, 0.55);
+}
+
+/* Status badges move to the rim of the circle where they stay readable. */
+.jn-node[data-clip="true"] .jn-check {
+  left: auto;
+  top: auto;
+  right: 3px;
+  bottom: 3px;
+  width: 5px;
+  height: 9px;
+  padding: 2px;
+  border-right-width: 2px;
+  border-bottom-width: 2px;
+  border-color: #04121c;
+  background: #5eead4;
+  border-radius: 1px;
+  transform: rotate(40deg);
+}
+
+.jn-node[data-clip="true"] .jn-cross {
+  inset: auto 4px 4px auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #f87171;
+}
+
+.jn-node[data-clip="true"] .jn-cross::before,
+.jn-node[data-clip="true"] .jn-cross::after {
+  background: #240404;
+}
+
+.jn-check {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 4px;
+  height: 8px;
+  border-right: 2px solid #06121a;
+  border-bottom: 2px solid #06121a;
+  transform: translate(-50%, -60%) rotate(40deg);
+}
+
+.jn-cross {
+  position: absolute;
+  inset: 30%;
+  transform: rotate(45deg);
+}
+
+.jn-cross::before,
+.jn-cross::after {
+  content: "";
+  position: absolute;
+  background: #1b0707;
+}
+
+.jn-cross::before {
+  left: 50%;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  transform: translateX(-50%);
+}
+
+.jn-cross::after {
+  top: 50%;
+  left: 0;
+  height: 2px;
+  width: 100%;
+  transform: translateY(-50%);
+}
+
+.jn-cached {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #fbbf24;
+  box-shadow: 0 0 7px rgba(251, 191, 36, 0.78);
+}
+
+/* Labels can fall over a link or the core's rim, so they carry their own quiet
+   plate instead of relying on the background being dark at that point. */
+.jn-text {
+  display: grid;
+  justify-items: center;
+  gap: 0.05rem;
+  max-width: 112px;
+  line-height: 1.18;
+  text-align: center;
+  padding: 0.16rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(7, 11, 22, 0.62);
+  border: 1px solid rgba(146, 170, 208, 0.14);
+  backdrop-filter: blur(6px);
+}
+
+.jn-name {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.jn-status {
+  font-size: 0.56rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.jn-node[data-working="true"] .jn-status {
+  color: #9cefff;
+}
+
+@keyframes jn-flow {
+  from { stroke-dashoffset: 0; }
+  to { stroke-dashoffset: -1; }
+}
+
+@keyframes jn-pulse {
+  0% { transform: scale(0.7); opacity: 0.9; }
+  100% { transform: scale(2); opacity: 0; }
+}
+
+@keyframes jn-orbit {
+  to { stroke-dashoffset: -1.65; }
+}
+
+@keyframes jn-ambient {
+  to { stroke-dashoffset: -1.63; }
+}
+
+@keyframes jn-shimmer {
+  0% { opacity: 0.68; }
+  100% { opacity: 1; }
+}
+
+@keyframes jn-breathe {
+  0%, 100% { opacity: 0.46; }
+  50% { opacity: 0.76; }
+}
+
+/* -------------------------------------------------- operation flow */
+/* The active execution view: a left-to-right route (assistant -> real work ->
+   response). It shares the network's palette but not its orbit, because the
+   point here is the path one request took, not the standing roster. */
+
+.jstage--flow {
+  width: min(100%, 720px);
+  aspect-ratio: 4 / 3;
+}
+
+.jflow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.jflow-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.jflow-line {
+  fill: none;
+  stroke: rgba(146, 170, 208, 0.2);
+  stroke-width: 0.34;
+  transition: stroke 600ms ease, stroke-width 600ms ease;
+}
+
+.jflow-node--core {
+  max-width: 150px;
+}
+
+/* The core sits at the head of the route, so it is the small variant: the large
+   idle hero orb belongs to the waiting state and is never repeated here. Its own
+   caption is hidden because the node already carries the stage label. */
+.jo--core {
+  --jo-size: clamp(72px, 15vw, 116px);
+}
+
+.jflow-node--core .jo-caption {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  border: 0;
+}
+
+.jflow-core {
+  display: grid;
+  place-items: center;
+}
+
+.jflow-edge[data-settled="true"] .jflow-line {
+  stroke: rgba(94, 234, 212, 0.34);
+  stroke-width: 0.4;
+}
+
+.jflow-edge[data-flowing="true"] .jflow-line {
+  stroke: rgba(125, 240, 255, 0.55);
+  stroke-width: 0.5;
+}
+
+.jflow-line-flow {
+  stroke-width: 0.8;
+  stroke-linecap: round;
+  stroke-dasharray: 0.07 0.93;
+  animation: jflow-dash 1.5s linear infinite;
+  opacity: 0.95;
+}
+
+.jflow-particle {
+  fill: #e9fdff;
+  filter: drop-shadow(0 0 1.4px rgba(125, 240, 255, 0.95));
+}
+
+@keyframes jflow-dash {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: 0; }
+}
+
+.jflow-node {
+  position: absolute;
+  z-index: 2;
+  transform: translate(-50%, -50%);
+  display: grid;
+  justify-items: center;
+  gap: 0.28rem;
+  max-width: 132px;
+}
+
+.jflow-node--intake,
+.jflow-node--out {
+  max-width: 120px;
+}
+
+.jflow-dot {
+  position: relative;
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #46536e;
+  box-shadow: 0 0 0 6px rgba(146, 170, 208, 0.06);
+  transition: background 500ms ease, box-shadow 500ms ease;
+}
+
+.jflow-node--out .jflow-dot {
+  width: 17px;
+  height: 17px;
+}
+
+.jflow-node[data-state="active"] .jflow-dot {
+  background: #7df0ff;
+  box-shadow: 0 0 0 7px rgba(125, 240, 255, 0.16), 0 0 20px rgba(125, 240, 255, 0.45);
+}
+
+.jflow-node[data-state="done"] .jflow-dot {
+  background: #5eead4;
+  box-shadow: 0 0 0 6px rgba(94, 234, 212, 0.13), 0 0 16px rgba(94, 234, 212, 0.22);
+}
+
+.jflow-node[data-state="failed"] .jflow-dot {
+  background: #f87171;
+  box-shadow: 0 0 0 6px rgba(248, 113, 113, 0.14);
+}
+
+.jflow-check {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 4px;
+  height: 8px;
+  border-right: 2px solid #06121a;
+  border-bottom: 2px solid #06121a;
+  transform: translate(-50%, -60%) rotate(40deg);
+}
+
+.jflow-cross {
+  position: absolute;
+  inset: 30%;
+  transform: rotate(45deg);
+}
+
+.jflow-cross::before,
+.jflow-cross::after {
+  content: "";
+  position: absolute;
+  background: #1b0707;
+}
+
+.jflow-cross::before {
+  left: 50%;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  transform: translateX(-50%);
+}
+
+.jflow-cross::after {
+  top: 50%;
+  left: 0;
+  height: 2px;
+  width: 100%;
+  transform: translateY(-50%);
+}
+
+.jflow-pulse {
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  border: 1px solid rgba(125, 240, 255, 0.58);
+  animation: jn-pulse 2.1s ease-out infinite;
+}
+
+.jflow-text {
+  display: grid;
+  justify-items: center;
+  gap: 0.1rem;
+  text-align: center;
+}
+
+.jflow-label {
+  font-size: 0.7rem;
+  line-height: 1.25;
+  color: rgba(237, 244, 255, 0.9);
+}
+
+.jflow-state {
+  font-size: 0.58rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(146, 170, 208, 0.85);
+}
+
+.jflow-node[data-state="active"] .jflow-state {
+  color: #7df0ff;
+}
+
+.jflow-node[data-state="failed"] .jflow-state {
+  color: #fca5a5;
+}
+
+/* Read by screen readers as the ordered list of steps; the picture is decorative. */
+.jflow-summary {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+  list-style: none;
+}
+
+.joverlay-stage-note {
+  margin: 0.6rem 0 0;
+  font-size: 0.7rem;
+  color: rgba(146, 170, 208, 0.85);
+  text-align: center;
+}
+
+/* -------------------------------------------------- activity feed */
+
+.jfeed {
+  display: flex;
+  flex-direction: column;
+  gap: 0.05rem;
+  padding: 0.25rem 0;
+  margin: 0;
+  list-style: none;
+}
+
+.jfeed-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.9rem;
+  padding: 0.45rem 0.15rem;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.jfeed-row + .jfeed-row {
+  border-top: 1px solid color-mix(in oklab, var(--border) 48%, transparent);
+}
+
+.jfeed-text {
+  color: var(--foreground);
+}
+
+.jfeed-meta {
+  font-size: 0.66rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.jfeed-row[data-tone="working"] .jfeed-text { color: #9cefff; }
+.jfeed-row[data-tone="done"] .jfeed-text { color: #5eead4; }
+.jfeed-row[data-tone="failed"] .jfeed-text { color: #fca5a5; }
+.jfeed-row[data-tone="cached"] .jfeed-text { color: #fcd34d; }
+
+/* --------------------------------------------- execution overlay */
+
+.joverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background:
+    radial-gradient(120% 80% at 50% 38%, rgba(12, 16, 34, 0.7), rgba(3, 4, 12, 0.94));
+  backdrop-filter: blur(20px) saturate(1.12);
+  animation: jo-fade 360ms ease both;
+}
+
+.joverlay[data-closing="true"] {
+  animation: jo-fade-out 360ms ease both;
+}
+
+@keyframes jo-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes jo-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+.joverlay-inner {
+  display: grid;
+  gap: 2rem;
+  width: min(1120px, 100%);
+  max-height: 100%;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+}
+
+@media (min-width: 1024px) {
+  .joverlay-inner {
+    grid-template-columns: minmax(0, 1.1fr) minmax(300px, 0.9fr);
+    gap: 3rem;
+  }
+}
+
+.joverlay-stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: clamp(300px, 48vh, 520px);
+}
+
+.joverlay-title {
+  font-size: clamp(1.1rem, 2.4vw, 1.55rem);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.35;
+  margin: 0;
+  max-width: 36ch;
+}
+
+.joverlay-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: min(78vh, 720px);
+  overflow: hidden;
+}
+
+.joverlay-panel-head {
+  padding: 1.2rem 1.15rem 0.8rem;
+}
+
+.joverlay-eyebrow {
+  margin: 0 0 0.4rem;
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #9cefff;
+}
+
+.joverlay-request {
+  margin: 0.5rem 0 0;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.joverlay-operation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem 1rem;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 0.65rem 1.15rem;
+}
+
+.joverlay-agent {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.joverlay-activity {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 1.15rem;
+}
+
+.joverlay-recovery {
+  margin: 0 1.15rem 1.15rem;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(248, 113, 113, 0.32);
+  background: rgba(248, 113, 113, 0.07);
+  padding: 0.75rem 0.85rem;
+  font-size: 0.8rem;
+  color: #fecaca;
+}
+
+.joverlay-recovery p {
+  margin: 0 0 0.6rem;
+  line-height: 1.5;
+}
+
+.joverlay-recovery button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border-radius: 0.45rem;
+  border: 1px solid rgba(248, 113, 113, 0.5);
+  background: rgba(248, 113, 113, 0.12);
+  padding: 0.35rem 0.65rem;
+  font-size: 0.72rem;
+  color: #fee2e2;
+}
+
+.joverlay-note {
+  margin: 0;
+  padding: 0.65rem 1.15rem 1rem;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.joverlay-close {
+  position: absolute;
+  top: 1.25rem;
+  right: 1.5rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  border-radius: 9999px;
+  border: 1px solid var(--border);
+  background: color-mix(in oklab, var(--surface) 70%, transparent);
+  padding: 0.4rem 0.85rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  transition: color 150ms ease, border-color 150ms ease;
+}
+
+.joverlay-close:hover {
+  color: var(--foreground);
+  border-color: color-mix(in oklab, var(--accent) 40%, var(--border));
+}
+
+/* ------------------------------------------------- command center */
+
+.cc-workspace {
+  /* --cc-chrome is everything the page stacks around the workspace: the app
+     header, the dashboard title row, the section tabs and the bottom footer -
+     measured at 335px above and 36px below. Subtracting it lets the workspace
+     end at the viewport edge, so the conversation scrolls on its own and the
+     page does not scroll separately beneath it. */
+  --cc-chrome: 372px;
+  display: grid;
+  gap: 0.9rem;
+}
+
+.cc-workspace-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.cc-workspace-eyebrow {
+  margin: 0;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: #9cefff;
+}
+
+.cc-workspace-title {
+  margin: 0.15rem 0 0;
+  font-size: 1.2rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.cc-workspace-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.cc-workspace-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  border-radius: 9999px;
+  border: 1px solid var(--border);
+  padding: 0.35rem 0.7rem;
+  font-size: 0.66rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.cc-workspace-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #6b7689;
+}
+
+.cc-workspace-dot[data-state="active"] {
+  background: #7df0ff;
+  box-shadow: 0 0 10px rgba(125, 240, 255, 0.7);
+  animation: cc-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes cc-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+.cc-history-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border-radius: 9999px;
+  border: 1px solid var(--border);
+  background: color-mix(in oklab, var(--surface-raised) 60%, transparent);
+  padding: 0.35rem 0.75rem;
+  font-size: 0.7rem;
+  color: var(--muted);
+  transition: color 150ms ease, border-color 150ms ease;
+}
+
+.cc-history-button:hover {
+  color: var(--foreground);
+  border-color: rgba(125, 240, 255, 0.35);
+}
+
+.cc-main {
+  display: grid;
+  gap: 0.9rem;
+  /* orb panel ~57%, conversation ~43% */
+  grid-template-columns: minmax(0, 1.32fr) minmax(360px, 1fr);
+  /* on a very short window the chat keeps a usable height and the page scrolls */
+  height: max(420px, calc(100dvh - var(--cc-chrome)));
+  align-items: stretch;
+}
+
+.cc-visual {
+  position: relative;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 1.25rem 1.25rem 1.1rem;
+  background:
+    radial-gradient(90% 70% at 50% 42%, rgba(88, 73, 190, 0.12), transparent 70%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0)) padding-box,
+    color-mix(in oklab, var(--surface) 84%, transparent);
+}
+
+.cc-stage {
+  width: min(100%, 610px);
+  height: 100%;
+  min-height: 0;
+  aspect-ratio: auto;
+  align-self: stretch;
+  justify-self: center;
+}
+
+.cc-stage .jo--hero {
+  --jo-size: clamp(220px, min(30vw, 32vh), 300px);
+}
+
+.cc-visual-foot {
+  display: grid;
+  gap: 0.55rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+}
+
+.cc-request-label {
+  margin: 0;
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.cc-request-text {
+  margin: 0.2rem 0 0;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  font-weight: 500;
+  color: var(--foreground);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.cc-visual-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.9rem;
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+
+.cc-phase {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: #c7f9ff;
+}
+
+.cc-phase-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #7df0ff;
+  box-shadow: 0 0 8px rgba(125, 240, 255, 0.6);
+}
+
+.cc-phase-dot[data-tone="done"] { background: #5eead4; box-shadow: 0 0 8px rgba(94, 234, 212, 0.5); }
+.cc-phase-dot[data-tone="failed"] { background: #f87171; box-shadow: 0 0 8px rgba(248, 113, 113, 0.5); }
+.cc-phase-dot[data-tone="cached"] { background: #fbbf24; box-shadow: 0 0 8px rgba(251, 191, 36, 0.5); }
+.cc-phase-dot[data-tone="idle"] { background: #6b7689; box-shadow: none; }
+
+.cc-agent-working {
+  color: #9cefff;
+}
+
+.cc-side {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0.9rem;
+  min-height: 0;
+}
+
+.cc-operation {
+  min-width: 0;
+}
+
+.cc-operation {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.cc-operation-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 0.95rem;
+}
+
+/* Only an open panel needs a divider; collapsed it is one quiet strip. */
+.cc-operation[data-open="true"] .cc-operation-head {
+  border-bottom: 1px solid var(--border);
+}
+
+.cc-operation-body {
+  display: grid;
+  gap: 0.7rem;
+  min-height: 0;
+  max-height: 42vh;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(125, 240, 255, 0.3) transparent;
+}
+
+.cc-operation-toggle {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.cc-operation-toggle:hover {
+  color: var(--foreground);
+  border-color: rgba(125, 240, 255, 0.4);
+}
+
+.cc-operation-peek {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.66rem;
+  color: var(--muted);
+}
+
+.cc-operation-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.cc-operation-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  max-width: 62%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.7rem;
+  color: #c7f9ff;
+}
+
+.cc-operation-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #7df0ff;
+  flex: none;
+}
+
+.cc-operation-dot[data-tone="done"] { background: #5eead4; }
+.cc-operation-dot[data-tone="failed"] { background: #f87171; }
+.cc-operation-dot[data-tone="cached"] { background: #fbbf24; }
+.cc-operation-dot[data-tone="idle"] { background: #6b7689; }
+
+.cc-operation-request {
+  padding: 0.75rem 0.95rem 0.55rem;
+}
+
+.cc-operation-label {
+  margin: 0;
+  font-size: 0.58rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.cc-operation-prompt {
+  margin: 0.25rem 0 0;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  font-weight: 500;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.cc-operation-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0 0.95rem 0.7rem;
+}
+
+.cc-operation-meta dt {
+  font-size: 0.56rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.cc-operation-meta dd {
+  margin: 0.2rem 0 0;
+  font-size: 0.78rem;
+  color: var(--foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cc-operation-activity {
+  min-height: 0;
+  overflow-y: auto;
+  border-top: 1px solid color-mix(in oklab, var(--border) 65%, transparent);
+  padding: 0.55rem 0.95rem 0.65rem;
+}
+
+.cc-operation-activity .jfeed-row {
+  padding: 0.35rem 0;
+  font-size: 0.76rem;
+}
+
+.cc-operation-foot {
+  margin: 0;
+  border-top: 1px solid var(--border);
+  padding: 0.45rem 0.95rem;
+  font-size: 0.66rem;
+  color: var(--muted);
+}
+
+.cc-operation-foot[data-tone="failed"] { color: #fca5a5; }
+
+.cc-chat {
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.cc-chat > section {
+  flex: 1;
+  min-height: 0;
+}
+
+/* ---------------------------------------------------- chat panel */
+/* One flex column: a fixed status head, a message area that takes every
+   remaining pixel, and the composer pinned to the bottom. */
+
+.chat-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.chat-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 55%, transparent);
+}
+
+.chat-head-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.chat-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(125, 240, 255, 0.28) transparent;
+}
+
+.chat-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.chat-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(125, 240, 255, 0.22);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.chat-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(125, 240, 255, 0.42);
+  background-clip: content-box;
+}
+
+.chat-foot {
+  flex-shrink: 0;
+  border-top: 1px solid color-mix(in oklab, var(--border) 55%, transparent);
+  padding: 0.75rem;
+  background: color-mix(in oklab, var(--surface) 70%, transparent);
+}
+
+.chat-row {
+  display: flex;
+  width: 100%;
+}
+
+.chat-row--user {
+  justify-content: flex-end;
+}
+
+.chat-row--assistant {
+  align-items: flex-start;
+  gap: 0.6rem;
+}
+
+.chat-avatar {
+  margin-top: 0.15rem;
+  display: grid;
+  place-items: center;
+  height: 1.75rem;
+  width: 1.75rem;
+  flex-shrink: 0;
+  border-radius: 0.55rem;
+  background: rgba(125, 240, 255, 0.1);
+  color: #a5f3fc;
+}
+
+.chat-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.chat-bubble {
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  max-width: 85%;
+  border-radius: 1rem;
+  padding: 0.6rem 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.chat-bubble--user {
+  background: color-mix(in oklab, var(--surface-raised) 92%, #7df0ff 8%);
+  border: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+  border-bottom-right-radius: 0.35rem;
+  color: var(--foreground);
+}
+
+.chat-bubble--assistant {
+  background: transparent;
+  padding-left: 0;
+  padding-right: 0;
+  color: color-mix(in oklab, var(--foreground) 92%, transparent);
+}
+
+.chat-typing {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  height: 1.4rem;
+}
+
+.chat-typing i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(125, 240, 255, 0.75);
+  animation: chat-typing 1.15s ease-in-out infinite;
+}
+
+.chat-typing i:nth-child(2) { animation-delay: 0.16s; }
+.chat-typing i:nth-child(3) { animation-delay: 0.32s; }
+
+@keyframes chat-typing {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
+  30% { transform: translateY(-3px); opacity: 1; }
+}
+
+/* A quiet caret at the end of the answer that is still arriving. */
+.chat-streaming {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 0.15rem;
+  vertical-align: -0.15em;
+  background: rgba(125, 240, 255, 0.85);
+  animation: chat-streaming 1s steps(2, start) infinite;
+}
+
+@keyframes chat-streaming {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+/* ------------------------------------------- answer provenance */
+/* The claim in the footer, made inspectable: the lookups this turn recorded. */
+
+.chat-proof {
+  margin-top: 0.5rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.chat-proof-head {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0;
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.chat-proof-failed {
+  margin-left: 0.4rem;
+  color: #fca5a5;
+}
+
+.chat-proof-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.chat-proof-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid rgba(94, 234, 212, 0.28);
+  background: rgba(94, 234, 212, 0.07);
+  color: color-mix(in oklab, var(--foreground) 82%, #5eead4);
+  font-size: 0.68rem;
+  cursor: pointer;
+  transition: border-color 200ms ease, background 200ms ease;
+}
+
+.chat-proof-chip:hover {
+  border-color: rgba(94, 234, 212, 0.6);
+  background: rgba(94, 234, 212, 0.13);
+}
+
+.chat-proof-chip[data-ok="false"] {
+  border-color: rgba(248, 113, 113, 0.4);
+  background: rgba(248, 113, 113, 0.08);
+  color: #fecaca;
+}
+
+.chat-proof-ms {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-proof-detail {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.66rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.chat-proof-detail code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: #a5f3fc;
+}
+
+.chat-proof-empty {
+  margin: 0.4rem 0 0;
+  font-size: 0.66rem;
+  color: var(--muted);
+}
+
+/* Verified aggregates the backend computed for this answer. Secondary to the
+   reply, but a real block a CEO can read without opening anything. */
+.chat-proof-facts {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0.5rem 0.65rem;
+  border-radius: 0.6rem;
+  border: 1px solid var(--border);
+  background: rgba(148, 163, 184, 0.05);
+}
+
+.chat-proof-fact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem;
+}
+
+.chat-proof-facts dt {
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.chat-proof-facts dd {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: color-mix(in oklab, var(--foreground) 88%, #5eead4);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------- assistant markdown */
+
+.cmd {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.cmd > * + * {
+  margin-top: 0;
+}
+
+.cmd-p {
+  margin: 0;
+}
+
+.cmd-h {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: color-mix(in oklab, var(--foreground) 88%, #7df0ff);
+}
+
+.cmd-list {
+  margin: 0;
+  padding-left: 1.25rem;
+  display: grid;
+  gap: 0.28rem;
+  /* preflight removes list markers; an answer's bullets are its structure */
+  list-style: disc;
+}
+
+.cmd-list--ordered {
+  list-style: decimal;
+}
+
+.cmd-list li::marker {
+  color: rgba(125, 240, 255, 0.6);
+}
+
+.cmd-quote {
+  margin: 0;
+  padding: 0.1rem 0 0.1rem 0.7rem;
+  border-left: 2px solid rgba(125, 240, 255, 0.35);
+  color: var(--muted);
+}
+
+.cmd-hr {
+  border: 0;
+  border-top: 1px solid color-mix(in oklab, var(--border) 75%, transparent);
+  margin: 0.2rem 0;
+}
+
+.cmd :where(code) {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.85em;
+  padding: 0.05rem 0.3rem;
+  border-radius: 0.3rem;
+  background: rgba(125, 240, 255, 0.08);
+}
+
+.cmd-pre {
+  margin: 0;
+  padding: 0.6rem 0.7rem;
+  border-radius: 0.6rem;
+  border: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+  background: rgba(4, 9, 20, 0.55);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.cmd-pre code {
+  background: none;
+  padding: 0;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.cmd-link {
+  color: #7df0ff;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.cmd-table-wrap {
+  overflow-x: auto;
+  border: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+  border-radius: 0.6rem;
+  scrollbar-width: thin;
+}
+
+.cmd-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.cmd-table th,
+.cmd-table td {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 55%, transparent);
+  white-space: nowrap;
+}
+
+.cmd-table thead th {
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: rgba(125, 240, 255, 0.05);
+}
+
+.cmd-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.cc-workspace-note {
+  margin: 0;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+/* ------------------------------------------------- history drawer */
+
+.history-drawer {
+  width: min(460px, 94vw) !important;
+  max-width: 460px;
+}
+
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0.35rem 0.6rem;
+}
+
+.history-row {
+  display: grid;
+  gap: 0.3rem;
+  width: 100%;
+  border-radius: 0.65rem;
+  border: 1px solid transparent;
+  padding: 0.6rem 0.7rem;
+  text-align: left;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+
+.history-row:hover {
+  background: color-mix(in oklab, var(--surface-raised) 65%, transparent);
+}
+
+.history-row[data-active="true"] {
+  border-color: rgba(125, 240, 255, 0.28);
+  background: rgba(125, 240, 255, 0.06);
+}
+
+.history-row-title {
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: var(--foreground);
+}
+
+.history-row-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  font-size: 0.64rem;
+  color: var(--muted);
+}
+
+.history-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.history-status::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #6b7689;
+}
+
+.history-status[data-status="running"]::before { background: #7df0ff; }
+.history-status[data-status="completed"]::before { background: #5eead4; }
+.history-status[data-status="failed"]::before { background: #f87171; }
+.history-status[data-status="cancelled"]::before { background: #8c95a6; }
+.history-status[data-status="created"]::before { background: #a78bfa; }
+
+.history-replay {
+  margin: 0.3rem 0.6rem 1rem;
+  border-radius: 0.8rem;
+  border: 1px solid var(--border);
+  background: color-mix(in oklab, var(--surface-raised) 35%, transparent);
+  padding: 0.8rem 0.9rem;
+}
+
+.history-replay-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+
+.history-replay-eyebrow {
+  margin: 0;
+  font-size: 0.56rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #9cefff;
+}
+
+.history-replay-title {
+  margin: 0.2rem 0 0;
+  font-size: 0.84rem;
+  line-height: 1.4;
+}
+
+.history-replay-note {
+  margin: 0.45rem 0 0.55rem;
+  font-size: 0.66rem;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.history-replay-error {
+  border-radius: 0.55rem;
+  border: 1px solid rgba(248, 113, 113, 0.28);
+  background: rgba(248, 113, 113, 0.06);
+  padding: 0.55rem 0.65rem;
+  font-size: 0.72rem;
+  color: #fecaca;
+}
+
+.history-replay-error button {
+  margin-top: 0.4rem;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  font-size: 0.68rem;
+}
+
+/* One line of real facts per row: duration, participants, failure kind. */
+.history-row-fact {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in oklab, var(--surface-raised) 45%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+
+.history-replay-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.35rem 0.8rem;
+  margin: 0 0 0.7rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 0.6rem;
+  border: 1px solid var(--border);
+  background: color-mix(in oklab, var(--surface) 40%, transparent);
+}
+
+.history-replay-facts dt {
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.history-replay-facts dd {
+  margin: 0.1rem 0 0;
+  font-size: 0.72rem;
+  color: color-mix(in oklab, var(--foreground) 90%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+
+/* -------------------------------------------------- accessibility */
+
+/* Every custom surface here is dark and borderless, so the browser's default
+   ring can be invisible on it. One explicit focus indicator for keyboard users,
+   applied only to :focus-visible so pointer users do not see it. */
+:where(button, a, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid #7df0ff;
+  outline-offset: 2px;
+  border-radius: 0.4rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jo *,
+  .jo,
+  .jn-stage,
+  .jn-stage *,
+  .jn-svg,
+  .jflow,
+  .jflow *,
+  .chat-typing i,
+  .chat-streaming,
+  .joverlay,
+  .cc-workspace-dot[data-state="active"] {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .jo-particles,
+  .jo-trails,
+  .jn-traveler {
+    display: none;
+  }
+
+  .jn-link-primary {
+    opacity: 1;
+  }
+}
+
+/* ---------------------------------------------------- responsive */
+
+@media (max-width: 1100px) {
+  .cc-main {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+  }
+
+  .cc-visual {
+    min-height: 460px;
+  }
+
+  .jstage--flow {
+    width: min(100%, 620px);
+    aspect-ratio: 5 / 4;
+  }
+
+  /* Stacked, the workspace is no longer viewport-bounded; give the
+     conversation at least a screen's worth of its own. */
+  .cc-main {
+    height: auto;
+  }
+
+  .cc-chat {
+    min-height: 70dvh;
+  }
+
+  .cc-operation {
+    max-height: none;
+  }
+
+  .cc-operation-body {
+    max-height: 32vh;
+  }
+}
+
+@media (max-width: 820px) {
+  .joverlay {
+    padding: 1rem;
+    overflow-y: auto;
+  }
+
+  .joverlay-inner {
+    gap: 1.25rem;
+  }
+
+  .joverlay-stage {
+    min-height: 280px;
+  }
+
+  .joverlay-panel {
+    max-height: none;
+  }
+
+  .cc-visual {
+    min-height: 420px;
+    padding: 1rem 1rem 0.9rem;
+  }
+
+  .jstage--flow {
+    width: min(100%, 520px);
+    aspect-ratio: 1 / 1;
+  }
+
+  .jflow-label {
+    font-size: 0.6rem;
+  }
+
+  .jflow-state {
+    font-size: 0.5rem;
+  }
+
+  .jflow-node {
+    max-width: 104px;
+  }
+
+  .jo--core {
+    --jo-size: clamp(62px, 20vw, 88px);
+  }
+
+  .cc-operation-meta {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.45rem;
+  }
+
+  .cc-workspace-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .jo {
+    --jo-size: clamp(190px, 54vw, 300px);
+  }
+
+  .jo--hero {
+    --jo-size: clamp(200px, 58vw, 320px);
+  }
+}
+
+@media (max-width: 520px) {
+  .cc-workspace-title {
+    font-size: 1.05rem;
+  }
+
+  /* On a narrow stage the ring of avatars is only a few dozen pixels outside
+     the core, so the core shrinks to leave its labels clear of the sphere. */
+  .jo--hero {
+    --jo-size: clamp(160px, 44vw, 210px);
+  }
+
+  .jn-node {
+    max-width: 92px;
+  }
+
+  .jn-text {
+    padding: 0.1rem 0.32rem;
+  }
+
+  .cc-visual {
+    min-height: 380px;
+  }
+
+  .jn-name {
+    font-size: 0.62rem;
+  }
+
+  .jn-status {
+    font-size: 0.5rem;
+  }
+
+  .joverlay-close {
+    top: 0.75rem;
+    right: 0.75rem;
+  }
+}

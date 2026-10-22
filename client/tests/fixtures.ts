@@ -7,6 +7,8 @@ import type {
   StalledOrder,
   StuckLead,
   StuckLeadsResponse,
+  TaskEvent,
+  TaskEventType,
   UnpaidInvoice,
 } from "@/types/api";
 
@@ -172,4 +174,105 @@ export function stuckLeadsFixture(overrides: Partial<StuckLeadsResponse> = {}): 
 
 export function emptyStuckLeads(): StuckLeadsResponse {
   return { generated_at: "2026-10-21T15:00:00+00:00", days: 14, total: 0, items: [] };
+}
+
+// ---------------------------------------------------------------- task events
+
+let eventCounter = 0;
+
+export function taskEvent(overrides: Partial<TaskEvent> & { type: TaskEventType }): TaskEvent {
+  eventCounter += 1;
+  return {
+    v: 1,
+    event_id: overrides.event_id ?? `evt-${eventCounter}`,
+    task_id: overrides.task_id ?? "run-1",
+    seq: overrides.seq ?? eventCounter,
+    ts: overrides.ts ?? "2026-10-21T15:00:00+00:00",
+    agent_id: overrides.agent_id ?? null,
+    payload: overrides.payload ?? {},
+    type: overrides.type,
+  };
+}
+
+export function taskEventFrame(event: TaskEvent): string {
+  return `event: task_event\ndata: ${JSON.stringify(event)}\n\n`;
+}
+
+export function registryAgents() {
+  // mirrors GET /api/agents with five real capabilities, all idle
+  return {
+    agents: [
+      { id: "master", name: "Master", kind: "orchestrator" as const, purpose: "", tools: [], enabled: true, status: "idle" as const, status_source: "none" as const },
+      { id: "negotiation", name: "Negotiation", kind: "specialist" as const, purpose: "", tools: [], enabled: true, status: "idle" as const, status_source: "none" as const },
+      { id: "collections", name: "Collections", kind: "specialist" as const, purpose: "", tools: [], enabled: true, status: "idle" as const, status_source: "none" as const },
+      { id: "lead_followup", name: "Lead Follow-up", kind: "specialist" as const, purpose: "", tools: [], enabled: true, status: "idle" as const, status_source: "none" as const },
+      { id: "chat", name: "Chat", kind: "assistant" as const, purpose: "", tools: ["get_revenue"], enabled: true, status: "idle" as const, status_source: "none" as const },
+    ],
+  };
+}
+
+export function taskList() {
+  return {
+    tasks: [
+      {
+        task_id: "run-new",
+        last_seq: 4,
+        last_type: "agent.started" as const,
+        status: "running" as const,
+        ts: "2026-10-21T15:05:00+00:00",
+        prompt: "Compare the last two lead pulls",
+        trigger: null,
+        created_at: "2026-10-21T15:04:40+00:00",
+        updated_at: "2026-10-21T15:05:00+00:00",
+        // no terminal event yet, so the backend records no duration
+        duration_ms: null,
+        agents: ["lead_followup"],
+        error_kind: null,
+      },
+      {
+        task_id: "run-old",
+        last_seq: 9,
+        last_type: "task.completed" as const,
+        status: "completed" as const,
+        ts: "2026-10-21T14:00:00+00:00",
+        prompt: null,
+        trigger: "daily_run",
+        created_at: "2026-10-21T13:59:31+00:00",
+        updated_at: "2026-10-21T14:00:00+00:00",
+        duration_ms: 29_000,
+        agents: ["master", "negotiation"],
+        error_kind: null,
+      },
+      {
+        task_id: "run-both",
+        last_seq: 3,
+        last_type: "task.completed" as const,
+        status: "completed" as const,
+        ts: "2026-10-21T13:00:00+00:00",
+        prompt: null,
+        // exactly what the scheduler writes when two things arrived together
+        trigger: "new_quote_and_new_lead",
+        created_at: "2026-10-21T12:59:50+00:00",
+        updated_at: "2026-10-21T13:00:00+00:00",
+        duration_ms: 10_000,
+        agents: ["master"],
+        error_kind: null,
+      },
+      {
+        task_id: "run-unknown",
+        last_seq: 1,
+        last_type: "task.completed" as const,
+        status: "unknown" as const,
+        ts: "2026-10-20T09:00:00+00:00",
+        prompt: null,
+        // a trigger this build does not know: shown as itself, never relabelled
+        trigger: "some_future_signal",
+        created_at: null,
+        updated_at: "2026-10-20T09:00:00+00:00",
+        duration_ms: null,
+        agents: [],
+        error_kind: null,
+      },
+    ],
+  };
 }

@@ -1,132 +1,194 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
-import { Bot, Send } from "lucide-react";
-import { sendMessage } from "@/services/api";
-import type { ChatStreamEvent } from "@/types/api";
+// The one conversation experience.
+//
+// This component is a view over the shared execution controller: both the
+// Command Center workspace and the assistant drawer render the same messages
+// and submit through the same `send`, so there is exactly one conversation and
+// exactly one in-flight request. No raw tool identifiers are shown.
 
-type ChatEntry = { id: string; role: "user" | "assistant"; content: string };
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Bot, RotateCcw, Send, Sparkles } from "lucide-react";
+import { useExecutionController } from "@/components/command-center/execution-context";
+import { ChatMarkdown } from "@/components/chat-markdown";
+import { AnswerProvenance } from "@/components/chat-provenance";
+import { answerEvidence, toolPhrase } from "@/lib/presentation";
 
-function createMessageId(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
+const SUGGESTIONS = [
+  "What did customers pay this week?",
+  "Which invoices are overdue?",
+  "Show me the leads that need follow-up.",
+];
+
+// How close to the bottom counts as "still following the answer". Beyond this
+// the reader has scrolled up on purpose and must not be yanked back down.
+const STICK_TO_BOTTOM_PX = 90;
 
 export function ChatInterface() {
-  const [messages, setMessages] = useState<ChatEntry[]>([]);
   const [message, setMessage] = useState("");
-  const [isSending, setIsSending] = useState(false);
-  const [errorMessage, setErrorMessage] = useState("");
-  const [activeTool, setActiveTool] = useState("");
+  const {
+    messages,
+    isSending,
+    isLive,
+    activeTool,
+    chatError,
+    send,
+    retry,
+    lastTurn,
+    events,
+    resultFrames,
+  } = useExecutionController();
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const submittedMessage = message.trim();
-    if (!submittedMessage || isSending) return;
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Follows new content until the reader scrolls up, then stays put until they
+  // return to the bottom or ask another question.
+  const stickRef = useRef(true);
 
-    const userMessageId = createMessageId();
-    const assistantMessageId = createMessageId();
-    setMessage("");
-    setErrorMessage("");
-    setMessages((currentMessages) => [
-      ...currentMessages,
-      { id: userMessageId, role: "user", content: submittedMessage },
-      { id: assistantMessageId, role: "assistant", content: "" },
-    ]);
-    setIsSending(true);
-    setActiveTool("");
-
-    function handleStreamEvent(streamEvent: ChatStreamEvent) {
-      if (streamEvent.event === "tool") {
-        setActiveTool(streamEvent.data.name);
-      } else if (streamEvent.event === "token") {
-        setActiveTool("");
-        setMessages((currentMessages) =>
-          currentMessages.map((entry) =>
-            entry.id === assistantMessageId
-              ? { ...entry, content: entry.content + streamEvent.data.text }
-              : entry,
-          ),
-        );
-      } else if (streamEvent.event === "reset") {
-        setActiveTool("");
-        setMessages((currentMessages) =>
-          currentMessages.map((entry) =>
-            entry.id === assistantMessageId ? { ...entry, content: "" } : entry,
-          ),
-        );
-      } else if (streamEvent.event === "done") {
-        setActiveTool("");
-        setMessages((currentMessages) =>
-          currentMessages.map((entry) =>
-            entry.id === assistantMessageId
-              ? { ...entry, content: streamEvent.data.text }
-              : entry,
-          ),
-        );
-      } else {
-        setErrorMessage(streamEvent.data.message);
-      }
-    }
-
-    try {
-      await sendMessage(submittedMessage, handleStreamEvent);
-    } catch (error) {
-      console.error("Chat interaction failed.", error);
-      setErrorMessage(
-        error instanceof Error ? error.message : "Message could not be sent. Please try again.",
-      );
-      setMessages((currentMessages) =>
-        currentMessages.filter(
-          (entry) => entry.id !== assistantMessageId || entry.content.length > 0,
-        ),
-      );
-    } finally {
-      setActiveTool("");
-      setIsSending(false);
-    }
+  function trackScroll() {
+    const element = scrollRef.current;
+    if (!element) return;
+    const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
+    stickRef.current = distance <= STICK_TO_BOTTOM_PX;
   }
 
-  return (
-    <section aria-label="Biztek Assistant" className="flex h-full min-h-0 flex-col">
-      <p className="flex shrink-0 items-center gap-2 px-5 py-3 text-xs text-muted">
-        <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-        {isSending ? "Thinking..." : "Ready"}
-      </p>
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (element && stickRef.current) element.scrollTop = element.scrollHeight;
+  }, [messages, isSending]);
 
-      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-3" aria-live="polite">
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    // A new question is an explicit wish to see the answer, so re-attach.
+    stickRef.current = true;
+    if (send(message)) setMessage("");
+  }
+
+  const status =
+    isSending || isLive
+      ? "Working on your request"
+      : lastTurn?.phase === "failed"
+        ? "Needs attention"
+        : "Ready";
+
+  const lastMessageId = messages[messages.length - 1]?.id;
+  // Provenance belongs to a finished answer whose own task events are loaded.
+  // Anything else would be an assurance the browser cannot actually show.
+  const settled =
+    lastTurn
+    && (lastTurn.phase === "completed" || lastTurn.phase === "failed")
+    && lastTurn.taskId !== null
+    && events.taskId === lastTurn.taskId
+      ? lastTurn
+      : null;
+  const evidence = settled ? answerEvidence(events.timeline, events.details) : null;
+
+  return (
+    <section aria-label="Biztek Assistant" className="chat-panel">
+      <div className="chat-head">
+        <span className="chat-head-status">
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${isSending || isLive ? "bg-cyan-300" : "bg-accent"}`}
+            aria-hidden="true"
+          />
+          <span role="status">{status}</span>
+        </span>
+        {activeTool && (
+          <span className="truncate text-[11px] text-cyan-200/80">{toolPhrase(activeTool)}</span>
+        )}
+      </div>
+
+      <div
+        ref={scrollRef}
+        onScroll={trackScroll}
+        className="chat-scroll min-h-0 flex-1 overflow-y-auto px-4 py-3"
+        aria-live="polite"
+        aria-label="Conversation"
+      >
+        {messages.length === 0 && (
+          <div className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <p className="flex items-center gap-2 text-sm font-medium text-foreground">
+                <Sparkles size={14} className="text-cyan-300" aria-hidden="true" />
+                Ask about the business
+              </p>
+              <p className="text-xs leading-5 text-muted">
+                Payments, invoices, quotes, orders and leads. Answers use live ERP records and
+                verified tool results.
+              </p>
+            </div>
+            {/* Suggestions belong to the empty state only; once there is a
+                conversation they would crowd out the messages. */}
+            <div className="flex flex-wrap gap-2">
+              {SUGGESTIONS.map((suggestion) => (
+                <button
+                  key={suggestion}
+                  type="button"
+                  disabled={isSending}
+                  onClick={() => {
+                    stickRef.current = true;
+                    send(suggestion);
+                  }}
+                  className="rounded-full border border-border bg-surface-raised/60 px-3 py-1.5 text-left text-[11px] text-muted transition-colors hover:border-cyan-300/40 hover:text-foreground disabled:opacity-50"
+                >
+                  {suggestion}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {messages.map((entry) =>
           entry.role === "user" ? (
-            <div key={entry.id} className="ml-auto max-w-[85%] rounded-xl rounded-br-sm bg-surface-raised px-4 py-3 text-sm">
-              {entry.content}
+            <div key={entry.id} className="chat-row chat-row--user">
+              <div className="chat-bubble chat-bubble--user">{entry.content}</div>
             </div>
           ) : (
-            <div key={entry.id} className="flex max-w-[95%] gap-3">
-              <span className="mt-1 grid h-7 w-7 shrink-0 place-items-center rounded-md bg-surface-raised text-accent">
-                <Bot size={15} aria-hidden="true" />
+            <div key={entry.id} className="chat-row chat-row--assistant">
+              <span className="chat-avatar" aria-hidden="true">
+                <Bot size={15} />
               </span>
-              <div className="min-w-0">
-                <p className="whitespace-pre-wrap text-sm leading-6 text-muted">{entry.content}</p>
+              <div className="chat-body">
+                {entry.content ? (
+                  <>
+                    <div className="chat-bubble chat-bubble--assistant">
+                      <ChatMarkdown text={entry.content} />
+                      {isLive && entry.id === lastMessageId && (
+                        <span className="chat-streaming" aria-hidden="true" />
+                      )}
+                    </div>
+                    {entry.id === lastMessageId && evidence !== null && (
+                      <AnswerProvenance evidence={evidence} frames={resultFrames} />
+                    )}
+                  </>
+                ) : (
+                  isSending && (
+                    <div className="chat-bubble chat-bubble--assistant" role="status">
+                      <span className="chat-typing" aria-hidden="true">
+                        <i />
+                        <i />
+                        <i />
+                      </span>
+                      <span className="sr-only">
+                        {activeTool ? toolPhrase(activeTool) : "Thinking about your request"}
+                      </span>
+                    </div>
+                  )
+                )}
               </div>
             </div>
           ),
         )}
-        {isSending && !activeTool && messages[messages.length - 1]?.content === "" && (
-          <p className="ml-10 text-sm text-muted" role="status">Waiting for assistant response...</p>
-        )}
-        {isSending && activeTool && (
-          <p className="ml-10 text-xs text-muted" role="status">Agent is using: {activeTool}...</p>
-        )}
       </div>
 
-      <div className="shrink-0 border-t border-border p-4">
-        <form onSubmit={handleSubmit} className="flex items-center gap-3 rounded-xl border border-border bg-surface-raised/70 px-3 py-2">
+      <div className="chat-foot shrink-0">
+        <form
+          onSubmit={handleSubmit}
+          className="flex items-center gap-2 rounded-xl border border-border bg-surface-raised/60 px-2.5 py-1.5 focus-within:border-cyan-300/40"
+        >
           <input
             value={message}
             onChange={(event) => setMessage(event.target.value)}
-            placeholder="Message Biztek Assistant..."
+            placeholder="Ask JARVIS about the business..."
             aria-label="Message Biztek Assistant"
             disabled={isSending}
             className="min-w-0 flex-1 bg-transparent px-1 text-sm text-foreground outline-none placeholder:text-muted disabled:opacity-60"
@@ -135,13 +197,30 @@ export function ChatInterface() {
             type="submit"
             aria-label="Send message"
             disabled={isSending || message.trim().length === 0}
-            className="grid h-8 w-8 place-items-center rounded-md bg-accent text-[#11150b] disabled:cursor-not-allowed disabled:opacity-50"
+            className="grid h-8 w-8 place-items-center rounded-lg bg-gradient-to-br from-cyan-300 to-violet-400 text-[#081016] disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Send size={15} aria-hidden="true" />
           </button>
         </form>
-        {errorMessage && <p className="mt-2 text-center text-xs text-red-400" role="alert">{errorMessage}</p>}
-        <p className="mt-2 text-center text-[11px] text-muted">Connected to the Biztek assistant</p>
+
+        {chatError && (
+          <div className="mt-2 flex items-start justify-between gap-3" role="alert">
+            <p className="text-xs leading-5 text-red-300">{chatError}</p>
+            {lastTurn?.phase === "failed" && (
+              <button
+                type="button"
+                onClick={retry}
+                className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-muted hover:text-foreground"
+              >
+                <RotateCcw size={11} aria-hidden="true" />
+                Try again
+              </button>
+            )}
+          </div>
+        )}
+        <p className="mt-1.5 text-center text-[10px] text-muted">
+          Read-only assistant · verified against backend records
+        </p>
       </div>
     </section>
   );

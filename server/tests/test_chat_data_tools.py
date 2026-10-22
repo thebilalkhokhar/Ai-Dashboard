@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
-from app.agents import chat_tools
+from app.agents import chat, chat_tools
 from app.agents.chat import MAX_TOOL_CALLS, execute_chat
 from app.agents.chat_tools import get_dashboard_metrics, get_payments
 from app.services import metrics
@@ -26,8 +26,10 @@ class FrozenDateTime(datetime):
 
 @pytest.fixture(autouse=True)
 def frozen_clock(monkeypatch):
-    """The tools ask for 'now'; freeze it so date filters are deterministic."""
-    for module in (chat_tools, metrics):
+    """The tools and the named-period resolver ask for 'now'; freeze them so a
+    server-resolved window is deterministic (chat resolves 'today' to the ERP
+    business date and must agree with the tool that filters on it)."""
+    for module in (chat_tools, metrics, chat):
         monkeypatch.setattr(module, "datetime", FrozenDateTime)
 
 
@@ -273,3 +275,126 @@ async def test_chat_headline_equals_the_dashboard_card(monkeypatch):
     monkeypatch.setattr("app.services.redis_client.get_redis", lambda: HeldRedis())
     from_cache = await get_dashboard_metrics(database=database)
     assert from_cache["open_quotes_value"] == "$1,234"  # whatever the tile shows
+
+
+# ----------------------------------------------------------------------- lead pulls
+
+
+def lead_pull(pulled_at: str, leads: list[dict], pull_id: str = "pull-1") -> dict:
+    return {"pull_id": pull_id, "pulled_at": pulled_at, "source": "erp", "leads": leads}
+
+
+def lead_row(lead_id: str, status: str, **over) -> dict:
+    row = {
+        "lead_id": lead_id,
+        "status": status,
+        "company": f"Company {lead_id}",
+        "product": "mylar bag",
+        "quantity": "500",
+        "size": "6x6",
+        "material": "PE",
+        "finish": "matte",
+    }
+    row.update(over)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_compare_lead_pulls_uses_retained_snapshots_and_real_fields():
+    previous = lead_pull(
+        "2026-10-18T09:00:00+00:00",
+        [
+            lead_row("L-1", "New"),
+            lead_row("L-2", "Attempted to Contact", quantity="1000"),
+            lead_row("L-3", "New"),
+            lead_row("L-4", "New"),
+        ],
+        pull_id="pull-old",
+    )
+    latest = lead_pull(
+        "2026-10-21T09:00:00+00:00",
+        [
+            lead_row("L-1", "New"),                    # unchanged
+            lead_row("L-2", "Contacted", quantity="1000"),  # reclassified
+            lead_row("L-3", "New", quantity="750"),     # changed quantity
+            lead_row("L-5", "New"),                     # added; L-4 removed
+        ],
+        pull_id="pull-new",
+    )
+    database = business_db(lead_pulls=Collection([previous, latest]))
+
+    result = await chat_tools.compare_lead_pulls(database=database)
+
+    assert result["available"] is True
+    assert result["window"] == {
+        "from": "2026-10-18T09:00:00+00:00",
+        "to": "2026-10-21T09:00:00+00:00",
+    }
+    assert result["previous_pull"]["pull_id"] == "pull-old"
+    assert result["latest_pull"]["pull_id"] == "pull-new"
+    assert result["summary"] == {
+        "added": 1,
+        "removed": 1,
+        "reclassified": 1,
+        "changed": 1,
+        "unchanged": 1,
+        "incomplete": 0,
+        "duplicate_ids_excluded": 0,
+    }
+    assert result["reclassified"][0]["lead_id"] == "L-2"
+    assert result["reclassified"][0]["previous_status"] == "Attempted to Contact"
+    assert result["reclassified"][0]["current_status"] == "Contacted"
+    assert result["changed"][0]["fields"]["quantity"] == {"from": "500", "to": "750"}
+
+
+@pytest.mark.asyncio
+async def test_compare_lead_pulls_excludes_duplicates_and_incomplete_ids():
+    previous = lead_pull(
+        "2026-10-18T09:00:00+00:00",
+        [lead_row("L-1", "New"), lead_row("", "New")],
+    )
+    latest = lead_pull(
+        "2026-10-21T09:00:00+00:00",
+        [
+            lead_row("L-1", "New"),
+            lead_row("L-1", "Contacted"),  # duplicate id inside one pull
+            {"company": "No id at all", "status": "New"},
+        ],
+    )
+    database = business_db(lead_pulls=Collection([previous, latest]))
+
+    result = await chat_tools.compare_lead_pulls(database=database)
+
+    assert result["summary"]["duplicate_ids_excluded"] == 1
+    assert result["summary"]["incomplete"] == 2
+    assert result["summary"]["reclassified"] == 0
+    # the duplicated id is never compared as if one of the rows were canonical
+    assert "L-1" not in {row["lead_id"] for row in result["reclassified"]}
+    assert "L-1" not in {row["lead_id"] for row in result["changed"]}
+
+
+@pytest.mark.asyncio
+async def test_compare_lead_pulls_states_the_missing_capability_instead_of_fabricating():
+    result = await chat_tools.compare_lead_pulls(database=business_db())
+
+    assert result["available"] is False
+    assert result["snapshots_found"] == 0
+    assert result["current_lead_count"] == 1
+    assert "No historical lead pulls are retained" in result["reason"]
+    assert "lead_pulls" in result["required_capability"]
+    assert "current" in result["suggested_next_step"].lower()
+
+    described = await chat_tools.describe_data(database=business_db())
+    assert described["lead_pull_history"]["comparison_available"] is False
+
+
+@pytest.mark.asyncio
+async def test_compare_lead_pulls_needs_two_snapshots():
+    only = lead_pull("2026-10-21T09:00:00+00:00", [lead_row("L-1", "New")])
+    result = await chat_tools.compare_lead_pulls(
+        database=business_db(lead_pulls=Collection([only]))
+    )
+
+    assert result["available"] is False
+    assert result["snapshots_found"] == 1
+    assert "Only one lead pull" in result["reason"]

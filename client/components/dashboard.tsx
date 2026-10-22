@@ -12,17 +12,20 @@ import { useStuckLeads } from "@/hooks/use-stuck-leads";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { OverviewPanel } from "@/components/dashboard/overview-panel";
 import { LeadsPanel, PipelinePanel, ReceivablesPanel } from "@/components/dashboard/panels";
+import { CommandCenter } from "@/components/command-center/command-center";
 import { formatDateTime } from "@/lib/format";
 
 export function Dashboard({
   actionCenter,
   onSelectCustomer,
+  onTabChange,
 }: {
   actionCenter: ReactNode;
   onSelectCustomer: (customerId: number | null) => void;
+  onTabChange?: (tab: string) => void;
 }) {
   const { snapshot, status, error: liveError, lastEventAt, refresh } = useLiveData();
-  const [activeTab, setActiveTab] = useState("overview");
+  const [activeTab, setActiveTab] = useState("command-center");
 
   const signals = useSignals({
     activeTab,
@@ -36,6 +39,7 @@ export function Dashboard({
 
   function selectTab(tab: string) {
     setActiveTab(tab);
+    onTabChange?.(tab);
     signals.onTabChange(tab);
     if (tab === "leads") leads.setLeadRowLimit(() => ROW_PAGE_SIZE);
   }
@@ -109,12 +113,17 @@ export function Dashboard({
 
       <Tabs value={activeTab} onValueChange={(value) => selectTab(String(value))}>
         <TabsList aria-label="Dashboard sections" className="max-w-full flex-wrap">
+          <TabsTrigger value="command-center">Command Center</TabsTrigger>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="receivables">Receivables</TabsTrigger>
           <TabsTrigger value="pipeline">Pipeline</TabsTrigger>
           <TabsTrigger value="leads">Leads</TabsTrigger>
           <TabsTrigger value="ai-review">AI review</TabsTrigger>
         </TabsList>
+
+        <TabsContent value="command-center">
+          <CommandCenter />
+        </TabsContent>
 
         <TabsContent value="overview" className="space-y-5">
           <OverviewPanel

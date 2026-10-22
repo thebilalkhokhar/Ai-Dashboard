@@ -273,14 +273,20 @@ async def test_sse_streams_tokens_before_the_model_finishes():
     model = FakeStreamingModel(["The dashboard ", "is ready."], gate)
     stream = stream_chat("thread-stream", "status?", db, model=model, tools=[])
 
+    # The turn's task id is announced first, before any answer text.
+    first = await asyncio.wait_for(anext(stream), timeout=2)
+    assert first["event"] == "task"
+    assert isinstance(first["data"]["task_id"], str) and first["data"]["task_id"]
+    assert first["data"]["thread_id"] == "thread-stream"
+
     # If the backend buffered the full answer, this would block until the gate
     # is set and the test would time out.
-    first = await asyncio.wait_for(anext(stream), timeout=2)
-    assert first == {"event": "token", "data": {"text": "The dashboard "}}
+    second = await asyncio.wait_for(anext(stream), timeout=2)
+    assert second == {"event": "token", "data": {"text": "The dashboard "}}
 
     gate.set()
     rest = [event async for event in stream]
-    tokens = [first, *rest]
+    tokens = [first, second, *rest]
     text = "".join(
         event["data"]["text"] for event in tokens if event["event"] == "token"
     )
@@ -314,11 +320,19 @@ async def test_sse_events_order_tool_then_tokens_then_done():
         )
     ]
     names = [event["event"] for event in events]
-    assert names[0] == "tool"
+    assert names[0] == "task"
     assert "token" in names
     assert names[-1] == "done"
-    assert names.index("tool") < names.index("token") < names.index("done")
-    assert events[-1]["data"] == {"text": "There are 4 open quotes.", "thread_id": "thread-a"}
+    assert names.index("task") < names.index("tool") < names.index("token") < names.index("done")
+    # the done payload carries the same task id the stream opened with, so the
+    # answer can be tied to the task-event stream that produced it
+    task_id = events[0]["data"]["task_id"]
+    assert task_id
+    assert events[-1]["data"] == {
+        "text": "There are 4 open quotes.",
+        "thread_id": "thread-a",
+        "task_id": task_id,
+    }
     assert len(db.chat_logs.inserted) == 1
 
 
@@ -396,6 +410,85 @@ def test_urdu_and_roman_urdu_digits_are_validated_the_same_way():
     assert validate_numeric_claims("۲۴ quotes baki hain.", results) == []
     assert validate_numeric_claims("Quotes ki tadaad 24 hai.", results) == []
     assert validate_numeric_claims("۲۷ quotes baki hain.", results)
+
+
+def page(total, returned, offset=0, limit=10, **over):
+    """One real page block, as the record tools describe their own answer."""
+    block = {
+        "offset": offset,
+        "limit": limit,
+        "total_count": total,
+        "returned": returned,
+        "remaining_count": max(0, total - offset - returned),
+        "has_more": offset + returned < total,
+        "next_offset": offset + returned if offset + returned < total else None,
+        "items": [],
+    }
+    block.update(over)
+    return {"tool": "get_payments", "result": block}
+
+
+def test_a_verified_page_fact_is_not_treated_as_an_invented_number():
+    """RC5: 34 matched and 29 delivered really does leave 5 - say it."""
+    from app.agents.chat import validate_numeric_claims
+
+    results = [page(34, 29)]
+    assert validate_numeric_claims("34 payments match, 29 are listed here and 5 remain.", results) == []
+    assert validate_numeric_claims("5 of the 34 payments are still missing.", results) == []
+    # and a wrong remainder is still wrong
+    assert validate_numeric_claims("34 payments match and 6 remain.", results)
+
+
+def test_a_second_page_reports_its_own_place_in_the_result_set():
+    from app.agents.chat import validate_numeric_claims
+
+    results = [page(34, 10, offset=0), page(34, 10, offset=10)]
+    assert validate_numeric_claims(
+        "The first page listed 10 of 34 payments and the next 10 more, so 20 are listed and 14 remain.",
+        results,
+    ) == []
+    assert validate_numeric_claims("21 payments are listed and 13 remain.", results)
+
+
+def test_a_page_block_does_not_loosen_the_guard_for_other_numbers():
+    """RC5 must not become a general licence to count: only the tool's own numbers pass."""
+    from app.agents.chat import validate_numeric_claims
+
+    results = [page(34, 29)]
+    assert validate_numeric_claims("5 payments remain.", results) == []
+    # 6 and 7 exist only in a subtraction the model did itself
+    assert validate_numeric_claims("6 payments remain.", results)
+    assert validate_numeric_claims("7 payments arrived late.", results)
+    # a count never becomes an amount
+    assert validate_numeric_claims("29 payments remain, worth $14,500.", results)
+
+
+@pytest.mark.asyncio
+async def test_show_all_reports_the_real_remainder_instead_of_the_fallback():
+    """The exact regression: a verified count must not fall back to 'couldn't verify'."""
+    from app.agents.chat import execute_chat
+    from app.agents.chat_tools import invoke_tool
+    from test_chat_data_tools import Collection, business_db, payment
+
+    rows = [payment(index=index) for index in range(1, 35)]
+    database = business_db(payments_flat=Collection(rows))
+    first = await invoke_tool("get_payments", {"limit": 10}, database=database)
+    claim = (
+        f"{first['total_count']} payments match, {first['returned']} are listed here "
+        f"and {first['remaining_count']} remain."
+    )
+
+    model = FakeModel([
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "get_payments", "args": {"limit": 10}, "id": "call-1", "type": "tool_call"}],
+        ),
+        AIMessage(content=claim),
+    ])
+    result = await execute_chat("show all the payments", [], model=model, database=database)
+
+    assert result["text"] == claim
+    assert "couldn't verify" not in result["text"]
 
 
 @pytest.mark.asyncio
