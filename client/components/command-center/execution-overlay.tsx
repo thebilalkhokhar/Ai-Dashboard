@@ -14,7 +14,7 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import { RotateCcw, X } from "lucide-react";
-import { deriveOperation, deriveStages, taskTitle } from "@/lib/presentation";
+import { deriveExecutionTree, deriveOperation, taskTitle } from "@/lib/presentation";
 import { isLivePhase } from "@/lib/task-events";
 import { OperationFlow } from "@/components/command-center/operation-flow";
 import { ActivityTimeline } from "@/components/command-center/activity-timeline";
@@ -38,9 +38,15 @@ export function ExecutionOverlay() {
   const hasAgentActivity = events.timeline.some((entry) => entry.type.startsWith("agent."));
   const hasToolActivity = events.timeline.some((entry) => entry.type.startsWith("tool."));
 
-  const stages = useMemo(
-    () => deriveStages({ execution, timeline: events.timeline, agents: events.agents }),
-    [execution, events.timeline, events.agents],
+  const tree = useMemo(
+    () =>
+      deriveExecutionTree({
+        execution,
+        timeline: events.timeline,
+        agents: events.agents,
+        details: events.details,
+      }),
+    [execution, events.timeline, events.agents, events.details],
   );
 
   const operation = useMemo(
@@ -78,7 +84,7 @@ export function ExecutionOverlay() {
       <div className="joverlay-inner">
         <div className="joverlay-stage">
           <div className="jstage jstage--flow" data-testid="overlay-operation-flow">
-            <OperationFlow stages={stages} execution={execution} />
+            <OperationFlow tree={tree} execution={execution} />
           </div>
           <p className="joverlay-stage-note" role="status">
             {active

@@ -14,9 +14,9 @@ import { useEffect, useMemo, useState } from "react";
 import { useExecutionController } from "@/components/command-center/execution-context";
 import { isLivePhase, mergeAgentNodes } from "@/lib/task-events";
 import {
+  deriveExecutionTree,
   deriveOperation,
   deriveOrbState,
-  deriveStages,
   ORB_CAPTION,
   PHASE_CAPTION,
   taskTitle,
@@ -48,9 +48,15 @@ export function CommandCenter() {
     [agents, events.agents],
   );
 
-  const stages = useMemo(
-    () => deriveStages({ execution: phase, timeline: events.timeline, agents: events.agents }),
-    [phase, events.timeline, events.agents],
+  const tree = useMemo(
+    () =>
+      deriveExecutionTree({
+        execution: phase,
+        timeline: events.timeline,
+        agents: events.agents,
+        details: events.details,
+      }),
+    [phase, events.timeline, events.agents, events.details],
   );
 
   const orbState = deriveOrbState({
@@ -109,7 +115,7 @@ export function CommandCenter() {
           {showFlow ? (
             <div className="jstage jstage--flow cc-stage" data-testid="cc-operation-flow">
               <OperationFlow
-                stages={stages}
+                tree={tree}
                 execution={phase}
                 core={<JarvisOrb state={orbState} label={ORB_CAPTION[orbState]} className="jo--core" />}
               />

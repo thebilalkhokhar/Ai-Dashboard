@@ -1,64 +1,50 @@
 "use client";
 
-// The operation tree: the route one request actually took, drawn as a
-// growing tree instead of a flat line.
+// The operation tree: the route one request actually took, drawn LARGE.
 //
-// The root is the assistant that picked the request up. When one of its
-// lookups belongs to a registered specialist's territory (unpaid invoices
-// to Collections, open quotes to Negotiation, stuck leads to Lead
-// Follow-up, business totals to Master AI), the tree grows a branch for
-// that specialist and hangs the real lookup under it - the hand-off the
-// reader asked to see. Plain record lookups stay as leaves on the root.
-// The last node is the response being written from the verified results.
+// The root is the assistant that picked the request up (its face, or the
+// living core in the workspace). When one of its lookups belongs to a
+// registered specialist's territory, the tree grows a full branch node -
+// that specialist's own avatar - and hangs the real lookup under it.
+// Under each lookup hang the data stages it genuinely performed: the
+// filtering stage with the backend's real matched/returned counts, and
+// the aggregation marker when the tool totalled values in Python. Then
+// the answer-validation stage (the numeric guard's real verdict) and
+// the response node close the tree.
 //
-// Every node, branch and particle comes from a persisted task event or
-// the live chat stream for THIS task: a branch exists only because a
-// tool of its territory really ran, a link only flows while the stage it
-// feeds is genuinely active, and a node is only drawn finished when its
-// own completion event arrived. The tree grows because events arrive,
-// never because a timer fired.
+// Every node, edge and count comes from this task's persisted events:
+// a branch exists only because a tool of its territory really ran, a
+// link flows only while the stage it feeds is active, counts are the
+// backend's own numbers, and nothing is timed or interpolated. Nodes
+// are buttons: selecting one shows its recorded detail under the stage.
 
-import { useId, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
+import { ShieldCheck } from "lucide-react";
 import { useReducedMotion } from "@/hooks/use-reduced-motion";
 import type { ExecutionPhase } from "@/lib/task-events";
-import {
-  agentLabel,
-  toolDomainAgent,
-  type OperationStage,
-  type StageState,
+import type {
+  ExecutionTree,
+  OperationStage,
+  StageState,
+  TreeToolStage,
 } from "@/lib/presentation";
 
+const AGENT_CLIPS: Record<string, string> = {
+  master: "/master.mp4",
+  negotiation: "/negotiations.mp4",
+  collections: "/collections.mp4",
+  lead_followup: "/leads.mp4",
+  chat: "/chat.mp4",
+};
+
 // Tree columns, in percent of the stage.
-const ROOT_X = 9;
-const BRANCH_X = 38;
-const LEAF_X = 65;
-const OUT_X = 93;
+const ROOT_X = 8;
+const BRANCH_X = 29;
+const LEAF_X = 50;
+const PROC_X = 69;
+const VALID_X = 85;
+const OUT_X = 94;
 const CENTER_Y = 50;
-
-interface PlacedStage extends OperationStage {
-  x: number;
-  y: number;
-  column: "intake" | "middle" | "out";
-  order: number;
-}
-
-interface Branch {
-  agentId: string;
-  label: string;
-  state: StageState;
-  x: number;
-  y: number;
-  order: number;
-  leaves: PlacedStage[];
-}
-
-interface Edge {
-  key: string;
-  from: { x: number; y: number };
-  to: { x: number; y: number };
-  flowing: boolean;
-  settled: boolean;
-}
 
 function stateWord(state: StageState): string {
   switch (state) {
@@ -66,7 +52,6 @@ function stateWord(state: StageState): string {
       return "working";
     case "done":
       return "done";
-    // "stopped" would read as a cancellation this system cannot perform
     case "failed":
       return "failed";
     default:
@@ -74,340 +59,534 @@ function stateWord(state: StageState): string {
   }
 }
 
-// Worst state wins while anything is still moving: a branch is working
-// while any of its lookups is, failed only when a lookup failed and none
-// is still running, done when every lookup finished.
-function branchState(leaves: OperationStage[]): StageState {
-  if (leaves.some((leaf) => leaf.state === "active")) return "active";
-  if (leaves.some((leaf) => leaf.state === "failed")) return "failed";
-  if (leaves.length > 0 && leaves.every((leaf) => leaf.state === "done")) return "done";
-  return "pending";
+function formatDuration(ms: number | null): string | null {
+  if (ms === null) return null;
+  if (ms < 1000) return `${ms} ms`;
+  return `${(ms / 1000).toFixed(1)} s`;
 }
 
-// Lay the stages out as a tree. The middle stages become rows: one row
-// per specialist branch (its lookups fan out to the leaf column), one row
-// per direct lookup, one row per agent stage a batch run reported. Rows
-// spread around the centre, so the tree grows taller - and settles back -
-// with the amount of real work this request needed.
-function layout(stages: OperationStage[]) {
-  const intake = stages[0];
-  const out = stages[stages.length - 1];
-  const middle = stages.slice(1, -1);
-
-  const agentStages = middle.filter((stage) => stage.id.startsWith("agent-"));
-  const toolStages = middle.filter(
-    (stage) => stage.id.startsWith("tool-") && stage.id !== "tool-more",
-  );
-  const moreStage = middle.find((stage) => stage.id === "tool-more");
-
-  // group the lookups by the territory they belong to, in first-use order
-  const domainOrder: string[] = [];
-  const byDomain = new Map<string, OperationStage[]>();
-  for (const stage of toolStages) {
-    const domain = toolDomainAgent(stage.id.slice("tool-".length));
-    if (!byDomain.has(domain)) {
-      byDomain.set(domain, []);
-      domainOrder.push(domain);
-    }
-    byDomain.get(domain)!.push(stage);
-  }
-
-  type Row =
-    | { kind: "branch"; branch: Branch }
-    | { kind: "leaf"; stage: OperationStage }
-    | { kind: "agent"; stage: OperationStage }
-    | { kind: "more"; stage: OperationStage };
-
-  const rows: Row[] = [];
-  for (const domain of domainOrder) {
-    const leaves = byDomain.get(domain)!;
-    if (domain === "chat") {
-      for (const leaf of leaves) rows.push({ kind: "leaf", stage: leaf });
-    } else {
-      rows.push({
-        kind: "branch",
-        branch: {
-          agentId: domain,
-          label: agentLabel(domain),
-          state: branchState(leaves),
-          x: BRANCH_X,
-          y: CENTER_Y,
-          order: 0,
-          leaves: leaves.map((leaf) => ({ ...leaf, x: LEAF_X, y: CENTER_Y, column: "middle" as const, order: 0 })),
-        },
-      });
-    }
-  }
-  for (const stage of agentStages) rows.push({ kind: "agent", stage });
-  if (moreStage) rows.push({ kind: "more", stage: moreStage });
-
-  // spread the rows around the centre; a branch's leaves fan around it
-  const span = Math.min(72, Math.max(0, (rows.length - 1) * 23));
-  const startY = CENTER_Y - span / 2;
-  const step = rows.length > 1 ? span / (rows.length - 1) : 0;
-  let order = 1;
-
-  const placedIntake: PlacedStage = { ...intake, x: ROOT_X, y: CENTER_Y, column: "intake", order: 0 };
-  const placedOut: PlacedStage = { ...out, x: OUT_X, y: CENTER_Y, column: "out", order: 99 };
-  const branches: Branch[] = [];
-  const rowNodes: PlacedStage[] = [];
-
-  rows.forEach((row, index) => {
-    const y = rows.length === 1 ? CENTER_Y : startY + index * step;
-    if (row.kind === "branch") {
-      const branch = row.branch;
-      branch.y = y;
-      branch.order = order++;
-      const leafSpan = Math.min(30, Math.max(0, (branch.leaves.length - 1) * 13));
-      branch.leaves = branch.leaves.map((leaf, leafIndex) => ({
-        ...leaf,
-        y:
-          branch.leaves.length === 1
-            ? y
-            : y - leafSpan / 2 + (leafSpan / Math.max(1, branch.leaves.length - 1)) * leafIndex,
-        order: order++,
-      }));
-      branches.push(branch);
-    } else {
-      rowNodes.push({ ...row.stage, x: BRANCH_X, y, column: "middle", order: order++ });
-    }
-  });
-
-  const edges: Edge[] = [];
-  const root = { x: ROOT_X, y: CENTER_Y };
-  const outPoint = { x: OUT_X, y: CENTER_Y };
-  const outFlowing = placedOut.state === "active";
-  const outSettled = placedOut.state === "done";
-
-  for (const branch of branches) {
-    edges.push({
-      key: `root-${branch.agentId}`,
-      from: root,
-      to: { x: branch.x, y: branch.y },
-      flowing: branch.state === "active",
-      settled: branch.state === "done",
-    });
-    for (const leaf of branch.leaves) {
-      edges.push({
-        key: `${branch.agentId}-${leaf.id}`,
-        from: { x: branch.x, y: branch.y },
-        to: { x: leaf.x, y: leaf.y },
-        flowing: leaf.state === "active",
-        settled: leaf.state === "done" && branch.state !== "active",
-      });
-      edges.push({
-        key: `${leaf.id}-out`,
-        from: { x: leaf.x, y: leaf.y },
-        to: outPoint,
-        flowing: outFlowing && leaf.state === "done",
-        settled: outSettled,
-      });
-    }
-  }
-  for (const node of rowNodes) {
-    edges.push({
-      key: `root-${node.id}`,
-      from: root,
-      to: { x: node.x, y: node.y },
-      flowing: node.state === "active",
-      settled: node.state === "done",
-    });
-    edges.push({
-      key: `${node.id}-out`,
-      from: { x: node.x, y: node.y },
-      to: outPoint,
-      flowing: outFlowing && node.state === "done",
-      settled: outSettled,
-    });
-  }
-  if (branches.length === 0 && rowNodes.length === 0) {
-    edges.push({
-      key: "root-out",
-      from: root,
-      to: outPoint,
-      flowing: outFlowing,
-      settled: outSettled,
-    });
-  }
-
-  const leaves = branches.flatMap((branch) => branch.leaves);
-  return { placedIntake, placedOut, branches, rowNodes, leaves, edges };
+interface Placed {
+  id: string;
+  x: number;
+  y: number;
 }
 
-// A bowed path between two points, in the 0..100 viewBox.
-function link(from: { x: number; y: number }, to: { x: number; y: number }): string {
+interface Edge {
+  key: string;
+  from: Placed;
+  to: Placed;
+  flowing: boolean;
+  settled: boolean;
+}
+
+interface DetailInfo {
+  title: string;
+  state: StageState;
+  lines: string[];
+}
+
+function link(from: Placed, to: Placed): string {
   const mx = (from.x + to.x) / 2;
   const my = (from.y + to.y) / 2;
   const dy = to.y - from.y;
   const dx = to.x - from.x;
-  return `M ${from.x} ${from.y} Q ${mx - dy * 0.14} ${my + dx * 0.14} ${to.x} ${to.y}`;
+  return `M ${from.x} ${from.y} Q ${mx - dy * 0.12} ${my + dx * 0.12} ${to.x} ${to.y}`;
 }
 
 export function OperationFlow({
-  stages,
+  tree,
   execution,
   core,
 }: {
-  stages: OperationStage[];
+  tree: ExecutionTree;
   execution: ExecutionPhase;
-  // the request's origin: the living core, sized for this view rather than the
-  // large idle hero orb, which belongs to the waiting state
   core?: ReactNode;
 }) {
   const reducedMotion = useReducedMotion();
   const rawId = useId();
   const uid = rawId.replace(/[^a-zA-Z0-9_-]/g, "");
-  const { placedIntake, placedOut, branches, rowNodes, leaves, edges } = layout(stages);
+  const [selected, setSelected] = useState<string | null>(null);
 
-  function renderStage(stage: PlacedStage, leaf = false) {
-    if (stage.column === "intake" && core) {
-      return (
-        <div
-          key={stage.id}
-          className="jflow-node jflow-node--core"
-          data-state={stage.state}
-          data-testid={`flow-node-${stage.id}`}
-          style={{ left: `${stage.x}%`, top: `${stage.y}%`, animationDelay: "0ms" }}
-        >
-          <span className="jflow-core">{core}</span>
-          <span className="jflow-text">
-            <span className="jflow-label">{stage.label}</span>
-            <span className="jflow-state">{stateWord(stage.state)}</span>
-          </span>
-        </div>
-      );
+  // ------------------------------------------------------------ layout
+  // One row slot per lookup / agent stage; branches sit at the centre of
+  // their lookups' slots, so the tree grows taller with the real work.
+  const hasBranches = tree.branches.length > 0;
+  const leafX = hasBranches ? LEAF_X : BRANCH_X;
+  const allTools = [...tree.branches.flatMap((b) => b.tools), ...tree.directTools];
+  const slots: { kind: "tool" | "agent" | "more"; ref: unknown }[] = [];
+  for (const branch of tree.branches) for (const tool of branch.tools) slots.push({ kind: "tool", ref: tool });
+  for (const tool of tree.directTools) slots.push({ kind: "tool", ref: tool });
+  for (const stage of tree.agentStages) slots.push({ kind: "agent", ref: stage });
+  if (tree.moreStage) slots.push({ kind: "more", ref: tree.moreStage });
+
+  const span = Math.min(78, Math.max(0, (slots.length - 1) * 19));
+  const slotY = (index: number) =>
+    slots.length <= 1 ? CENTER_Y : CENTER_Y - span / 2 + (span / (slots.length - 1)) * index;
+
+  const rootP: Placed = { id: "root", x: ROOT_X, y: CENTER_Y };
+  const outP: Placed = { id: "out", x: OUT_X, y: CENTER_Y };
+  const validP: Placed | null = tree.validation ? { id: "validation", x: VALID_X, y: CENTER_Y } : null;
+
+  const toolPos = new Map<string, Placed>();
+  const branchPos = new Map<string, Placed>();
+  const stagePos = new Map<string, Placed>();
+  slots.forEach((slot, index) => {
+    const y = slotY(index);
+    if (slot.kind === "tool") {
+      const tool = slot.ref as TreeToolStage;
+      toolPos.set(tool.stage.id, { id: tool.stage.id, x: leafX, y });
+    } else {
+      const stage = slot.ref as OperationStage;
+      stagePos.set(stage.id, { id: stage.id, x: leafX, y });
     }
-    return (
-      <div
-        key={stage.id}
-        className={`jflow-node jflow-node--${stage.column}${leaf ? " jflow-node--leaf" : ""}`}
-        data-state={stage.state}
-        data-testid={`flow-node-${stage.id}`}
-        style={{
-          left: `${stage.x}%`,
-          top: `${stage.y}%`,
-          animationDelay: `${Math.min(stage.order, 8) * 70}ms`,
-        }}
-      >
-        <span className="jflow-dot">
-          {stage.state === "done" && <span className="jflow-check" aria-hidden="true" />}
-          {stage.state === "failed" && <span className="jflow-cross" aria-hidden="true" />}
-          {stage.state === "active" && !reducedMotion && (
-            <>
-              <span className="jflow-pulse" aria-hidden="true" />
-              <span className="jflow-ring" aria-hidden="true" />
-            </>
-          )}
-        </span>
-        <span className="jflow-text">
-          <span className="jflow-label">{stage.label}</span>
-          <span className="jflow-state">{stateWord(stage.state)}</span>
-        </span>
-      </div>
-    );
+  });
+  for (const branch of tree.branches) {
+    const ys = branch.tools.map((tool) => toolPos.get(tool.stage.id)!.y);
+    const y = ys.reduce((a, b) => a + b, 0) / Math.max(1, ys.length);
+    branchPos.set(branch.agentId, { id: `branch-${branch.agentId}`, x: BRANCH_X, y });
   }
 
-  return (
-    <div
-      className="jflow"
-      data-execution={execution}
-      role="group"
-      aria-label="Assistant operation flow"
-    >
-      <svg viewBox="0 0 100 100" className="jflow-svg" aria-hidden="true">
-        <defs>
-          <linearGradient id={`${uid}-flow`} x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0%" stopColor="#7df0ff" />
-            <stop offset="55%" stopColor="#a78bfa" />
-            <stop offset="100%" stopColor="#f0abfc" />
-          </linearGradient>
-          <filter id={`${uid}-soft`} x="-30%" y="-30%" width="160%" height="160%">
-            <feGaussianBlur stdDeviation="0.7" result="blur" />
-            <feMerge>
-              <feMergeNode in="blur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-        </defs>
+  const procPos = new Map<string, Placed>();
+  for (const tool of allTools) {
+    const base = toolPos.get(tool.stage.id)!;
+    const kinds = [
+      tool.filter ? "filter" : null,
+      tool.aggregation ? "aggregation" : null,
+    ].filter(Boolean) as string[];
+    kinds.forEach((kind, index) => {
+      const offset = kinds.length === 1 ? 0 : index === 0 ? -7 : 7;
+      procPos.set(`${kind}-${tool.tool}`, { id: `${kind}-${tool.tool}`, x: PROC_X, y: base.y + offset });
+    });
+  }
 
-        {edges.map((edge, index) => {
-          const pathId = `${uid}-edge-${index}`;
+  // ------------------------------------------------------------- edges
+  const edges: Edge[] = [];
+  const terminal: Placed[] = [];
+  const pushEdge = (key: string, from: Placed, to: Placed, toState: StageState, fromState: StageState) => {
+    edges.push({
+      key,
+      from,
+      to,
+      flowing: toState === "active",
+      settled: fromState === "done" && toState === "done",
+    });
+  };
+  for (const branch of tree.branches) {
+    const bp = branchPos.get(branch.agentId)!;
+    pushEdge(`root-${branch.agentId}`, rootP, bp, branch.state, tree.root.state);
+    for (const tool of branch.tools) {
+      const tp = toolPos.get(tool.stage.id)!;
+      pushEdge(`${branch.agentId}-${tool.stage.id}`, bp, tp, tool.stage.state, branch.state);
+    }
+  }
+  for (const tool of tree.directTools) {
+    pushEdge(`root-${tool.stage.id}`, rootP, toolPos.get(tool.stage.id)!, tool.stage.state, tree.root.state);
+  }
+  for (const stage of tree.agentStages) {
+    pushEdge(`root-${stage.id}`, rootP, stagePos.get(stage.id)!, stage.state, tree.root.state);
+  }
+  if (tree.moreStage) {
+    pushEdge(`root-${tree.moreStage.id}`, rootP, stagePos.get(tree.moreStage.id)!, tree.moreStage.state, tree.root.state);
+  }
+  for (const tool of allTools) {
+    const tp = toolPos.get(tool.stage.id)!;
+    let last = tp;
+    for (const kind of ["filter", "aggregation"] as const) {
+      const present = kind === "filter" ? tool.filter : tool.aggregation;
+      if (!present) continue;
+      const pp = procPos.get(`${kind}-${tool.tool}`)!;
+      pushEdge(`${tool.stage.id}-${kind}`, tp, pp, "done", tool.stage.state);
+      last = pp;
+    }
+    terminal.push(last);
+  }
+  for (const stage of tree.agentStages) terminal.push(stagePos.get(stage.id)!);
+  if (tree.moreStage) terminal.push(stagePos.get(tree.moreStage.id)!);
+  if (terminal.length === 0) terminal.push(rootP);
+
+  if (validP && tree.validation) {
+    for (const node of terminal) {
+      pushEdge(`${node.id}-validation`, node, validP, tree.validation.state, "done");
+    }
+    pushEdge("validation-out", validP, outP, tree.response.state, tree.validation.state);
+  } else {
+    for (const node of terminal) {
+      pushEdge(`${node.id}-out`, node, outP, tree.response.state, "done");
+    }
+  }
+
+  // ------------------------------------------------------------ detail
+  function toolDetail(tool: TreeToolStage): DetailInfo {
+    const lines = [tool.stage.detail];
+    const duration = formatDuration(tool.durationMs);
+    if (duration) lines.push(`Lookup took ${duration}.`);
+    if (tool.counts) {
+      lines.push(
+        `${tool.counts.returned} of ${tool.counts.total} matched records returned` +
+          (tool.counts.remaining !== null ? `, ${tool.counts.remaining} still to fetch.` : "."),
+      );
+    }
+    return { title: tool.stage.label, state: tool.stage.state, lines };
+  }
+
+  const details = new Map<string, DetailInfo>();
+  details.set(tree.root.id, {
+    title: tree.root.label,
+    state: tree.root.state,
+    lines: [tree.root.detail, "Picked up the request and routed the work."],
+  });
+  for (const branch of tree.branches) {
+    details.set(`branch-${branch.agentId}`, {
+      title: branch.label,
+      state: branch.state,
+      lines: [
+        "Routed by the Chat Assistant - this territory's lookups run under it.",
+        ...branch.tools.map((tool) => `${tool.stage.label}: ${stateWord(tool.stage.state)}`),
+      ],
+    });
+    for (const tool of branch.tools) details.set(tool.stage.id, toolDetail(tool));
+  }
+  for (const tool of tree.directTools) details.set(tool.stage.id, toolDetail(tool));
+  for (const stage of tree.agentStages) {
+    details.set(stage.id, { title: stage.label, state: stage.state, lines: [stage.detail] });
+  }
+  if (tree.moreStage) {
+    details.set(tree.moreStage.id, {
+      title: tree.moreStage.label,
+      state: tree.moreStage.state,
+      lines: [tree.moreStage.detail],
+    });
+  }
+  for (const tool of allTools) {
+    if (tool.filter) {
+      details.set(`filter-${tool.tool}`, {
+        title: "Filtering",
+        state: "done",
+        lines: [
+          `${tool.filter.matched} records matched the request.`,
+          `${tool.filter.returned} were returned in this page.`,
+          tool.filter.remaining !== null
+            ? `${tool.filter.remaining} more can still be fetched.`
+            : "The walk over the matched set is complete.",
+        ],
+      });
+    }
+    if (tool.aggregation) {
+      details.set(`aggregation-${tool.tool}`, {
+        title: "Aggregation",
+        state: "done",
+        lines: [
+          `The backend totalled ${tool.aggregation.aggregate} in Python.`,
+          "The value itself travels with the answer's evidence, never as an animation.",
+        ],
+      });
+    }
+  }
+  if (tree.validation) {
+    details.set("validation", {
+      title: "Answer validation",
+      state: tree.validation.state,
+      lines: [
+        tree.validation.outcome === "corrected"
+          ? "The first draft cited a figure the records did not support; it was regenerated and then verified."
+          : tree.validation.outcome === "replaced"
+            ? "The draft could not be verified, so it was replaced with a summary built only from the recorded results."
+            : tree.validation.outcome === "passed"
+              ? "Every figure in the answer was checked against this turn's recorded tool results."
+              : "Checking every figure in the answer against the recorded tool results.",
+      ],
+    });
+  }
+  details.set(tree.response.id, {
+    title: tree.response.label,
+    state: tree.response.state,
+    lines: [tree.response.detail],
+  });
+
+  const selectedDetail = selected ? details.get(selected) : undefined;
+
+  // ------------------------------------------------------------- nodes
+  return (
+    <div className="jtree" data-execution={execution} role="group" aria-label="Assistant operation tree">
+      <div className="jtree-stage">
+        <svg viewBox="0 0 100 100" className="jtree-svg" aria-hidden="true" preserveAspectRatio="none">
+          <defs>
+            <linearGradient id={`${uid}-flow`} x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stopColor="#7df0ff" />
+              <stop offset="55%" stopColor="#a78bfa" />
+              <stop offset="100%" stopColor="#f0abfc" />
+            </linearGradient>
+          </defs>
+          {edges.map((edge, index) => {
+            const pathId = `${uid}-edge-${index}`;
+            return (
+              <g key={edge.key} className="jtree-edge" data-flowing={edge.flowing ? "true" : "false"} data-settled={edge.settled ? "true" : "false"}>
+                <path id={pathId} d={link(edge.from, edge.to)} className="jtree-line" pathLength={1} vectorEffect="non-scaling-stroke" />
+                {edge.flowing && !reducedMotion && (
+                  <>
+                    <path d={link(edge.from, edge.to)} className="jtree-line jtree-line-flow" stroke={`url(#${uid}-flow)`} pathLength={1} vectorEffect="non-scaling-stroke" />
+                    <circle className="jtree-particle" r="0.65">
+                      <animateMotion dur={`${1.7 + (index % 3) * 0.35}s`} repeatCount="indefinite" begin={`${(index % 4) * 0.3}s`}>
+                        <mpath href={`#${pathId}`} />
+                      </animateMotion>
+                    </circle>
+                  </>
+                )}
+              </g>
+            );
+          })}
+        </svg>
+
+        {/* root */}
+        <button
+          type="button"
+          className="jtree-node jtree-node--root"
+          data-state={tree.root.state}
+          data-testid={`flow-node-${tree.root.id}`}
+          style={{ left: `${ROOT_X}%`, top: `${CENTER_Y}%` }}
+          onClick={() => setSelected(tree.root.id)}
+          aria-label={`${tree.root.label}: ${stateWord(tree.root.state)}`}
+        >
+          {core ? (
+            <span className="jtree-core">{core}</span>
+          ) : (
+            <span className="jtree-avatar jtree-avatar--lg">
+              <video className="jtree-clip" src={AGENT_CLIPS.chat} aria-hidden="true" muted loop playsInline autoPlay={!reducedMotion} preload="metadata" tabIndex={-1} />
+              {tree.root.state === "done" && <span className="jtree-badge jtree-badge--done" aria-hidden="true" />}
+              {tree.root.state === "failed" && <span className="jtree-badge jtree-badge--failed" aria-hidden="true" />}
+              {tree.root.state === "active" && !reducedMotion && <span className="jtree-ring" aria-hidden="true" />}
+            </span>
+          )}
+          <span className="jtree-text">
+            <span className="jtree-label">{tree.root.label}</span>
+            <span className="jtree-state">{stateWord(tree.root.state)}</span>
+          </span>
+        </button>
+
+        {/* branches */}
+        {tree.branches.map((branch) => {
+          const pos = branchPos.get(branch.agentId)!;
+          const clip = AGENT_CLIPS[branch.agentId];
           return (
-            <g
-              key={edge.key}
-              className="jflow-edge"
-              data-flowing={edge.flowing ? "true" : "false"}
-              data-settled={edge.settled ? "true" : "false"}
-              filter={`url(#${uid}-soft)`}
+            <button
+              key={branch.agentId}
+              type="button"
+              className="jtree-node jtree-node--branch"
+              data-state={branch.state}
+              data-testid={`flow-branch-${branch.agentId}`}
+              style={{ left: `${pos.x}%`, top: `${pos.y}%`, animationDelay: "60ms" }}
+              onClick={() => setSelected(`branch-${branch.agentId}`)}
+              aria-label={`${branch.label}: ${stateWord(branch.state)}`}
             >
-              <path id={pathId} d={link(edge.from, edge.to)} className="jflow-line" pathLength={1} />
-              {edge.flowing && !reducedMotion && (
-                <>
-                  <path
-                    d={link(edge.from, edge.to)}
-                    className="jflow-line jflow-line-flow"
-                    stroke={`url(#${uid}-flow)`}
-                    pathLength={1}
-                  />
-                  <circle className="jflow-particle" r="0.7">
-                    <animateMotion
-                      dur={`${1.8 + (index % 3) * 0.4}s`}
-                      repeatCount="indefinite"
-                      begin={`${(index % 4) * 0.3}s`}
-                    >
-                      <mpath href={`#${pathId}`} />
-                    </animateMotion>
-                  </circle>
-                </>
-              )}
-            </g>
+              <span className="jtree-avatar jtree-avatar--md">
+                {clip && (
+                  <video className="jtree-clip" src={clip} aria-hidden="true" muted loop playsInline autoPlay={!reducedMotion} preload="metadata" tabIndex={-1} />
+                )}
+                {branch.state === "done" && <span className="jtree-badge jtree-badge--done" aria-hidden="true" />}
+                {branch.state === "failed" && <span className="jtree-badge jtree-badge--failed" aria-hidden="true" />}
+                {branch.state === "active" && !reducedMotion && <span className="jtree-ring" aria-hidden="true" />}
+              </span>
+              <span className="jtree-text">
+                <span className="jtree-label">{branch.label}</span>
+                <span className="jtree-state">{stateWord(branch.state)}</span>
+                <span className="jtree-sub">routed by Chat Assistant</span>
+              </span>
+            </button>
           );
         })}
-      </svg>
 
-      {renderStage(placedIntake)}
+        {/* agent stages (pipeline) and the earlier-lookups stage */}
+        {tree.agentStages.map((stage) => {
+          const pos = stagePos.get(stage.id)!;
+          return (
+            <button
+              key={stage.id}
+              type="button"
+              className="jtree-node jtree-node--leaf"
+              data-state={stage.state}
+              data-testid={`flow-node-${stage.id}`}
+              style={{ left: `${pos.x}%`, top: `${pos.y}%`, animationDelay: "90ms" }}
+              onClick={() => setSelected(stage.id)}
+              aria-label={`${stage.label}: ${stateWord(stage.state)}`}
+            >
+              <span className="jtree-dot">
+                {stage.state === "done" && <span className="jtree-check" aria-hidden="true" />}
+                {stage.state === "failed" && <span className="jtree-cross" aria-hidden="true" />}
+                {stage.state === "active" && !reducedMotion && (<><span className="jtree-pulse" aria-hidden="true" /><span className="jtree-ring" aria-hidden="true" /></>)}
+              </span>
+              <span className="jtree-text">
+                <span className="jtree-label">{stage.label}</span>
+                <span className="jtree-state">{stateWord(stage.state)}</span>
+              </span>
+            </button>
+          );
+        })}
+        {tree.moreStage && (
+          <button
+            type="button"
+            className="jtree-node jtree-node--leaf"
+            data-state={tree.moreStage.state}
+            data-testid={`flow-node-${tree.moreStage.id}`}
+            style={{ left: `${stagePos.get(tree.moreStage.id)!.x}%`, top: `${stagePos.get(tree.moreStage.id)!.y}%` }}
+            onClick={() => setSelected(tree.moreStage!.id)}
+            aria-label={`${tree.moreStage.label}: ${stateWord(tree.moreStage.state)}`}
+          >
+            <span className="jtree-dot" />
+            <span className="jtree-text">
+              <span className="jtree-label">{tree.moreStage.label}</span>
+              <span className="jtree-state">{stateWord(tree.moreStage.state)}</span>
+            </span>
+          </button>
+        )}
 
-      {branches.map((branch) => (
-        <div
-          key={branch.agentId}
-          className="jflow-node jflow-branch"
-          data-state={branch.state}
-          data-testid={`flow-branch-${branch.agentId}`}
-          style={{
-            left: `${branch.x}%`,
-            top: `${branch.y}%`,
-            animationDelay: `${Math.min(branch.order, 8) * 70}ms`,
-          }}
+        {/* tool leaves */}
+        {allTools.map((tool, index) => {
+          const pos = toolPos.get(tool.stage.id)!;
+          const duration = formatDuration(tool.durationMs);
+          return (
+            <button
+              key={tool.stage.id}
+              type="button"
+              className="jtree-node jtree-node--leaf"
+              data-state={tool.stage.state}
+              data-testid={`flow-node-${tool.stage.id}`}
+              style={{ left: `${pos.x}%`, top: `${pos.y}%`, animationDelay: `${90 + (index % 5) * 50}ms` }}
+              onClick={() => setSelected(tool.stage.id)}
+              aria-label={`${tool.stage.label}: ${stateWord(tool.stage.state)}`}
+            >
+              <span className="jtree-dot">
+                {tool.stage.state === "done" && <span className="jtree-check" aria-hidden="true" />}
+                {tool.stage.state === "failed" && <span className="jtree-cross" aria-hidden="true" />}
+                {tool.stage.state === "active" && !reducedMotion && (<><span className="jtree-pulse" aria-hidden="true" /><span className="jtree-ring" aria-hidden="true" /></>)}
+              </span>
+              <span className="jtree-text">
+                <span className="jtree-label">{tool.stage.label}</span>
+                <span className="jtree-state">{stateWord(tool.stage.state)}</span>
+                {tool.counts && (
+                  <span className="jtree-counts">
+                    {tool.counts.returned} of {tool.counts.total} matched
+                    {tool.counts.remaining !== null && tool.counts.remaining > 0
+                      ? ` · ${tool.counts.remaining} to fetch`
+                      : ""}
+                  </span>
+                )}
+                {duration && <span className="jtree-sub">{duration}</span>}
+              </span>
+            </button>
+          );
+        })}
+
+        {/* processing pills */}
+        {allTools.flatMap((tool) => {
+          const pills = [];
+          if (tool.filter) {
+            const pos = procPos.get(`filter-${tool.tool}`)!;
+            pills.push(
+              <button
+                key={`filter-${tool.tool}`}
+                type="button"
+                className="jtree-pill"
+                data-state="done"
+                data-testid={`flow-stage-filter-${tool.tool}`}
+                style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
+                onClick={() => setSelected(`filter-${tool.tool}`)}
+              >
+                Filtered · {tool.filter.matched} → {tool.filter.returned}
+              </button>,
+            );
+          }
+          if (tool.aggregation) {
+            const pos = procPos.get(`aggregation-${tool.tool}`)!;
+            pills.push(
+              <button
+                key={`aggregation-${tool.tool}`}
+                type="button"
+                className="jtree-pill jtree-pill--agg"
+                data-state="done"
+                data-testid={`flow-stage-aggregation-${tool.tool}`}
+                style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
+                onClick={() => setSelected(`aggregation-${tool.tool}`)}
+              >
+                Totals calculated
+              </button>,
+            );
+          }
+          return pills;
+        })}
+
+        {/* validation */}
+        {tree.validation && (
+          <button
+            type="button"
+            className="jtree-node jtree-node--validation"
+            data-state={tree.validation.state}
+            data-testid="flow-node-validation"
+            style={{ left: `${VALID_X}%`, top: `${CENTER_Y}%`, animationDelay: "120ms" }}
+            onClick={() => setSelected("validation")}
+            aria-label={`Answer validation: ${stateWord(tree.validation.state)}`}
+          >
+            <span className="jtree-shield" data-state={tree.validation.state}>
+              <ShieldCheck size={22} aria-hidden="true" />
+              {tree.validation.state === "active" && !reducedMotion && <span className="jtree-ring" aria-hidden="true" />}
+            </span>
+            <span className="jtree-text">
+              <span className="jtree-label">Answer validation</span>
+              <span className="jtree-state">{stateWord(tree.validation.state)}</span>
+              {tree.validation.outcome && <span className="jtree-sub">{tree.validation.outcome}</span>}
+            </span>
+          </button>
+        )}
+
+        {/* response */}
+        <button
+          type="button"
+          className="jtree-node jtree-node--out"
+          data-state={tree.response.state}
+          data-testid={`flow-node-${tree.response.id}`}
+          style={{ left: `${OUT_X}%`, top: `${CENTER_Y}%`, animationDelay: "150ms" }}
+          onClick={() => setSelected(tree.response.id)}
+          aria-label={`${tree.response.label}: ${stateWord(tree.response.state)}`}
         >
-          <span className="jflow-dot jflow-branch-dot">
-            {branch.state === "done" && <span className="jflow-check" aria-hidden="true" />}
-            {branch.state === "failed" && <span className="jflow-cross" aria-hidden="true" />}
-            {branch.state === "active" && !reducedMotion && (
-              <>
-                <span className="jflow-pulse" aria-hidden="true" />
-                <span className="jflow-ring" aria-hidden="true" />
-              </>
-            )}
+          <span className="jtree-orb-mini" data-state={tree.response.state}>
+            {tree.response.state === "active" && !reducedMotion && <span className="jtree-ring" aria-hidden="true" />}
           </span>
-          <span className="jflow-text">
-            <span className="jflow-label">{branch.label}</span>
-            <span className="jflow-state">{stateWord(branch.state)}</span>
-            <span className="jflow-branch-tag">routed by Chat Assistant</span>
+          <span className="jtree-text">
+            <span className="jtree-label">{tree.response.label}</span>
+            <span className="jtree-state">{stateWord(tree.response.state)}</span>
           </span>
-        </div>
-      ))}
+        </button>
+      </div>
 
-      {rowNodes.map((stage) => renderStage(stage))}
-      {leaves.map((stage) => renderStage(stage, true))}
-      {renderStage(placedOut)}
+      <div className="jtree-detail" role="status">
+        {selectedDetail ? (
+          <>
+            <span className="jtree-detail-title">
+              {selectedDetail.title}
+              <span className="jtree-detail-state" data-state={selectedDetail.state}>
+                {stateWord(selectedDetail.state)}
+              </span>
+            </span>
+            {selectedDetail.lines.map((line) => (
+              <span key={line} className="jtree-detail-line">{line}</span>
+            ))}
+          </>
+        ) : (
+          <span className="jtree-detail-line">
+            Select any stage to inspect it - every node here is a step this request actually recorded.
+          </span>
+        )}
+      </div>
 
-      <ol className="jflow-summary">
-        {stages.map((stage) => (
-          <li key={stage.id}>
-            {stage.label}: {stateWord(stage.state)}
-            {stage.detail ? ` - ${stage.detail}` : ""}
-          </li>
+      <ol className="jtree-summary">
+        <li>{tree.root.label}: {stateWord(tree.root.state)}</li>
+        {tree.branches.map((branch) => (
+          <li key={branch.agentId}>{branch.label}: {stateWord(branch.state)}</li>
         ))}
+        {allTools.map((tool) => (
+          <li key={tool.stage.id}>{tool.stage.label}: {stateWord(tool.stage.state)}</li>
+        ))}
+        {tree.validation && <li>Answer validation: {stateWord(tree.validation.state)}</li>}
+        <li>{tree.response.label}: {stateWord(tree.response.state)}</li>
       </ol>
     </div>
   );
