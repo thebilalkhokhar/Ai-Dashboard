@@ -282,14 +282,14 @@ button {
 
 .jn-orbit {
   fill: none;
-  stroke: rgba(125, 240, 255, 0.11);
+  stroke: rgba(125, 240, 255, 0.22);
   stroke-width: 0.28;
   stroke-dasharray: 0.25 1.4;
   animation: jn-orbit 34s linear infinite;
 }
 
 .jn-orbit--outer {
-  stroke: rgba(167, 139, 250, 0.09);
+  stroke: rgba(167, 139, 250, 0.17);
   stroke-width: 0.22;
   animation-duration: 52s;
   animation-direction: reverse;
@@ -314,19 +314,19 @@ button {
 }
 
 .jn-link-echo {
-  stroke: rgba(167, 139, 250, 0.1);
-  stroke-width: 0.22;
+  stroke: rgba(167, 139, 250, 0.30);
+  stroke-width: 0.5;
 }
 
 .jn-link-primary {
-  stroke: rgba(146, 170, 208, 0.42);
-  stroke-width: 0.46;
+  stroke: rgba(125, 190, 255, 0.78);
+  stroke-width: 0.62;
   animation: jn-shimmer 9s ease-in-out infinite alternate;
 }
 
 .jn-link-group[data-working="true"] .jn-link-primary {
-  stroke: rgba(125, 240, 255, 0.62);
-  stroke-width: 0.52;
+  stroke: rgba(125, 240, 255, 0.95);
+  stroke-width: 0.85;
   animation: none;
 }
 
@@ -373,14 +373,30 @@ button {
    link while the network waits, so the agents read as connected to the core.
    Real work still blazes brighter and faster (the rules above). */
 .jn-link-flow--ambient {
-  stroke-width: 0.55;
-  opacity: 0.32;
+  stroke-width: 0.6;
+  opacity: 0.55;
   animation-duration: 4.2s;
 }
 
 .jn-traveler--ambient {
-  opacity: 0.45;
-  filter: drop-shadow(0 0 0.8px rgba(125, 240, 255, 0.6));
+  opacity: 0.85;
+  filter: drop-shadow(0 0 0.9px rgba(125, 240, 255, 0.75));
+}
+
+/* A relay node halfway along every link: the standing web reads as a
+   layered network with junctions, and every agent is visibly wired into
+   the core even before any work starts. */
+.jn-relay {
+  fill: #9fd8ff;
+  opacity: 0.85;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: jn-relay-pulse 4.6s ease-in-out infinite;
+}
+
+@keyframes jn-relay-pulse {
+  0%, 100% { scale: 1; opacity: 0.55; }
+  50% { scale: 1.5; opacity: 0.95; }
 }
 
 .jn-node {
@@ -694,8 +710,8 @@ button {
 
 .jtree-line {
   fill: none;
-  stroke: rgba(140, 165, 220, 0.30);
-  stroke-width: 1.4;
+  stroke: rgba(150, 185, 235, 0.52);
+  stroke-width: 1.7;
   stroke-dasharray: 1;
   stroke-dashoffset: 0;
   animation: jtree-draw 0.9s ease-out both;
@@ -712,7 +728,12 @@ button {
 }
 
 .jtree-edge[data-settled="true"] .jtree-line {
-  stroke: rgba(52, 211, 153, 0.38);
+  stroke: rgba(52, 211, 153, 0.52);
+}
+
+.jtree-contract-dot {
+  fill: #6ee7b7;
+  filter: drop-shadow(0 0 4px rgba(52, 211, 153, 0.8));
 }
 
 .jtree-line-flow {
@@ -740,13 +761,19 @@ button {
   display: grid;
   justify-items: center;
   gap: 0.4rem;
-  max-width: 168px;
+  max-width: 132px;
   padding: 0;
   background: none;
   border: 0;
   cursor: pointer;
   text-align: center;
   animation: jtree-grow 0.55s cubic-bezier(0.2, 0.9, 0.3, 1.35) both;
+}
+
+/* The orb carries its own caption for the hero stage; inside the tree the
+   node prints label + state itself, so the orb's caption would collide. */
+.jtree-core .jo-caption {
+  display: none;
 }
 
 @keyframes jtree-grow {
@@ -770,7 +797,7 @@ button {
 }
 
 .jtree-label {
-  font-size: 0.8rem;
+  font-size: 0.76rem;
   font-weight: 600;
   letter-spacing: 0.01em;
   color: #f2f7ff;
@@ -945,7 +972,14 @@ button {
   border: 1px solid rgba(52, 211, 153, 0.55);
   box-shadow: 0 6px 18px rgba(2, 4, 12, 0.45);
   cursor: pointer;
-  animation: jtree-grow 0.5s cubic-bezier(0.2, 0.9, 0.3, 1.35) both;
+  animation: jtree-pill-in 0.6s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+
+/* A filter pill lands contracted: wide as the fetched set, squeezed down
+   to the matched set it represents. */
+@keyframes jtree-pill-in {
+  from { scale: 1.55 0.68; opacity: 0.3; }
+  to { scale: 1 1; opacity: 1; }
 }
 
 .jtree-pill--agg {
