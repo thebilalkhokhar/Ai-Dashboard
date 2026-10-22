@@ -324,19 +324,77 @@ export function getChatThreadId(): string {
   if (inMemoryChatThreadId) return inMemoryChatThreadId;
 
   try {
-    const storedThreadId = window.sessionStorage.getItem(CHAT_THREAD_STORAGE_KEY);
+    // localStorage, not sessionStorage: the current conversation is stored
+    // on the server under this id, and the id must survive a browser
+    // restart so the conversation can be reopened exactly where it ended.
+    const storedThreadId =
+      window.localStorage.getItem(CHAT_THREAD_STORAGE_KEY) ??
+      window.sessionStorage.getItem(CHAT_THREAD_STORAGE_KEY);
     if (storedThreadId) {
       inMemoryChatThreadId = storedThreadId;
+      window.localStorage.setItem(CHAT_THREAD_STORAGE_KEY, storedThreadId);
       return storedThreadId;
     }
 
     inMemoryChatThreadId = createThreadId();
-    window.sessionStorage.setItem(CHAT_THREAD_STORAGE_KEY, inMemoryChatThreadId);
+    window.localStorage.setItem(CHAT_THREAD_STORAGE_KEY, inMemoryChatThreadId);
   } catch {
     inMemoryChatThreadId = createThreadId();
   }
 
   return inMemoryChatThreadId;
+}
+
+export function setChatThreadId(threadId: string): void {
+  inMemoryChatThreadId = threadId;
+  try {
+    window.localStorage.setItem(CHAT_THREAD_STORAGE_KEY, threadId);
+  } catch {
+    // storage unavailable: the in-memory id still identifies this session
+  }
+}
+
+export function startNewChatThread(): string {
+  const threadId = createThreadId();
+  setChatThreadId(threadId);
+  return threadId;
+}
+
+// ------------------------------------------------------- stored chats
+
+export interface ChatThreadSummary {
+  thread_id: string;
+  title: string;
+  turn_count: number;
+  updated_at: string | null;
+}
+
+export interface ChatThreadTurn {
+  question: string;
+  answer: string;
+  created_at?: string | null;
+}
+
+export interface ChatThreadDetail {
+  thread_id: string;
+  title: string;
+  turns: ChatThreadTurn[];
+  updated_at: string | null;
+}
+
+export async function fetchChatThreads(): Promise<ChatThreadSummary[]> {
+  const data = await apiFetch<{ chats: ChatThreadSummary[] }>("/api/chats");
+  return data.chats ?? [];
+}
+
+export function fetchChatThread(threadId: string): Promise<ChatThreadDetail> {
+  return apiFetch<ChatThreadDetail>(`/api/chats/${encodeURIComponent(threadId)}`);
+}
+
+export async function deleteChatThread(threadId: string): Promise<void> {
+  await apiFetch<{ deleted: boolean }>(`/api/chats/${encodeURIComponent(threadId)}`, {
+    method: "DELETE",
+  });
 }
 
 function parseChatEvent(block: string): ChatStreamEvent | null {
