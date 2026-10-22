@@ -2280,6 +2280,80 @@ async def get_priorities(database: Any = None) -> dict:
     }
 
 
+class RecallArgs(ToolArgs):
+    query: str = ""
+    limit: int = 5
+
+
+async def recall_conversations(query: str = "", limit: int = 5, database: Any = None) -> dict:
+    """Search the stored conversations with this assistant.
+
+    This is how JARVIS remembers across chats: every conversation is kept
+    in chat_threads, and a follow-up about an earlier discussion ('what
+    did we say about Garcoa', 'the leads we checked last time') is answered
+    from these excerpts. Excerpts are past conversation, not fresh
+    business data - the chat layer deliberately keeps them out of the
+    numeric evidence set, so a figure quoted from an old answer still has
+    to be re-checked with a data tool before it is cited as current.
+    With no query, the most recent conversations are listed by title.
+    """
+    args = RecallArgs.model_validate({"query": query, "limit": limit})
+    db = _database(database)
+    docs = await db.chat_threads.find().to_list(500)
+    cap = max(1, min(args.limit, 10))
+    needle = args.query.strip().lower()
+    found: list[dict] = []
+    for doc in docs:
+        turns = doc.get("turns") or []
+        if not turns:
+            continue
+        title = doc.get("title") or str(turns[0].get("question") or "")[:80]
+        if not needle:
+            found.append({
+                "thread_id": doc.get("thread_id"),
+                "title": title,
+                "updated_at": doc.get("updated_at"),
+                "turn_count": len(turns),
+                "matches": [],
+            })
+            continue
+        hits: list[dict] = []
+        for turn in turns:
+            question = str(turn.get("question") or "")
+            answer = str(turn.get("answer") or "")
+            at = (question + "\n" + answer).lower().find(needle)
+            if at < 0:
+                continue
+            if at <= len(question):
+                excerpt = answer[:300]
+            else:
+                start = max(0, at - len(question) - 1 - 80)
+                excerpt = answer[start:start + 300]
+            hits.append({"question": question[:200], "answer_excerpt": excerpt})
+            if len(hits) >= 2:
+                break
+        if hits:
+            found.append({
+                "thread_id": doc.get("thread_id"),
+                "title": title,
+                "updated_at": doc.get("updated_at"),
+                "turn_count": len(turns),
+                "matches": hits,
+            })
+    found.sort(key=lambda item: item["updated_at"] or "", reverse=True)
+    return _bounded({
+        "query": args.query,
+        "conversations_matched": len(found) if needle else 0,
+        "conversations": found[:cap],
+        "note": (
+            "Excerpts from past stored conversations - context, not new business data. "
+            "Re-check any figure with a data tool before citing it as current."
+            if needle else
+            "The most recent stored conversations, by title. Pass a query to search inside them."
+        ),
+    })
+
+
 CHAT_TOOLS = [
     ChatTool("get_latest_briefing", "Get the latest saved Master brief and its priorities.", EmptyArgs, get_latest_briefing),
     ChatTool(
@@ -2378,6 +2452,12 @@ CHAT_TOOLS = [
         "Today's prioritized recommendations computed from verified signals (overdue balances, stale quotes, stuck leads), each with its metrics, record ids, confidence and limitations. Use for 'what should we prioritize today', 'what should we do next', 'how can we improve collections'.",
         EmptyArgs,
         get_priorities,
+    ),
+    ChatTool(
+        "recall_conversations",
+        "Search the stored conversations with this assistant (every chat is kept). Use for 'what did we discuss about X', 'the customer we looked at last time', 'did we check Y before'. Returns bounded excerpts from past questions and answers. With no query it lists the most recent conversations by title. Excerpts are context, not fresh data - re-check figures with a data tool before citing them.",
+        RecallArgs,
+        recall_conversations,
     ),
     ChatTool(
         "get_agent_briefing",

@@ -81,6 +81,11 @@ total_count, returned, remaining_count, has_more, next_offset.
   'why' question), call the tools together in one block instead of one per
   round, and never call the same tool twice with the same arguments - the
   second call returns the first result and wastes a turn.
+- For questions about earlier conversations ('what did we discuss', 'last
+  time', 'the customer we looked at before'), call recall_conversations to
+  search the stored chats. Its excerpts are context from the past, not
+  fresh data: never cite a figure from an excerpt as current - re-check it
+  with a data tool first.
 - A customer profile that says complete=false is partial: name the missing
   sections and say the rest can be pulled. When the user confirms ('yes',
   'yes pull', 'show all'), the backend executes the recorded retrieval
@@ -1479,14 +1484,20 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
                                         agent_id="chat",
                                         payload={"tool": name, "aggregate": aggregate_key},
                                     )
-                        if not duplicate:
+                        if not duplicate and name != "recall_conversations":
+                            # Recalled excerpts are past conversation, not fresh
+                            # business evidence: their numbers must never enter
+                            # the guard's allowed set, or a stale figure from an
+                            # old chat would legitimize itself. The model sees
+                            # them in the tool message and can cite the
+                            # conversation - figures still need a data tool.
                             results.append({"tool": name, "result": result})
                         page = _page_block(result)
                         if ok and page is not None and not duplicate:
                             contexts.append(
                                 query_context(name, effective_args, page, _last_user_text(messages))
                             )
-                        if events is not None and evidence and not duplicate:
+                        if events is not None and evidence and not duplicate and name != "recall_conversations":
                             # additive: a client that ignores unknown frames is
                             # only poorer by the evidence, never broken by it
                             events.put_nowait({"event": "tool_result", "data": evidence})
@@ -1677,6 +1688,61 @@ async def execute_chat(
     }
 
 
+async def list_chat_threads(database: Any = None, limit: int = 100) -> list[dict]:
+    """Every stored conversation, newest first, as list-page rows.
+
+    Only the fields a list needs cross this boundary: the title, how many
+    turns it holds, and when it last moved - never the answers themselves.
+    """
+    db = database if database is not None else app_db.get_db()
+    docs = await db.chat_threads.find().to_list(500)
+    items: list[dict] = []
+    for doc in docs:
+        turns = doc.get("turns") or []
+        if not turns:
+            continue
+        items.append(
+            {
+                "thread_id": doc.get("thread_id"),
+                "title": doc.get("title") or str(turns[0].get("question") or "")[:80],
+                "turn_count": len(turns),
+                "updated_at": doc.get("updated_at"),
+            }
+        )
+    items.sort(key=lambda item: item["updated_at"] or "", reverse=True)
+    return items[:limit]
+
+
+async def get_chat_thread(thread_id: str, database: Any = None) -> dict | None:
+    """One stored conversation in full, for reopening it."""
+    db = database if database is not None else app_db.get_db()
+    doc = await db.chat_threads.find_one({"thread_id": thread_id})
+    if not doc:
+        return None
+    turns = [
+        {
+            "question": str(turn.get("question") or ""),
+            "answer": str(turn.get("answer") or ""),
+            "created_at": turn.get("created_at"),
+        }
+        for turn in doc.get("turns") or []
+    ]
+    return {
+        "thread_id": doc.get("thread_id"),
+        "title": doc.get("title") or (turns[0]["question"][:80] if turns else ""),
+        "turns": turns,
+        "updated_at": doc.get("updated_at"),
+    }
+
+
+async def delete_chat_thread(thread_id: str, database: Any = None) -> bool:
+    """Remove one stored conversation. Token/audit logs are kept: they are
+    usage records, not conversation content."""
+    db = database if database is not None else app_db.get_db()
+    result = await db.chat_threads.delete_one({"thread_id": thread_id})
+    return bool(getattr(result, "deleted_count", 0))
+
+
 async def daily_token_total(database: Any = None) -> int:
     """Sum today's logged token usage in UTC."""
     db = database if database is not None else app_db.get_db()
@@ -1801,18 +1867,21 @@ async def run_chat(
                 {"question": message, "answer": outcome["text"], "created_at": started, "task_id": task_id},
             ]
         )
-        await db.chat_threads.update_one(
-            {"thread_id": thread_id},
-            {
-                "$set": {
+        thread_update = {
                     "turns": updated_turns,
                     # only the bounded page record (tool, filters, cursor) - never rows
                     "last_query": outcome.get("query_context") or last_query,
                     # the bounded pending retrieval (kind, ids, cursor) - never rows
                     "pending_action": new_pending,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
-                }
-            },
+        }
+        if not previous.get("title"):
+            # The first question names the conversation in the chats list;
+            # it is set once and never rewritten by later turns.
+            thread_update["title"] = message.strip()[:80]
+        await db.chat_threads.update_one(
+            {"thread_id": thread_id},
+            {"$set": thread_update},
             upsert=True,
         )
         status = "complete"
