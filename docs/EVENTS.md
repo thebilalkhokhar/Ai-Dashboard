@@ -83,7 +83,9 @@ A successful record lookup sends `event: tool_result` on the chat stream with
 the aggregates Python computed for that call - record counts, completeness, a
 money total and the query window. Aggregates only: no row, customer name or
 contact crosses this boundary. The paged subset of the same facts is also merged
-into the durable `tool.completed` payload, so a client that missed the live
+into the durable `tool.completed` payload, and a paged tool's page
+`offset` rides the same payload so pagination can be drawn as a real
+stage, so a client that missed the live
 frame still reconstructs the evidence from the replay. A total the tool computed
 over *all* matched records says so (`sum_amount_covers`); the UI may not present
 a partial page as the whole result set.
