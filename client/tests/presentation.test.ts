@@ -7,6 +7,7 @@ import {
   deriveOperation,
   deriveOrbState,
   answerEvidence,
+  deriveExecutionTree,
   deriveStages,
   describeEvent,
   ORB_CAPTION,
@@ -442,5 +443,75 @@ describe("answerEvidence", () => {
       { e1: { records_total: 5, records_returned: 5 } },
     );
     expect(evidence[0].records?.complete).toBe(false);
+  });
+});
+
+describe("deriveExecutionTree", () => {
+  it("groups lookups under their territory and hangs the real data stages off the leaf", () => {
+    const timeline = [
+      entry({ seq: 7, type: "chat.validation_completed" }),
+      entry({ seq: 6, type: "chat.validation_started" }),
+      entry({ seq: 5, type: "data.aggregation_completed", toolName: "get_payments" }),
+      entry({ seq: 4, type: "data.filter_completed", toolName: "get_payments" }),
+      entry({ seq: 3, type: "tool.completed", toolName: "get_payments", toolOk: true, durationMs: 617 }),
+      entry({ seq: 2, type: "tool.started", toolName: "get_payments" }),
+      entry({ seq: 1, type: "task.started" }),
+    ];
+    const details = {
+      e3: { records_total: 25, records_returned: 10, records_remaining: 15, complete: false },
+      e4: { matched: 25, returned: 10, remaining: 15, complete: false },
+      e5: { aggregate: "sum_amount" },
+      e7: { outcome: "passed" },
+    };
+    const tree = deriveExecutionTree({ execution: "completed", agents: {}, timeline, details });
+
+    expect(tree.branches.map((branch) => branch.agentId)).toEqual(["collections"]);
+    expect(tree.branches[0].state).toBe("done");
+    const tool = tree.branches[0].tools[0];
+    expect(tool.counts).toEqual({ total: 25, returned: 10, remaining: 15, complete: false });
+    expect(tool.filter).toEqual({ matched: 25, returned: 10, remaining: 15, complete: false });
+    expect(tool.aggregation).toEqual({ aggregate: "sum_amount" });
+    expect(tool.durationMs).toBe(617);
+    expect(tree.validation).toEqual({ state: "done", outcome: "passed" });
+    expect(tree.directTools).toEqual([]);
+  });
+
+  it("invents no filter, aggregation, validation or branch a task never recorded", () => {
+    const tree = deriveExecutionTree({
+      execution: "running",
+      agents: {},
+      timeline: [
+        entry({ seq: 2, type: "tool.started", toolName: "describe_table" }),
+        entry({ seq: 1, type: "task.started" }),
+      ],
+      details: {},
+    });
+    expect(tree.branches).toEqual([]);
+    expect(tree.directTools).toHaveLength(1);
+    expect(tree.directTools[0].filter).toBeNull();
+    expect(tree.directTools[0].aggregation).toBeNull();
+    expect(tree.directTools[0].counts).toBeNull();
+    expect(tree.validation).toBeNull();
+  });
+
+  it("tracks the validation stage through its real states", () => {
+    const started = [entry({ seq: 1, type: "chat.validation_started" })];
+    expect(
+      deriveExecutionTree({ execution: "running", agents: {}, timeline: started, details: {} }).validation,
+    ).toEqual({ state: "active", outcome: null });
+    expect(
+      deriveExecutionTree({ execution: "failed", agents: {}, timeline: started, details: {} }).validation,
+    ).toEqual({ state: "failed", outcome: null });
+  });
+
+  it("phrases the new lifecycle events for people", () => {
+    expect(describeEvent(taskEvent({ type: "data.filter_completed" }))).toBe("Filtered the matched records");
+    expect(describeEvent(taskEvent({ type: "chat.response_started" }))).toBe("Writing the response");
+    expect(
+      describeEvent(taskEvent({ type: "chat.validation_completed", payload: { outcome: "replaced" } })),
+    ).toBe("Answer rebuilt from verified figures");
+    expect(
+      describeEvent(taskEvent({ type: "chat.validation_completed", payload: { outcome: "passed" } })),
+    ).toBe("Answer verified against the records");
   });
 });
