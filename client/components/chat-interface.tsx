@@ -191,7 +191,7 @@ export function ChatInterface() {
             placeholder="Ask JARVIS about the business..."
             aria-label="Message Biztek Assistant"
             disabled={isSending}
-            className="min-w-0 flex-1 bg-transparent px-1 text-sm text-foreground outline-none placeholder:text-muted disabled:opacity-60"
+            className="min-w-0 flex-1 bg-transparent px-1 text-[0.95rem] text-foreground outline-none placeholder:text-muted disabled:opacity-60"
           />
           <button
             type="submit"
