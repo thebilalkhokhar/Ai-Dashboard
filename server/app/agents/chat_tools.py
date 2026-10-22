@@ -1332,8 +1332,82 @@ async def get_leads(
     return result
 
 
+async def _profile_section(coro) -> tuple[dict | None, str | None]:
+    """One independently-fetched profile section: a failure here marks the
+    section unavailable instead of taking the whole profile down."""
+    try:
+        return await coro, None
+    except Exception:  # noqa: BLE001 - the section reports its own failure
+        return None, "unavailable"
+
+
+def _page_section(result: dict | None, sum_key: str | None = None) -> dict:
+    """A profile section in page terms: what exists, what is in hand, and
+    whether the section is genuinely complete."""
+    if result is None:
+        return {"available": False, "complete": False, "items": []}
+    section = {
+        "available": True,
+        "total_count": result["total_count"],
+        "returned": result["returned"],
+        "has_more": result["has_more"],
+        "complete": not result["has_more"],
+        "items": result["items"],
+    }
+    if sum_key and result.get(sum_key) is not None:
+        section[sum_key] = result[sum_key]
+    return section
+
+
+def _bound_profile(profile: dict, max_chars: int = 10_500) -> dict:
+    """Bound the whole profile by trimming the largest sections' rows.
+
+    The generic _bounded only sees top-level row lists, and a profile's
+    rows live one level down (section -> items), so an oversized profile
+    used to collapse into a single truncated preview string and every
+    count was lost. Here the sections shrink instead: each trimmed
+    section says so, its returned count is recomputed from the rows that
+    remain, and has_more flips back on - the profile can never silently
+    pass a page off as the whole section.
+    """
+    clean = _serializable(profile)
+    logical_names = {
+        "unpaid_invoices": "invoices",
+        "recent_payments": "payments",
+        "recent_quotes": "quotes",
+        "recent_orders": "orders",
+    }
+    sections = [
+        (key, value) for key, value in clean.items()
+        if isinstance(value, dict) and isinstance(value.get("items"), list)
+    ]
+
+    def size() -> int:
+        return len(json.dumps(clean, ensure_ascii=False, separators=(",", ":")))
+
+    while size() > max_chars and any(section["items"] for _, section in sections):
+        key, largest = max(sections, key=lambda pair: len(pair[1]["items"]))
+        largest["items"].pop()
+        largest["returned"] = len(largest["items"])
+        largest["has_more"] = largest["returned"] < largest.get("total_count", 0)
+        largest["complete"] = not largest["has_more"]
+        largest["truncated"] = True
+        clean["complete"] = False
+        logical = logical_names.get(key)
+        if logical and logical not in clean.setdefault("missing_sections", []):
+            clean["missing_sections"].append(logical)
+    return clean
+
+
 async def get_customer_profile(name_or_id: str, database: Any = None) -> dict:
-    """One customer's 360 view: contact, quotes, orders, invoices, payments, totals."""
+    """One customer's 360 view: contact, quotes, orders, invoices, payments, totals.
+
+    Every section is fetched independently and reported in page terms,
+    and the result carries an explicit completeness contract: `complete`
+    is true only when every section was retrieved in full, and
+    `missing_sections` names anything partial or unavailable. The answer
+    may call the profile complete only when this says so.
+    """
     args = CustomerProfileArgs.model_validate({"name_or_id": name_or_id})
     db = _database(database)
     customer_id, label, note = await _resolve_customer(db, args.name_or_id)
@@ -1342,49 +1416,76 @@ async def get_customer_profile(name_or_id: str, database: Any = None) -> dict:
             "customer": None,
             "note": note or f"No customer matching {args.name_or_id!r} was found.",
         }
+    cid = int(customer_id)
 
-    context = await get_customer_context(int(customer_id), database=db)
-    unpaid = await get_invoices(customer=str(customer_id), limit=MAX_TOOL_ROWS, database=db)
-    payments = await get_payments(customer=str(customer_id), limit=MAX_TOOL_ROWS, database=db)
-    quotes = await get_quotes(customer=str(customer_id), limit=MAX_TOOL_ROWS, database=db)
-    contact_row = await db.payments_flat.find(
-        {"customer.id": int(customer_id)}, {"customer.email": 1, "customer.phone_no": 1, "_id": 0}
-    ).to_list(1)
-    contact = contact_row[0].get("customer") if contact_row else {}
-    return _bounded(
-        {
-            "customer_id": customer_id,
-            "company_name": context.get("company_name") or label,
-            "contact": {
-                "email": (contact or {}).get("email"),
-                "phone": (contact or {}).get("phone_no"),
-            },
-            "quotes": context.get("quotes"),
-            "orders": context.get("orders"),
-            "payments": context.get("payments"),
-            "unpaid_invoices": {
-                "total_count": unpaid["total_count"],
-                "sum_balance": unpaid["sum_balance"],
-                "returned": unpaid["returned"],
-                "has_more": unpaid["has_more"],
-                "items": unpaid["items"],
-            },
-            "recent_payments": {
-                "total_count": payments["total_count"],
-                "sum_amount": payments["sum_amount"],
-                "returned": payments["returned"],
-                "has_more": payments["has_more"],
-                "items": payments["items"],
-            },
-            "recent_quotes": {
-                "total_count": quotes["total_count"],
-                "returned": quotes["returned"],
-                "has_more": quotes["has_more"],
-                "items": quotes["items"],
-            },
-            "notes": context.get("notes") or [],
-        }
+    context, context_error = await _profile_section(get_customer_context(cid, database=db))
+    unpaid, _ = await _profile_section(
+        get_invoices(customer=str(cid), limit=MAX_TOOL_ROWS, database=db)
     )
+    payments, _ = await _profile_section(
+        get_payments(customer=str(cid), limit=MAX_TOOL_ROWS, database=db)
+    )
+    quotes, _ = await _profile_section(
+        get_quotes(customer=str(cid), limit=MAX_TOOL_ROWS, database=db)
+    )
+    orders, _ = await _profile_section(
+        get_orders(customer=str(cid), limit=MAX_TOOL_ROWS, database=db)
+    )
+    contact_row, _ = await _profile_section(
+        db.payments_flat.find(
+            {"customer.id": cid}, {"customer.email": 1, "customer.phone_no": 1, "_id": 0}
+        ).to_list(1)
+    )
+    contact = contact_row[0].get("customer") if contact_row else {}
+
+    unpaid_section = _page_section(unpaid, "sum_balance")
+    payments_section = _page_section(payments, "sum_amount")
+    quotes_section = _page_section(quotes, "sum_amount")
+    orders_section = _page_section(orders, "sum_amount")
+
+    section_states = {
+        "details": context is not None,
+        "quotes": quotes_section.get("complete", False),
+        "orders": orders_section.get("complete", False),
+        "payments": payments_section.get("complete", False),
+        "invoices": unpaid_section.get("complete", False),
+    }
+    missing = [name for name, ok in section_states.items() if not ok]
+    profile = {
+        "customer_id": customer_id,
+        "company_name": (context or {}).get("company_name") or label,
+        "contact": {
+            "email": (contact or {}).get("email"),
+            "phone": (contact or {}).get("phone_no"),
+        },
+        "quotes": (context or {}).get("quotes"),
+        "orders": (context or {}).get("orders"),
+        "payments": (context or {}).get("payments"),
+        "balances": {
+            "unpaid_total": unpaid_section.get("sum_balance"),
+            "unpaid_invoice_count": unpaid_section.get("total_count"),
+        },
+        "unpaid_invoices": unpaid_section,
+        "recent_payments": payments_section,
+        "recent_quotes": quotes_section,
+        "recent_orders": orders_section,
+        "complete": not missing,
+        "missing_sections": missing,
+        "notes": [
+            *((context or {}).get("notes") or []),
+            *(
+                ["One part of the customer record could not be loaded, so the profile is partial."]
+                if context_error
+                else []
+            ),
+        ],
+    }
+    bounded = _bound_profile(profile)
+    bounded["complete"] = not bounded["missing_sections"] and not any(
+        isinstance(value, dict) and value.get("truncated")
+        for value in bounded.values()
+    )
+    return bounded
 
 
 async def get_record(collection: str, id: str, database: Any = None) -> dict:
@@ -1928,6 +2029,257 @@ async def get_agent_briefing(
     return result
 
 
+# ------------------------------------------------------------ comparisons
+
+# The date field each compared metric is bucketed by. These are the fields
+# the existing tools already filter on - no new source is invented.
+_METRIC_DATE_FIELDS = {
+    "payments": ("payments_flat", "received_at", "amount"),
+    "invoices": ("orders_flat", "invoice_date", None),
+    "quotes": ("quotes_flat", "created_at", "amount"),
+    "orders": ("orders_flat", "invoice_date", "total_amount"),
+    "leads": ("leads", "createdAt", None),
+}
+
+
+class ComparePeriodsArgs(DateRangeArgs):
+    metric: str
+
+
+class AnomalyArgs(ToolArgs):
+    metric: str = "payments"
+    recent_days: int = 7
+    baseline_days: int = 56
+
+
+async def _metric_window(database: Any, metric: str, date_from: date, date_to: date) -> dict:
+    """One metric over one window, computed in Python over the full match.
+
+    Invoices report both what was invoiced and what is still owed; the
+    compared value is the outstanding balance, matching the spec of the
+    metric and the dashboard's own unpaid-invoice definition.
+    """
+    collection_name, date_field, amount_field = _METRIC_DATE_FIELDS[metric]
+    db = _database(database)
+    rows = await _collection(db, collection_name).find().to_list(200_000)
+    matched = [row for row in rows if _in_date_range(row.get(date_field), date_from, date_to)]
+    if metric == "invoices":
+        invoiced = round(sum(processors.to_number(row.get("total_amount")) for row in matched), 2)
+        balance = round(
+            sum(
+                processors.to_number(row.get("total_amount")) - processors.to_number(row.get("amount_paid"))
+                for row in matched
+            ),
+            2,
+        )
+        return {"total": balance, "total_invoiced": invoiced, "count": len(matched)}
+    if metric == "leads":
+        return {"total": None, "count": len(matched)}
+    total = round(sum(processors.to_number(row.get(amount_field)) for row in matched), 2)
+    return {"total": total, "count": len(matched)}
+
+
+async def compare_periods(metric: str, date_from=None, date_to=None, period=None, database: Any = None) -> dict:
+    """Current period vs the equal-length period immediately before it.
+
+    Both sides are computed by the backend over the full matched sets; the
+    change figures are arithmetic on those two computed values, never on
+    listed rows. A zero previous total yields a null percentage (division
+    by zero is reported as 'new activity', not infinity).
+    """
+    args = ComparePeriodsArgs.model_validate(
+        {"metric": metric, "date_from": date_from, "date_to": date_to, "period": period}
+    )
+    if args.metric not in _METRIC_DATE_FIELDS:
+        return {
+            "available": False,
+            "metric": args.metric,
+            "note": f"Cannot compare {args.metric!r}: supported metrics are {sorted(_METRIC_DATE_FIELDS)}.",
+        }
+    start, end = args.date_from, args.date_to
+    length = (end - start).days + 1
+    prev_end = start - timedelta(days=1)
+    prev_start = prev_end - timedelta(days=length - 1)
+    current = await _metric_window(database, args.metric, start, end)
+    previous = await _metric_window(database, args.metric, prev_start, prev_end)
+    cur_value = current["count"] if args.metric == "leads" else current["total"]
+    prev_value = previous["count"] if args.metric == "leads" else previous["total"]
+    absolute = round(cur_value - prev_value, 2)
+    if prev_value == 0:
+        percent = 0.0 if cur_value == 0 else None
+        direction = "flat" if cur_value == 0 else "new"
+    else:
+        percent = round((cur_value - prev_value) / prev_value * 100, 1)
+        direction = "up" if absolute > 0 else ("down" if absolute < 0 else "flat")
+    return {
+        "metric": args.metric,
+        "current": {"date_from": start.isoformat(), "date_to": end.isoformat(), **current},
+        "previous": {"date_from": prev_start.isoformat(), "date_to": prev_end.isoformat(), **previous},
+        "change": {"absolute": absolute, "percent": percent, "direction": direction},
+        "compared_value": "lead count" if args.metric == "leads" else ("outstanding balance" if args.metric == "invoices" else "total amount"),
+        "complete": True,
+        "notes": [
+            "The previous period is the equal-length range immediately before the current one.",
+            "Both totals are computed over every matched record, not over a listed page.",
+        ],
+    }
+
+
+async def detect_anomalies(metric: str = "payments", recent_days: int = 7, baseline_days: int = 56, database: Any = None) -> dict:
+    """Deterministic deviation check: a recent window vs a daily baseline.
+
+    An anomaly is flagged only when the recent total deviates from the
+    baseline expectation by at least 30% AND by at least two baseline
+    standard deviations of daily totals - both conditions, so ordinary
+    noise never raises one. With too little history the tool says so
+    instead of guessing: a reliable trend cannot be established.
+    """
+    args = AnomalyArgs.model_validate(
+        {"metric": metric, "recent_days": recent_days, "baseline_days": baseline_days}
+    )
+    if args.metric not in _METRIC_DATE_FIELDS:
+        return {"available": False, "metric": args.metric,
+                "note": f"Cannot scan {args.metric!r}: supported metrics are {sorted(_METRIC_DATE_FIELDS)}."}
+    recent_days = max(1, min(args.recent_days, 30))
+    baseline_days = max(7, min(args.baseline_days, 180))
+    today = datetime.now(processors.ERP_TZ).date()
+    recent_start = today - timedelta(days=recent_days - 1)
+    baseline_end = recent_start - timedelta(days=1)
+    baseline_start = baseline_end - timedelta(days=baseline_days - 1)
+
+    # Load the source rows once and bucket them by day in Python; a
+    # per-day database scan would multiply reads for no new information.
+    collection_name, date_field, amount_field = _METRIC_DATE_FIELDS[args.metric]
+    all_rows = await _collection(_database(database), collection_name).find().to_list(200_000)
+
+    def day_value(day: date) -> float:
+        matched = [row for row in all_rows if _in_date_range(row.get(date_field), day, day)]
+        if args.metric == "leads":
+            return float(len(matched))
+        if args.metric == "invoices":
+            return float(round(sum(
+                processors.to_number(row.get("total_amount")) - processors.to_number(row.get("amount_paid"))
+                for row in matched
+            ), 2))
+        return float(round(sum(processors.to_number(row.get(amount_field)) for row in matched), 2))
+
+    def daily(start: date, days: int) -> list[float]:
+        return [day_value(start + timedelta(days=offset)) for offset in range(days)]
+
+    baseline = daily(baseline_start, baseline_days)
+    recent = daily(recent_start, recent_days)
+    baseline_total = sum(baseline)
+    recent_total = sum(recent)
+    if baseline_total == 0 and recent_total == 0:
+        return {
+            "available": False, "metric": args.metric,
+            "note": f"No {args.metric} activity in the baseline or recent window, so no trend can be established.",
+        }
+    mean = baseline_total / baseline_days
+    variance = sum((value - mean) ** 2 for value in baseline) / baseline_days
+    std = variance ** 0.5
+    expected = mean * recent_days
+    deviation = None if expected == 0 else round((recent_total - expected) / expected * 100, 1)
+    sigma_gap = 0.0 if std == 0 else abs(recent_total / recent_days - mean) / std
+    anomaly = bool(
+        deviation is not None and abs(deviation) >= 30 and (std == 0 or sigma_gap >= 2)
+    )
+    return {
+        "metric": args.metric,
+        "available": True,
+        "anomaly": anomaly,
+        "direction": "up" if recent_total > expected else ("down" if recent_total < expected else "flat"),
+        "recent": {"date_from": recent_start.isoformat(), "date_to": today.isoformat(),
+                   "total": round(recent_total, 2), "days": recent_days},
+        "baseline": {"date_from": baseline_start.isoformat(), "date_to": baseline_end.isoformat(),
+                     "daily_average": round(mean, 2), "daily_std": round(std, 2), "days": baseline_days},
+        "expected_recent_total": round(expected, 2),
+        "deviation_percent": deviation,
+        "threshold": "flagged when the recent total deviates at least 30% from the baseline expectation and at least 2 standard deviations of daily totals",
+        "notes": [
+            "A deviation is a pattern in the numbers, not a cause; the records do not say why it moved.",
+        ],
+    }
+
+
+async def get_priorities(database: Any = None) -> dict:
+    """Today's prioritized, evidence-grounded recommendations.
+
+    Composed entirely from the existing Python-computed signals: every
+    recommendation carries the metrics and record ids it rests on, a
+    confidence tied to how direct the evidence is, and its limitation.
+    A recommendation with no evidence behind it is not emitted.
+    """
+    EmptyArgs.model_validate({})
+    db = _database(database)
+    signals = await get_signals_summary(database=db)
+    top_unpaid = await get_top_unpaid(5, database=db)
+    top_quotes = await get_top_open_quotes(5, database=db)
+    stuck = await get_stuck_leads(database=db)
+
+    recommendations: list[dict] = []
+    overdue = signals.get("overdue_invoices") or {}
+    if (overdue.get("count") or 0) > 0:
+        largest = top_unpaid.get("largest_owing_customer") or {}
+        recommendations.append({
+            "priority": len(recommendations) + 1,
+            "action": "Collect overdue balances, starting with the largest owing customer",
+            "why": "Overdue balances are money already earned but not received; the oldest and largest age further every day they sit.",
+            "metrics": {
+                "overdue_invoice_count": overdue.get("count"),
+                "overdue_total_balance": overdue.get("total_balance"),
+                "largest_owing_customer": largest.get("company_name"),
+                "largest_customer_balance": largest.get("total_balance"),
+            },
+            "record_ids": [row.get("id") for row in (top_unpaid.get("items") or []) if row.get("id") is not None],
+            "confidence": "high - computed from current invoice balances and due dates",
+            "limitations": "A balance being overdue does not say why it is unpaid; check the record before contacting the customer.",
+            "next_step": "Open the largest unpaid invoice and confirm its status with the customer today.",
+        })
+    stale = signals.get("stale_quotes") or {}
+    if (stale.get("count") or 0) > 0:
+        recommendations.append({
+            "priority": len(recommendations) + 1,
+            "action": "Follow up the largest stale open quotes before they go cold",
+            "why": "Open quotes that sit unconverted represent priced demand; each stale day lowers the chance they convert to orders.",
+            "metrics": {
+                "stale_quote_count": stale.get("count"),
+                "stale_quote_total": stale.get("total_amount"),
+            },
+            "record_ids": [row.get("id") for row in (top_quotes.get("items") or []) if row.get("id") is not None],
+            "confidence": "high - the stale set uses the dashboard's own open-quote rules",
+            "limitations": "Staleness is age-based; a quote may already be in conversation outside the records.",
+            "next_step": "Contact the customer on the largest stale quote and record the outcome.",
+        })
+    if (stuck.get("total_count") or 0) > 0:
+        missing_fields: dict[str, int] = {}
+        for row in stuck.get("items") or []:
+            for field in row.get("missing_fields") or []:
+                missing_fields[field] = missing_fields.get(field, 0) + 1
+        recommendations.append({
+            "priority": len(recommendations) + 1,
+            "action": "Qualify the stuck leads: collect the missing fields and make first contact",
+            "why": "Leads stuck before ordering cannot convert; most are missing a small set of qualification fields.",
+            "metrics": {
+                "stuck_lead_count": stuck.get("total_count"),
+                "most_common_missing_fields": missing_fields,
+            },
+            "record_ids": [row.get("id") for row in (stuck.get("items") or []) if row.get("id") is not None],
+            "confidence": "medium - lead fields are parsed from free-text descriptions, so a parsed field can occasionally be wrong",
+            "limitations": "Lead records carry no contact outcome history here; a lead may already have been contacted off-system.",
+            "next_step": "Work the oldest stuck lead first and fill its missing fields.",
+        })
+    return {
+        "recommendations": recommendations,
+        "as_of": signals.get("as_of"),
+        "sources": ["signals_summary", "top_unpaid", "top_open_quotes", "stuck_leads"],
+        "notes": [
+            "Recommendations are ranked by money at risk, then revenue pending, then pipeline health.",
+            "Nothing here modifies a record or contacts a customer; each next step is for a human to take.",
+        ],
+    }
+
+
 CHAT_TOOLS = [
     ChatTool("get_latest_briefing", "Get the latest saved Master brief and its priorities.", EmptyArgs, get_latest_briefing),
     ChatTool(
@@ -2008,6 +2360,24 @@ CHAT_TOOLS = [
         "Describe what data exists: collections, row counts, their field names, date ranges, retained lead-pull history, and the fields that are genuinely not stored. Call this before saying something is unavailable.",
         EmptyArgs,
         describe_data,
+    ),
+    ChatTool(
+        "compare_periods",
+        "Compare one metric (payments, invoices, quotes, orders, leads) between a period and the equal-length period immediately before it. Backend-computed totals for both sides plus absolute and percentage change. Pass a named period or explicit dates like any other dated tool. Use for 'compared with last week/month', 'are payments up or down', trend questions.",
+        ComparePeriodsArgs,
+        compare_periods,
+    ),
+    ChatTool(
+        "detect_anomalies",
+        "Deterministic deviation scan for one metric (payments, invoices, quotes, orders, leads): the recent window (default 7 days) against a daily baseline (default 56 days). Flags an anomaly only on a >=30% deviation that is also >=2 standard deviations. Use for 'anything unusual', 'why did payments drop', spike/drop questions. It reports patterns, never causes.",
+        AnomalyArgs,
+        detect_anomalies,
+    ),
+    ChatTool(
+        "get_priorities",
+        "Today's prioritized recommendations computed from verified signals (overdue balances, stale quotes, stuck leads), each with its metrics, record ids, confidence and limitations. Use for 'what should we prioritize today', 'what should we do next', 'how can we improve collections'.",
+        EmptyArgs,
+        get_priorities,
     ),
     ChatTool(
         "get_agent_briefing",

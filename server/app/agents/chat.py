@@ -17,7 +17,16 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
 from app import db as app_db
-from app.agents.chat_tools import CHAT_TOOL_MAP, CHAT_TOOLS, PeriodMixin, format_money, invoke_tool
+from app.agents.chat_tools import (
+    CHAT_TOOL_MAP,
+    CHAT_TOOLS,
+    MAX_TOOL_ROWS,
+    PeriodMixin,
+    _bounded,
+    _page_metadata,
+    format_money,
+    invoke_tool,
+)
 from app.agents.graph import invented_amounts
 from app.agents.llm import add_usage, build_model, empty_usage, usage_of
 from app.config import settings
@@ -26,7 +35,7 @@ from app.services.events import get_event_service
 from app.services.processors import ERP_TZ
 
 log = logging.getLogger("chat_agent")
-MAX_TOOL_CALLS = 8      # per question, shared by parallel calls
+MAX_TOOL_CALLS = 12     # per question, shared by parallel calls
 MAX_STORED_TURNS = 20     # enough history for "I need that name" follow-ups
 
 CHAT_SYSTEM = """You are the business assistant of the Biztek AI Command Center
@@ -68,6 +77,15 @@ total_count, returned, remaining_count, has_more, next_offset.
   more, or the next batch: call the SAME tool again with the SAME filters and
   offset set to the previous next_offset, and keep going until has_more is false.
   Never change the filters or the date range while continuing a page.
+- When a question needs several sources (a customer 360, a comparison, a
+  'why' question), call the tools together in one block instead of one per
+  round, and never call the same tool twice with the same arguments - the
+  second call returns the first result and wastes a turn.
+- A customer profile that says complete=false is partial: name the missing
+  sections and say the rest can be pulled. When the user confirms ('yes',
+  'yes pull', 'show all'), the backend executes the recorded retrieval
+  BEFORE you answer and hands you the fresh results - answer from them and
+  never repeat the earlier offer.
 - Never say you listed every record while has_more is true, and never say
   nothing matched when total_count is above zero.
 - sum_amount is Python's total over EVERY matched record, whatever page you are
@@ -540,6 +558,16 @@ _PERIOD_PHRASES = {
 
 # A period code the model may echo verbatim from the tool ("(last_week)").
 _PERIOD_ECHO_RE = re.compile(r"\b(?:this|last|current)_[a-z0-9]+\b", re.I)
+_COMPLETE_CLAIM_RE = re.compile(
+    r"\b(complete|full|entire)\s+(customer\s+)?(profile|360|details|record|history)\b"
+    r"|\ball\s+(of\s+)?(the\s+)?customer'?s\s+(records|details|invoices|payments|quotes|orders)\b",
+    re.IGNORECASE,
+)
+_PARTIAL_DISCLOSURE_RE = re.compile(
+    r"partial|incomplete|truncated|not all|more (records|are available)|has more|"
+    r"remaining|outstanding|still to fetch|can be pulled|pull the rest",
+    re.IGNORECASE,
+)
 # One rendered payment row: "Payment 7263" / "payment #7,263".
 _PAYMENT_ROW_RE = re.compile(r"\bpayments?\s+#?\s*\d[\d,]*\b", re.I)
 # A claim that a number of payments were *displayed*: "27 payments listed".
@@ -579,6 +607,25 @@ def _answer_consistency_errors(text: str, tool_results: list[dict], named_period
                 errors.append(f"period wording '{phrase}' contradicts the resolved range ({expected})")
     if _PERIOD_ECHO_RE.search(text):
         errors.append("the answer echoes a backend period code instead of a plain phrase")
+
+    # A partial customer profile must never be narrated as complete: the
+    # profile result itself carries the contract (complete=false or a
+    # truncated preview), and only an answer that also discloses the gap
+    # may use completeness words about it.
+    for entry in tool_results:
+        if entry.get("tool") != "get_customer_profile":
+            continue
+        result = entry.get("result")
+        if not isinstance(result, dict):
+            continue
+        partial = result.get("complete") is False or result.get("truncated") is True
+        if (
+            partial
+            and _COMPLETE_CLAIM_RE.search(text)
+            and not _PARTIAL_DISCLOSURE_RE.search(text)
+        ):
+            errors.append("the answer presents a partial customer profile as complete")
+        break
 
     # Payment rows actually rendered vs a claim that more were displayed.
     rows = len(_PAYMENT_ROW_RE.findall(text))
@@ -909,6 +956,295 @@ def _continuation_prompt(last_query: dict) -> str:
     )
 
 
+# ------------------------------------------------------- pending actions
+#
+# A turn can end with real retrieval still outstanding: a customer profile
+# whose sections came back partial, or a page with has_more set. That state
+# is recorded on the thread as a bounded pending action, and a short
+# confirmation from the user ("yes pull", "show me all of them", "fetch the
+# next page") executes it deterministically in the backend BEFORE the model
+# runs - the model then answers from fresh results instead of repeating the
+# offer it made last turn. Confirmations never trigger anything else: every
+# pending action is read-only by construction.
+
+_CONFIRM_EXACT = {
+    "yes", "yeah", "yep", "ok", "okay", "sure", "do it", "go ahead",
+    "pull", "pull it", "yes pull", "please pull", "fetch", "fetch it",
+    "get them", "get them all", "show all", "show me all", "all of them",
+    "show me all of them", "show all of them", "everything", "more",
+    "continue", "proceed", "haan", "han", "ji", "kar do", "kardo",
+}
+_CONFIRM_PREFIXES = (
+    "yes ", "yeah ", "ok ", "sure ", "pull ", "show all", "show me all",
+    "fetch all", "get all", "next page", "fetch the next", "fetch next",
+    "haan ",
+)
+_ALL_PHRASES = ("show all", "show me all", "fetch all", "get all", "all of them", "everything")
+_NEXT_PAGE_PHRASES = ("next page", "fetch the next", "fetch next page", "more", "show more")
+
+
+def _confirmation_kind(message: str) -> str | None:
+    """The confirmation a short message carries, or None.
+
+    Deliberately conservative: a bounded exact set plus a few prefixes, and
+    a length cap, so a real question is never mistaken for a confirmation.
+    Returns "next_page", "all", or "generic" (a plain yes).
+    """
+    text = " ".join((message or "").strip().lower().split()).strip("!. ")
+    if not text or len(text) > 60:
+        return None
+    if any(text == phrase or text.startswith(phrase + " ") for phrase in _NEXT_PAGE_PHRASES):
+        return "next_page"
+    if any(text == phrase or text.startswith(phrase + " ") for phrase in _ALL_PHRASES):
+        return "all"
+    if text in _CONFIRM_EXACT:
+        return "generic"
+    # A prefix only confirms when the whole message is short: "yes pull the
+    # rest" is a confirmation, "yes but why did payments drop..." is a new
+    # question that happens to start with yes.
+    if text.startswith(_CONFIRM_PREFIXES) and len(text.split()) <= 4:
+        return "generic"
+    return None
+
+
+def _pending_from_results(results: list[dict]) -> dict | None:
+    """The outstanding retrieval a turn's own results prove, if any."""
+    for entry in results:
+        result = entry.get("result")
+        if entry.get("tool") == "get_customer_profile" and isinstance(result, dict):
+            if result.get("customer_id") is not None and result.get("complete") is False:
+                return {
+                    "kind": "customer_sections",
+                    "customer_id": result.get("customer_id"),
+                    "company_name": result.get("company_name"),
+                    "missing_sections": list(result.get("missing_sections") or []),
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                }
+    return None
+
+
+def _pending_from_context(context: dict | None) -> dict | None:
+    if context and context.get("has_more") and context.get("next_offset") is not None:
+        return {
+            "kind": "next_page",
+            "tool": context.get("tool"),
+            "args": context.get("args") or {},
+            "next_offset": context.get("next_offset"),
+            "total_count": context.get("total_count"),
+            "question": context.get("question"),
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+    return None
+
+
+_SECTION_TOOLS = {
+    "invoices": "get_invoices",
+    "payments": "get_payments",
+    "quotes": "get_quotes",
+    "orders": "get_orders",
+}
+
+
+async def _invoke_recorded(
+    name: str,
+    args: dict,
+    *,
+    database: Any,
+    registry: dict,
+    task_id: str | None,
+    events: Any,
+) -> dict:
+    """Invoke one tool for a confirmed retrieval, with the same event and
+    evidence frames a model-chosen call produces."""
+    if events is not None:
+        events.put_nowait({"event": "tool", "data": {"name": name}})
+    service = get_event_service()
+    if task_id:
+        await service.emit(task_id=task_id, type="tool.started", agent_id="chat", payload={"tool": name})
+    started = monotonic_time.monotonic()
+    result = await invoke_tool(name, args, database=database, registry=registry)
+    if task_id:
+        payload = {
+            "tool": name,
+            "ok": True,
+            "duration_ms": round((monotonic_time.monotonic() - started) * 1000),
+        }
+        payload.update(evidence_counts(tool_evidence(name, result)))
+        recorded_page = _page_block(result)
+        if recorded_page is not None:
+            payload["offset"] = recorded_page["offset"]
+        await service.emit(task_id=task_id, type="tool.completed", agent_id="chat", payload=payload)
+    evidence = tool_evidence(name, result)
+    if events is not None and evidence:
+        events.put_nowait({"event": "tool_result", "data": evidence})
+    return result
+
+
+async def _walk_pages(
+    name: str,
+    base_args: dict,
+    *,
+    database: Any,
+    registry: dict,
+    task_id: str | None,
+    events: Any,
+    start_offset: int = 0,
+    max_pages: int = 10,
+) -> tuple[dict, list[str]]:
+    """Fetch consecutive pages of one tool and merge them honestly.
+
+    Rows are deduplicated by record id, totals and sums always come from
+    the tool's own page metadata (computed over every matched row), and
+    the merged block is rebuilt from the rows actually delivered - so the
+    merged result can never claim more than it holds. Returns the merged
+    result plus the call keys used, so the model loop will not repeat them.
+    """
+    items: list[dict] = []
+    seen: set[str] = set()
+    call_keys: list[str] = []
+    aggregates: dict = {}
+    total = 0
+    offset = start_offset
+    last_page: dict | None = None
+    for _ in range(max_pages):
+        args = {**base_args, "offset": offset, "limit": MAX_TOOL_ROWS}
+        call_keys.append(name + "|" + json.dumps(args, sort_keys=True, default=str))
+        result = await _invoke_recorded(
+            name, args, database=database, registry=registry, task_id=task_id, events=events
+        )
+        page = _page_block(result)
+        if page is None:
+            return result, call_keys
+        total = page["total_count"]
+        if not aggregates:
+            aggregates = {
+                key: result[key]
+                for key in ("sum_amount", "sum_balance", "sum_amount_covers")
+                if key in result
+            }
+        for row in result.get("items") or []:
+            row_id = row.get("id") if isinstance(row, dict) else None
+            if row_id is None:
+                items.append(row)
+            elif str(row_id) not in seen:
+                seen.add(str(row_id))
+                items.append(row)
+        last_page = page
+        if not page["has_more"]:
+            break
+        offset = page["next_offset"]
+    merged = dict(aggregates)
+    merged["items"] = items
+    merged.update(_page_metadata(start_offset, MAX_TOOL_ROWS, total, len(items)))
+    merged["walk_complete"] = bool(last_page and not last_page["has_more"])
+    return _bounded(merged), call_keys
+
+
+async def _execute_pending_action(
+    pending: dict,
+    kind: str,
+    *,
+    database: Any,
+    tools: list | None,
+    task_id: str | None,
+    events: Any,
+) -> dict:
+    """Run one recorded pending action. Returns the fetched results, the
+    directive the model answers under, and the pending action that remains
+    (None when the retrieval is now complete)."""
+    registry = {tool.name: tool for tool in (CHAT_TOOLS if tools is None else tools)}
+    results: list[dict] = []
+    call_keys: list[str] = []
+
+    if pending.get("kind") == "customer_sections":
+        cid = pending.get("customer_id")
+        remaining: list[str] = []
+        for section in pending.get("missing_sections") or []:
+            if section == "details":
+                result = await _invoke_recorded(
+                    "get_customer_context", {"customer_id": cid},
+                    database=database, registry=registry, task_id=task_id, events=events,
+                )
+                results.append({"tool": "get_customer_context", "result": result})
+                continue
+            tool_name = _SECTION_TOOLS.get(section)
+            if tool_name is None or tool_name not in registry:
+                remaining.append(section)
+                continue
+            merged, keys = await _walk_pages(
+                tool_name, {"customer": str(cid)},
+                database=database, registry=registry, task_id=task_id, events=events,
+                max_pages=10,
+            )
+            call_keys.extend(keys)
+            results.append({"tool": tool_name, "result": merged, "_call_keys": keys})
+            if merged.get("has_more") and not merged.get("walk_complete"):
+                # the walk fetched every page; a has_more left after the
+                # context budget trimmed the merged listing is a display
+                # limit, not outstanding retrieval - the section is done
+                remaining.append(section)
+        new_pending = None
+        if remaining:
+            new_pending = {**pending, "missing_sections": remaining,
+                           "recorded_at": datetime.now(timezone.utc).isoformat()}
+        directive = (
+            "CONFIRMED RETRIEVAL EXECUTED. The user confirmed the pending read-only "
+            "retrieval, and the backend has just fetched the outstanding parts of "
+            f"{pending.get('company_name') or 'the customer'}'s profile (the tool "
+            "results below). Answer from them now, together with what the earlier "
+            "turn already established. Do not offer to pull them again and do not "
+            "repeat the previous offer. If a section still has_more, say exactly "
+            "which part remains outstanding."
+        )
+        return {"results": results, "call_keys": call_keys, "pending": new_pending, "directive": directive}
+
+    if pending.get("kind") == "next_page":
+        tool_name = pending.get("tool")
+        base_args = dict(pending.get("args") or {})
+        if tool_name not in registry:
+            return {"results": [], "call_keys": [], "pending": None, "directive": ""}
+        if kind == "all":
+            merged, keys = await _walk_pages(
+                tool_name, base_args, database=database, registry=registry,
+                task_id=task_id, events=events, start_offset=0, max_pages=20,
+            )
+            results.append({"tool": tool_name, "result": merged, "_call_keys": keys})
+            call_keys.extend(keys)
+            new_pending = None
+            if merged.get("has_more") and not merged.get("walk_complete"):
+                new_pending = _pending_from_context(query_context(
+                    tool_name, base_args, merged, pending.get("question") or ""
+                ))
+            directive = (
+                "CONFIRMED RETRIEVAL EXECUTED. The user asked for all of them, and "
+                "the backend has fetched the remaining pages of the recorded query "
+                "(the tool results below, deduplicated by record id). Answer from "
+                "them; the totals come from the tool, not from counting rows. Do "
+                "not offer to fetch them again."
+            )
+            return {"results": results, "call_keys": call_keys, "pending": new_pending, "directive": directive}
+        args = {**base_args, "offset": pending.get("next_offset"), "limit": MAX_TOOL_ROWS}
+        call_keys.append(tool_name + "|" + json.dumps(args, sort_keys=True, default=str))
+        result = await _invoke_recorded(
+            tool_name, args, database=database, registry=registry, task_id=task_id, events=events
+        )
+        results.append({"tool": tool_name, "result": result, "_call_keys": call_keys})
+        new_pending = None
+        page = _page_block(result)
+        if page is not None and page["has_more"]:
+            new_pending = _pending_from_context(query_context(
+                tool_name, base_args, page, pending.get("question") or ""
+            ))
+        directive = (
+            "CONFIRMED RETRIEVAL EXECUTED. The user confirmed, and the backend has "
+            "fetched the next page of the recorded query (the tool results below). "
+            "Answer from it and do not repeat the previous offer."
+        )
+        return {"results": results, "call_keys": call_keys, "pending": new_pending, "directive": directive}
+
+    return {"results": [], "call_keys": [], "pending": None, "directive": ""}
+
+
 def _message_text(message: Any) -> str:
     content = getattr(message, "content", "")
     if isinstance(content, str):
@@ -972,8 +1308,14 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
 
     async def chat_node(state: ChatState) -> dict:
         messages = list(state["messages"])
-        results: list[dict] = []
-        used: list[str] = []
+        # A confirmed pending retrieval may have pre-fetched results for this
+        # turn; they are real tool results, so they seed the evidence set.
+        results: list[dict] = list(state.get("tool_results") or [])
+        used: list[str] = list(state.get("tools_used") or [])
+        seen_calls: dict[str, dict] = {}
+        for entry in results:
+            for key in entry.get("_call_keys") or []:
+                seen_calls[key] = entry["result"]
         count = 0
         regen_count = 0
         validation_started = False
@@ -1038,18 +1380,6 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
                     else:
                         count += 1
                         used.append(name)
-                        if events is not None:
-                            events.put_nowait({"event": "tool", "data": {"name": name}})
-                        service = get_event_service()
-                        task_id = state.get("task_id")
-                        # real tool activity: the tool identifier only (never the
-                        # arguments, which can carry a customer name or id)
-                        if task_id:
-                            await service.emit(
-                                task_id=task_id, type="tool.started", agent_id="chat",
-                                payload={"tool": name},
-                            )
-                        tool_started = monotonic_time.monotonic()
                         ok = True
                         effective_args = call.get("args") or {}
                         if named_period:
@@ -1058,22 +1388,48 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
                                 effective_args = _named_period_args(
                                     named_period, business_date, period_tool.args_model, effective_args
                                 )
-                        try:
-                            result = await invoke_tool(
-                                name,
-                                effective_args,
-                                database=state.get("database"),
-                                registry=registry,
-                            )
-                        except (ValidationError, KeyError, TypeError):
-                            ok = False
-                            result = {"error": "Tool arguments were invalid or the requested tool is unavailable."}
-                        except Exception:
-                            ok = False
-                            log.exception("chat tool %s failed", name)
-                            result = {"error": "The requested business data could not be loaded."}
+                        call_key = name + "|" + json.dumps(effective_args, sort_keys=True, default=str)
+                        duplicate = call_key in seen_calls
+                        if duplicate:
+                            # An identical call this turn cannot produce new
+                            # information: repeat the earlier result, marked,
+                            # and record no tool activity that did not happen.
+                            result = {
+                                **seen_calls[call_key],
+                                "duplicate_call_prevented": True,
+                                "note": "Identical call already made this turn; the earlier result is repeated and nothing new was fetched.",
+                            }
+                        else:
+                            if events is not None:
+                                events.put_nowait({"event": "tool", "data": {"name": name}})
+                            service = get_event_service()
+                            task_id = state.get("task_id")
+                            # real tool activity: the tool identifier only (never the
+                            # arguments, which can carry a customer name or id)
+                            if task_id:
+                                await service.emit(
+                                    task_id=task_id, type="tool.started", agent_id="chat",
+                                    payload={"tool": name},
+                                )
+                            tool_started = monotonic_time.monotonic()
+                            try:
+                                result = await invoke_tool(
+                                    name,
+                                    effective_args,
+                                    database=state.get("database"),
+                                    registry=registry,
+                                )
+                            except (ValidationError, KeyError, TypeError):
+                                ok = False
+                                result = {"error": "Tool arguments were invalid or the requested tool is unavailable."}
+                            except Exception:
+                                ok = False
+                                log.exception("chat tool %s failed", name)
+                                result = {"error": "The requested business data could not be loaded."}
+                            if ok:
+                                seen_calls[call_key] = result
                         evidence = tool_evidence(name, result) if ok else None
-                        if task_id:
+                        if task_id and not duplicate:
                             # aggregate counts only: no money, no rows, no filter
                             # values - this payload reaches every dashboard client
                             completed_payload = {
@@ -1083,6 +1439,12 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
                             }
                             if ok:
                                 completed_payload.update(evidence_counts(evidence))
+                                completed_page = _page_block(result)
+                                if completed_page is not None:
+                                    # which page of the walk this was, so the
+                                    # command center can show pagination as a
+                                    # real stage instead of guessing
+                                    completed_payload["offset"] = completed_page["offset"]
                             await service.emit(
                                 task_id=task_id, type="tool.completed", agent_id="chat",
                                 payload=completed_payload,
@@ -1117,13 +1479,14 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
                                         agent_id="chat",
                                         payload={"tool": name, "aggregate": aggregate_key},
                                     )
-                        results.append({"tool": name, "result": result})
+                        if not duplicate:
+                            results.append({"tool": name, "result": result})
                         page = _page_block(result)
-                        if ok and page is not None:
+                        if ok and page is not None and not duplicate:
                             contexts.append(
                                 query_context(name, effective_args, page, _last_user_text(messages))
                             )
-                        if events is not None and evidence:
+                        if events is not None and evidence and not duplicate:
                             # additive: a client that ignores unknown frames is
                             # only poorer by the evidence, never broken by it
                             events.put_nowait({"event": "tool_result", "data": evidence})
@@ -1244,6 +1607,8 @@ async def execute_chat(
     events: Any = None,
     task_id: str | None = None,
     last_query: dict | None = None,
+    forced_results: list | None = None,
+    forced_directive: str = "",
 ) -> dict:
     today = datetime.now(ZoneInfo("Asia/Karachi")).date().isoformat()
     business_date = datetime.now(ERP_TZ).date()
@@ -1265,13 +1630,33 @@ async def execute_chat(
         messages.append(HumanMessage(content=str(turn["question"])))
         messages.append(AIMessage(content=str(turn["answer"])))
     messages.append(HumanMessage(content=message))
+    if forced_results:
+        # The confirmed retrieval already happened; present it to the model
+        # as the tool exchange it is, under the directive that governs it.
+        if forced_directive:
+            messages.append(SystemMessage(content=forced_directive))
+        for index, entry in enumerate(forced_results):
+            call_id = f"confirmed-{index + 1}"
+            messages.append(
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": entry["tool"], "args": {}, "id": call_id, "type": "tool_call"}],
+                )
+            )
+            messages.append(
+                ToolMessage(
+                    content=json.dumps(entry["result"], ensure_ascii=False, default=str),
+                    tool_call_id=call_id,
+                    name=entry["tool"],
+                )
+            )
     graph = build_chat_graph(model=model, tools=tools)
     initial: ChatState = {
         "messages": messages,
         "pending_calls": [],
         "tool_calls": 0,
-        "tool_results": [],
-        "tools_used": [],
+        "tool_results": list(forced_results or []),
+        "tools_used": [entry["tool"] for entry in (forced_results or [])],
         "usage": empty_usage(),
         "final_text": "",
         "regen_count": 0,
@@ -1341,6 +1726,7 @@ async def run_chat(
     previous = await db.chat_threads.find_one({"thread_id": thread_id}) or {}
     turns = trim_turns(previous.get("turns") or [])
     last_query = previous.get("last_query") or None
+    pending_previous = previous.get("pending_action") or None
     started = datetime.now(timezone.utc).isoformat()
     turn_started = monotonic_time.monotonic()
     # The prompt is part of the durable task record so the history drawer can
@@ -1358,6 +1744,23 @@ async def run_chat(
     await service.emit(task_id=task_id, type="agent.started", agent_id="chat", payload={})
     outcome: dict | None = None
     status = "error"
+    # A short confirmation executes the recorded pending retrieval in the
+    # backend, before the model runs - "yes pull" fetches, it does not
+    # re-offer. Anything else leaves the pending action to be superseded by
+    # whatever this turn itself leaves outstanding.
+    forced: dict = {"results": [], "pending": None, "directive": ""}
+    executed_pending = False
+    confirmation = _confirmation_kind(message)
+    if confirmation and pending_previous:
+        try:
+            forced = await _execute_pending_action(
+                pending_previous, confirmation,
+                database=db, tools=tools, task_id=task_id, events=events,
+            )
+            executed_pending = bool(forced.get("results"))
+        except Exception:
+            log.exception("pending action execution failed; falling back to a normal turn")
+            forced = {"results": [], "pending": pending_previous, "directive": ""}
     try:
         outcome = await execute_chat(
             message,
@@ -1368,7 +1771,30 @@ async def run_chat(
             events=events,
             task_id=task_id,
             last_query=last_query,
+            forced_results=forced.get("results") or None,
+            forced_directive=forced.get("directive") or "",
         )
+        if executed_pending:
+            new_pending = (
+                forced.get("pending")
+                or _pending_from_results(outcome.get("tool_results") or [])
+            )
+            if new_pending is None:
+                # The executed action is spent; only a page the model itself
+                # opened during THIS turn may replace it - the old recorded
+                # context must never resurrect the action just consumed.
+                ctx = outcome.get("query_context") or {}
+                if ctx.get("recorded_at") and (
+                    ctx["recorded_at"] > (pending_previous.get("recorded_at") or "")
+                ):
+                    new_pending = _pending_from_context(ctx)
+        elif forced.get("pending") is not None:
+            new_pending = forced["pending"]
+        else:
+            new_pending = (
+                _pending_from_results(outcome.get("tool_results") or [])
+                or _pending_from_context(outcome.get("query_context"))
+            )
         updated_turns = trim_turns(
             [
                 *turns,
@@ -1382,6 +1808,8 @@ async def run_chat(
                     "turns": updated_turns,
                     # only the bounded page record (tool, filters, cursor) - never rows
                     "last_query": outcome.get("query_context") or last_query,
+                    # the bounded pending retrieval (kind, ids, cursor) - never rows
+                    "pending_action": new_pending,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
             },
