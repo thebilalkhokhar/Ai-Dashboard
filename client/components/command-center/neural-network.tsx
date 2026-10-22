@@ -3,14 +3,15 @@
 // The neural network around the core.
 //
 // The SVG draws layered, bowed paths with depth and a soft glow; the labels are
-// HTML so they stay crisp at every size. A connection only flows when that
-// registered agent is genuinely working, and node colours come straight from
-// real event state: working, queued, done, unavailable, plus an amber marker
-// when the backend reported reused (cached) results. Several paths animate at
-// once when several agents are concurrent.
-//
-// Idle movement is ambient only (a faint breathing ring and slow path shimmer);
-// it never sends a particle along an agent link, so nothing implies execution.
+// HTML so they stay crisp at every size. Every agent stays visibly wired to
+// the core: the links are always drawn, and a slow, dim ambient pulse travels
+// them so the web reads as alive and connected while it waits. That pulse is
+// decoration, clearly quieter than work - a link only blazes and speeds up
+// when that registered agent is genuinely working, and node colours and
+// status words come straight from real event state: working, queued, done,
+// unavailable, plus an amber marker when the backend reported reused
+// (cached) results. Several paths animate at once when several agents are
+// concurrent.
 
 import { useEffect, useId, useRef } from "react";
 import { useReducedMotion } from "@/hooks/use-reduced-motion";
@@ -158,18 +159,21 @@ export function NeuralNetwork({
                 fill="none"
                 pathLength={1}
               />
-              {working && !reducedMotion && (
+              {!reducedMotion && (
                 <>
                   <path
                     d={linkPath(x, y)}
-                    className="jn-link jn-link-flow"
+                    className={`jn-link jn-link-flow${working ? "" : " jn-link-flow--ambient"}`}
                     fill="none"
                     pathLength={1}
                     stroke={`url(#${uid}-flow)`}
                   />
-                  <circle className="jn-traveler" r="0.65">
+                  <circle
+                    className={`jn-traveler${working ? "" : " jn-traveler--ambient"}`}
+                    r={working ? 0.65 : 0.5}
+                  >
                     <animateMotion
-                      dur={`${duration}s`}
+                      dur={`${working ? duration : duration * 2.6}s`}
                       repeatCount="indefinite"
                       begin={`${(index % 4) * 0.28}s`}
                     >
@@ -202,7 +206,7 @@ export function NeuralNetwork({
             data-clip={clip ? "true" : "false"}
             style={{ left: `${x}%`, top: `${y}%` }}
           >
-            <span className="jn-dot">
+            <span className="jn-dot" style={{ animationDelay: `${(index % 5) * 0.7}s` }}>
               {clip && (
                 <video
                   className="jn-clip"
