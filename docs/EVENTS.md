@@ -24,7 +24,18 @@ Every event is a versioned `TaskEvent`:
 `task.created`, `task.started`, `task.completed`, `task.failed`,
 `task.cancelled`, `agent.queued`, `agent.started`, `agent.progress`,
 `agent.completed`, `agent.failed`, `tool.started`, `tool.completed`,
-`erp.sync_started`, `erp.sync_completed`, `erp.sync_failed`.
+`erp.sync_started`, `erp.sync_completed`, `erp.sync_failed`,
+`data.filter_completed`, `data.aggregation_completed`,
+`chat.validation_started`, `chat.validation_completed`,
+`chat.response_started`.
+
+The five `data.*` / `chat.*` types are emitted only by the chat loop, each at
+its real boundary: a paged tool's match/page counts (`data.filter_completed`),
+a Python-computed aggregate's key name (`data.aggregation_completed` - never
+the money value), the numeric guard's start and verdict
+(`chat.validation_started` / `chat.validation_completed` with outcome
+`passed`, `corrected` or `replaced`), and the start of an answer generation
+(`chat.response_started`, once per attempt).
 
 ### Payload bounds
 
