@@ -157,10 +157,14 @@ async def test_the_weekly_total_covers_every_match_not_just_the_page_returned():
 
 @pytest.mark.asyncio
 async def test_week_boundaries_are_inclusive_and_outside_rows_are_excluded():
+    """Payment days are the USER's calendar days (Asia/Karachi): an instant
+    belongs to the PKT day it lands in, so the ERP's late evening is
+    already tomorrow for the reader in Lahore."""
     rows = [
-        payment(index=1, received_at="2026-10-16T00:00:01-05:00", amount=100.0),   # first instant of the week
-        payment(index=2, received_at="2026-10-21T23:59:59-05:00", amount=200.0),   # last instant asked for
-        payment(index=3, received_at="2026-10-15T23:59:59-05:00", amount=900.0),   # the day before
+        payment(index=1, received_at="2026-10-15T14:00:01-05:00", amount=100.0),   # Oct 16 00:00:01 PKT - first instant of the asked week
+        payment(index=2, received_at="2026-10-21T13:59:59-05:00", amount=200.0),   # Oct 21 23:59:59 PKT - last instant asked for
+        payment(index=3, received_at="2026-10-21T14:00:00-05:00", amount=900.0),   # Oct 22 00:00:00 PKT - the day after, excluded
+        payment(index=4, received_at="2026-10-15T13:59:59-05:00", amount=700.0),   # Oct 15 23:59:59 PKT - the day before, excluded
     ]
     database = business_db(payments_flat=Collection(rows))
 

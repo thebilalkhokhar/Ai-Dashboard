@@ -173,6 +173,15 @@ async def test_fetch_the_next_page_executes_the_recorded_page():
     # context budget trimmed page one below the requested 50 rows, so the
     # recorded next_offset - not the requested limit - is the truth)
     assert any(f'"offset": {pending["next_offset"]}' in message.content for message in tool_messages)
+    # Pages are budget-bounded, and payment rows now carry their timestamp
+    # provenance, so the remaining rows take more than one bounded page:
+    # each "next page" confirmation must chain the pending forward by
+    # exactly one page until the set is complete and the pending clears.
+    for _ in range(3):
+        if thread_doc(database)["pending_action"] is None:
+            break
+        nxt = FakeModel([AIMessage(content="The next page is delivered.")])
+        await run_chat("thread-1", "fetch the next page", database=database, model=nxt)
     assert thread_doc(database)["pending_action"] is None
 
 
