@@ -86,6 +86,11 @@ total_count, returned, remaining_count, has_more, next_offset.
   search the stored chats. Its excerpts are context from the past, not
   fresh data: never cite a figure from an excerpt as current - re-check it
   with a data tool first.
+- Payment times: state an exact time ONLY when the payment result gives
+  received_time_pkt (a genuine instant the backend converted for you).
+  When timestamp_precision is "date", the source recorded only the date:
+  give the date and say the exact arrival time is not recorded. Never
+  convert a midnight timestamp into a clock time yourself.
 - A customer profile that says complete=false is partial: name the missing
   sections and say the rest can be pulled. When the user confirms ('yes',
   'yes pull', 'show all'), the backend executes the recorded retrieval
@@ -573,6 +578,12 @@ _PARTIAL_DISCLOSURE_RE = re.compile(
     r"remaining|outstanding|still to fetch|can be pulled|pull the rest",
     re.IGNORECASE,
 )
+_TIME_CLAIM_RE = re.compile(r"\b\d{1,2}:\d{2}\s*(?:AM|PM|am|pm|PKT)\b")
+_TIME_UNAVAILABLE_RE = re.compile(
+    r"exact (arrival )?time (is )?(not|unavailable)|time (is )?not recorded|"
+    r"date only|no exact time|time (is )?unavailable",
+    re.IGNORECASE,
+)
 # One rendered payment row: "Payment 7263" / "payment #7,263".
 _PAYMENT_ROW_RE = re.compile(r"\bpayments?\s+#?\s*\d[\d,]*\b", re.I)
 # A claim that a number of payments were *displayed*: "27 payments listed".
@@ -631,6 +642,35 @@ def _answer_consistency_errors(text: str, tool_results: list[dict], named_period
         ):
             errors.append("the answer presents a partial customer profile as complete")
         break
+
+    # An exact payment time may only be stated when the evidence holds a
+    # genuine instant. Date-only evidence (the source recorded a date, the
+    # timestamp is midnight) makes any clock-time claim an invention -
+    # unless the answer itself discloses that the time is unavailable.
+    precisions: set[str] = set()
+
+    def collect_precisions(value: Any) -> None:
+        if isinstance(value, dict):
+            precision = value.get("timestamp_precision")
+            if isinstance(precision, str):
+                precisions.add(precision)
+            for nested in value.values():
+                collect_precisions(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                collect_precisions(nested)
+
+    for entry in tool_results:
+        collect_precisions(entry.get("result"))
+    if (
+        precisions
+        and precisions <= {"date", "missing"}
+        and _TIME_CLAIM_RE.search(text)
+        and not _TIME_UNAVAILABLE_RE.search(text)
+    ):
+        errors.append(
+            "the answer states an exact payment time but the source records dates only"
+        )
 
     # Payment rows actually rendered vs a claim that more were displayed.
     rows = len(_PAYMENT_ROW_RE.findall(text))
@@ -1622,12 +1662,17 @@ async def execute_chat(
     forced_directive: str = "",
 ) -> dict:
     today = datetime.now(ZoneInfo("Asia/Karachi")).date().isoformat()
-    business_date = datetime.now(ERP_TZ).date()
-    business_today = business_date.isoformat()
+    # Relative dates in chat are read on the USER's calendar: at 7 AM in
+    # Lahore the ERP's US business day is still yesterday, and presenting
+    # that date as the user's "today" mislabels the data. The ERP date is
+    # kept for context in the prompt below, never as the chat's today.
+    business_date = datetime.now(ZoneInfo("Asia/Karachi")).date()
+    business_today = datetime.now(ERP_TZ).date().isoformat()
     system = (
         f"{CHAT_SYSTEM}\nCurrent date in the user's timezone (Asia/Karachi): {today}. "
-        f"Current ERP business date ({ERP_TZ}): {business_today}. Business records use the "
-        "ERP business calendar. When the user names a period ('this week', 'today', "
+        f"Current ERP business date ({ERP_TZ}): {business_today}. Relative dates "
+        "('today', 'yesterday', 'this week') resolve on the USER's calendar above; "
+        "the ERP date is context only. When the user names a period ('this week', 'today', "
         "'last month'), pass it as the tool's `period` argument and let the server resolve "
         "the dates - never turn a named period into your own date_from/date_to, because "
         "'this week' and 'the last 7 days' are different ranges and only the first has one "

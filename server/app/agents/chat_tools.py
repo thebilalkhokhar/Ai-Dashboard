@@ -114,7 +114,13 @@ class PeriodMixin(BaseModel):
         if self.date_from is not None or self.date_to is not None:
             raise ValueError("period and an explicit date_from/date_to cannot be combined - use one")
         try:
-            start, end = periods.resolve_period(raw)
+            # Relative dates are read on the user's calendar (Asia/Karachi):
+            # when the user in Lahore says "today" at 7 AM, the ERP's US
+            # business day is still yesterday, and answering with the ERP
+            # date while calling it "today" mislabels the data.
+            start, end = periods.resolve_period(
+                raw, today=datetime.now(processors.USER_TZ).date()
+            )
         except KeyError:
             raise ValueError(
                 f"unknown period {raw!r}; choose one of {', '.join(periods.PERIOD_NAMES)}"
@@ -530,7 +536,7 @@ async def get_revenue(
     matched = [
         row
         for row in rows
-        if _in_date_range(row.get("received_at"), args.date_from, args.date_to)
+        if _in_user_window(row.get("received_at"), args.date_from, args.date_to)
         and (args.rep_id is None or _same_id(_rep_id(row), args.rep_id))
     ]
     return {
@@ -707,7 +713,7 @@ async def get_rep_summary(
     payments = await db.payments_flat.find().to_list(200_000)
     quotes = [r for r in quotes if _same_id(_rep_id(r), rep["id"]) and _in_date_range(r.get("created_at"), args.date_from, args.date_to)]
     orders = [r for r in orders if _same_id(_rep_id(r), rep["id"]) and _in_date_range(r.get("invoice_date"), args.date_from, args.date_to)]
-    payments = [r for r in payments if _same_id(_rep_id(r), rep["id"]) and _in_date_range(r.get("received_at"), args.date_from, args.date_to)]
+    payments = [r for r in payments if _same_id(_rep_id(r), rep["id"]) and _in_user_window(r.get("received_at"), args.date_from, args.date_to)]
     return {
         "rep": rep,
         "date_from": args.date_from.isoformat(),
@@ -893,6 +899,24 @@ def _in_window(value: Any, date_from: date | None, date_to: date | None) -> bool
     return _in_date_range(value, date_from or date.min, date_to or date.max)
 
 
+def _in_user_window(value: Any, date_from: date | None, date_to: date | None) -> bool:
+    """Python-side date filter (inclusive) on the USER's calendar.
+
+    Payment `received_at` values are instants, not business dates: an
+    instant at 11:30 PM at the ERP is 9:30 AM the next day in Lahore, and
+    it belongs to the user's next day. The instant is converted to
+    Asia/Karachi and its calendar date compared - never the raw string
+    and never the ERP's day.
+    """
+    if date_from is None and date_to is None:
+        return True
+    moment = processors.parse_date(value)
+    if moment is None:
+        return False
+    day = moment.astimezone(processors.USER_TZ).date()
+    return (date_from or date.min) <= day <= (date_to or date.max)
+
+
 def _text_matches(row: dict, needle: str) -> bool:
     haystack = json.dumps(_strip_private(row), default=str).casefold()
     return needle.casefold() in haystack
@@ -924,6 +948,47 @@ async def _resolve_customer(database: Any, value: str | None) -> tuple[Any, str,
     return best.get("id"), str(best.get("company_name") or text), ""
 
 
+_MIDNIGHT_RE = re.compile(r"[T ]00:00:00(\.\d+)?($|[+-]\d{2}:?\d{2}|Z)")
+
+
+def _payment_timestamp(value: Any) -> dict:
+    """What a payment's `received_at` actually proves, stated plainly.
+
+    The ERP keeps a separate date-only `payment_date`, and its
+    `received_at` for date-recorded payments is that date at midnight in
+    the ERP's offset (e.g. 2026-10-22T00:00:00-05:00, identical across
+    unrelated payments). A midnight value therefore carries a DATE, not
+    an arrival time: converting it to "5:00 AM PKT" would manufacture a
+    precision the source never had. Only a value with a real time
+    component is an instant, and its PKT rendering is computed here, in
+    Python - the model never does timezone arithmetic.
+    """
+    if value is None:
+        return {"timestamp_precision": "missing", "received_date": None}
+    moment = processors.parse_date(value)
+    if moment is None:
+        return {"timestamp_precision": "missing", "received_date": None}
+    if isinstance(value, datetime):
+        wall = value if value.tzinfo else value.replace(tzinfo=processors.ERP_TZ)
+        is_midnight = (wall.hour, wall.minute, wall.second, wall.microsecond) == (0, 0, 0, 0)
+    elif isinstance(value, date):
+        is_midnight = True
+    else:
+        text = str(value).strip()
+        is_midnight = ("T" not in text and " " not in text) or bool(_MIDNIGHT_RE.search(text))
+    pkt = moment.astimezone(processors.USER_TZ)
+    if is_midnight:
+        return {
+            "timestamp_precision": "date",
+            "received_date": pkt.date().isoformat(),
+        }
+    return {
+        "timestamp_precision": "instant",
+        "received_date": pkt.date().isoformat(),
+        "received_time_pkt": pkt.strftime("%b %d, %Y, %I:%M %p PKT"),
+    }
+
+
 def _payment_row(row: dict) -> dict:
     invoices = [
         {
@@ -934,12 +999,21 @@ def _payment_row(row: dict) -> dict:
         for detail in (row.get("payment_details") or [])
         if isinstance(detail, dict)
     ]
+    stamp = _payment_timestamp(row.get("received_at"))
+    if stamp["timestamp_precision"] == "missing" and row.get("payment_date"):
+        # no receipt timestamp at all; the payment date is all the
+        # source offers, and the precision label says exactly that
+        stamp = {**stamp, "received_date": row.get("payment_date")}
     return {
         "payment_id": row.get("id"),
         "amount": processors.to_number(row.get("amount")),
         "amount_used": processors.to_number(row.get("total_payment_used")),
-        "payment_date": row.get("payment_date"),
-        "received_at": row.get("received_at"),
+        "payment_date": row.get("payment_date") or stamp.get("received_date"),
+        # The raw received_at is only exposed when it is a genuine
+        # instant; a date-only midnight is represented by received_date
+        # plus the precision contract, never as a fake receipt time.
+        **({"received_at": row.get("received_at")} if stamp["timestamp_precision"] == "instant" else {}),
+        **stamp,
         "reference": row.get("payment_ref"),
         "customer_id": _customer_id_of(row),
         "customer_name": _customer_name_of(row) or "Customer not recorded",
@@ -975,7 +1049,7 @@ async def get_payments(
     if wanted_id != "none":
         for row in rows:
             amount = processors.to_number(row.get("amount"))
-            if not _in_window(row.get("received_at"), args.date_from, args.date_to):
+            if not _in_user_window(row.get("received_at") or row.get("payment_date"), args.date_from, args.date_to):
                 continue
             if args.min_amount is not None and amount < args.min_amount:
                 continue
@@ -1015,6 +1089,12 @@ async def get_payments(
     result = _paginate(
         _bounded(result), total=len(matched), offset=args.offset, limit=args.limit
     )
+    if any(item["timestamp_precision"] in {"date", "missing"} for item in result["items"]):
+        # stated once for the whole page, not repeated on every row
+        result["timestamp_note"] = (
+            "Exact arrival times are not recorded for the date-only payments "
+            "above; received_date is the payment date."
+        )
     if args.offset and not result["items"]:
         result["note"] = "That offset is past the end of this result set; nothing more to fetch."
     return result
@@ -1505,11 +1585,21 @@ async def get_record(collection: str, id: str, database: Any = None) -> dict:
             "found": False,
             "note": f"No {args.collection} record with id {args.id} exists in the business data.",
         }
+    record = _strip_private(rows[0])
+    if args.collection == "payments":
+        # the same timestamp contract as the payments list: a date-only
+        # midnight must not reach the model as a raw receipt time here
+        stamp = _payment_timestamp(record.get("received_at"))
+        if stamp["timestamp_precision"] == "missing" and record.get("payment_date"):
+            stamp = {**stamp, "received_date": record.get("payment_date")}
+        if stamp["timestamp_precision"] != "instant":
+            record.pop("received_at", None)
+        record.update(stamp)
     return {
         "collection": args.collection,
         "id": args.id,
         "found": True,
-        "record": _strip_private(rows[0]),
+        "record": record,
     }
 
 
@@ -2062,7 +2152,12 @@ async def _metric_window(database: Any, metric: str, date_from: date, date_to: d
     collection_name, date_field, amount_field = _METRIC_DATE_FIELDS[metric]
     db = _database(database)
     rows = await _collection(db, collection_name).find().to_list(200_000)
-    matched = [row for row in rows if _in_date_range(row.get(date_field), date_from, date_to)]
+    if metric == "payments":
+        # payment instants are bucketed on the user's calendar, exactly as
+        # get_payments filters them - one question, one calendar
+        matched = [row for row in rows if _in_user_window(row.get(date_field), date_from, date_to)]
+    else:
+        matched = [row for row in rows if _in_date_range(row.get(date_field), date_from, date_to)]
     if metric == "invoices":
         invoiced = round(sum(processors.to_number(row.get("total_amount")) for row in matched), 2)
         balance = round(
@@ -2153,7 +2248,10 @@ async def detect_anomalies(metric: str = "payments", recent_days: int = 7, basel
     all_rows = await _collection(_database(database), collection_name).find().to_list(200_000)
 
     def day_value(day: date) -> float:
-        matched = [row for row in all_rows if _in_date_range(row.get(date_field), day, day)]
+        if args.metric == "payments":
+            matched = [row for row in all_rows if _in_user_window(row.get(date_field), day, day)]
+        else:
+            matched = [row for row in all_rows if _in_date_range(row.get(date_field), day, day)]
         if args.metric == "leads":
             return float(len(matched))
         if args.metric == "invoices":
