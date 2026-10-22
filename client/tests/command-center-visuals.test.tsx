@@ -70,13 +70,18 @@ describe("NeuralNetwork", () => {
     expect(document.querySelector(".jn-stage")?.textContent).not.toMatch(/collections|chat_/);
   });
 
-  it("animates only the connections the events say are working", () => {
+  it("blazes only the connections the events say are working; the rest carry the dim ambient pulse", () => {
     render(<NeuralNetwork nodes={nodes} active />);
     const groups = Array.from(document.querySelectorAll(".jn-link-group"));
     expect(groups).toHaveLength(2);
     expect(groups[0].getAttribute("data-working")).toBe("true");
     expect(groups[1].getAttribute("data-working")).toBe("false");
-    expect(document.querySelectorAll(".jn-link-flow")).toHaveLength(1);
+    // every link stays visibly alive, but only the working one runs at full
+    // strength - the other is marked ambient so motion never claims work
+    expect(document.querySelectorAll(".jn-link-flow")).toHaveLength(2);
+    expect(document.querySelectorAll(".jn-link-flow:not(.jn-link-flow--ambient)")).toHaveLength(1);
+    expect(document.querySelectorAll(".jn-link-flow--ambient")).toHaveLength(1);
+    expect(document.querySelectorAll(".jn-traveler:not(.jn-traveler--ambient)")).toHaveLength(1);
   });
 
   it("drops travelling particles and pulses under prefers-reduced-motion", () => {
@@ -111,18 +116,25 @@ describe("state visuals", () => {
     ];
     render(<NeuralNetwork nodes={concurrent} active />);
 
-    expect(document.querySelectorAll(".jn-link-flow")).toHaveLength(2);
-    expect(document.querySelectorAll(".jn-traveler")).toHaveLength(2);
+    // two links blaze at working strength; the failed/completed links keep
+    // only the ambient pulse, so all four stay drawn but just two claim work
+    expect(document.querySelectorAll(".jn-link-flow")).toHaveLength(4);
+    expect(document.querySelectorAll(".jn-link-flow:not(.jn-link-flow--ambient)")).toHaveLength(2);
+    expect(document.querySelectorAll(".jn-traveler:not(.jn-traveler--ambient)")).toHaveLength(2);
     expect(document.querySelector('.jn-node[data-state="failed"]')).not.toBeNull();
     expect(document.querySelector('.jn-link-group[data-cached="true"]')).not.toBeNull();
   });
 
-  it("stays still when idle: no travelling particles or working links", () => {
+  it("stays connected when idle: ambient pulses only, no link claims to be working", () => {
     const idle = nodes.map((node) => ({ ...node, status: "idle" as const, activeTools: [] }));
     render(<NeuralNetwork nodes={idle} active={false} />);
 
-    expect(document.querySelectorAll(".jn-link-flow")).toHaveLength(0);
-    expect(document.querySelectorAll(".jn-traveler")).toHaveLength(0);
+    // the web stays visibly wired to the core while it waits...
+    expect(document.querySelectorAll(".jn-link-flow--ambient")).toHaveLength(2);
+    expect(document.querySelectorAll(".jn-traveler--ambient")).toHaveLength(2);
+    // ...but nothing runs at working strength and no node reports working
+    expect(document.querySelectorAll(".jn-link-flow:not(.jn-link-flow--ambient)")).toHaveLength(0);
+    expect(document.querySelectorAll('.jn-link-group[data-working="true"]')).toHaveLength(0);
     expect(document.querySelector('.jn-stage')).toHaveAttribute("data-active", "false");
   });
 });
