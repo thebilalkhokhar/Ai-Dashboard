@@ -120,7 +120,7 @@ export function OperationFlow({
   for (const stage of tree.agentStages) slots.push({ kind: "agent", ref: stage });
   if (tree.moreStage) slots.push({ kind: "more", ref: tree.moreStage });
 
-  const span = Math.min(84, Math.max(0, (slots.length - 1) * 21));
+  const span = Math.min(88, Math.max(0, (slots.length - 1) * 30));
   const slotY = (index: number) =>
     slots.length <= 1 ? CENTER_Y : CENTER_Y - span / 2 + (span / (slots.length - 1)) * index;
 
@@ -475,16 +475,17 @@ export function OperationFlow({
               </span>
               <span className="jtree-text">
                 <span className="jtree-label">{tool.stage.label}</span>
-                <span className="jtree-state">{stateWord(tool.stage.state)}</span>
+                <span className="jtree-state">
+                  {stateWord(tool.stage.state)}{duration ? ` · ${duration}` : ""}
+                </span>
                 {tool.counts && (
                   <span className="jtree-counts">
-                    {tool.counts.returned} of {tool.counts.total} matched
+                    {tool.counts.returned.toLocaleString("en-US")} of {tool.counts.total.toLocaleString("en-US")} matched
                     {tool.counts.remaining !== null && tool.counts.remaining > 0
-                      ? ` · ${tool.counts.remaining} to fetch`
+                      ? ` · ${tool.counts.remaining.toLocaleString("en-US")} to fetch`
                       : ""}
                   </span>
                 )}
-                {duration && <span className="jtree-sub">{duration}</span>}
               </span>
             </button>
           );

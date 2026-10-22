@@ -104,7 +104,7 @@ export function NeuralNetwork({
       role="group"
       aria-label="Agent network"
     >
-      <svg viewBox="0 0 100 100" className="jn-svg" aria-hidden="true">
+      <svg viewBox="0 0 100 100" className="jn-svg" preserveAspectRatio="none" aria-hidden="true">
         <defs>
           <radialGradient id={`${uid}-core`}>
             <stop offset="0%" stopColor="rgba(125,240,255,0.42)" />
