@@ -133,6 +133,42 @@ export function toolPhrase(toolName: unknown): string {
   return TOOL_PHRASES[toolName] ?? "Reviewing business data";
 }
 
+// Which registered specialist's territory a chat tool belongs to. The chat
+// assistant runs every lookup itself; this mapping only says whose desk the
+// work sits on, so the live view can draw the hand-off honestly: a branch
+// appears only when a tool of that territory was really invoked on this
+// task, and its state comes from that tool's own events. Tools mapped to
+// "chat" are plain record lookups the assistant keeps for itself - they
+// hang directly off the root instead of inventing a transfer.
+const TOOL_DOMAIN_AGENTS: Record<string, string> = {
+  get_top_unpaid: "collections",
+  get_payments: "collections",
+  get_invoices: "collections",
+  get_revenue: "collections",
+  get_top_open_quotes: "negotiation",
+  get_quotes: "negotiation",
+  get_stuck_leads: "lead_followup",
+  get_leads: "lead_followup",
+  compare_lead_pulls: "lead_followup",
+  get_dashboard_metrics: "master",
+  get_signals_summary: "master",
+  get_latest_briefing: "master",
+  get_agent_briefing: "master",
+  get_rep_summary: "master",
+  find_customer: "chat",
+  get_customer_context: "chat",
+  get_customer_profile: "chat",
+  get_record: "chat",
+  search_records: "chat",
+  get_orders: "chat",
+  describe_data: "chat",
+};
+
+export function toolDomainAgent(toolName: unknown): string {
+  if (typeof toolName !== "string" || !toolName) return "chat";
+  return TOOL_DOMAIN_AGENTS[toolName] ?? "chat";
+}
+
 const AGENT_START_PHRASES: Record<string, string> = {
   negotiation: "Reviewing stale quotes",
   collections: "Reviewing unpaid invoices",
