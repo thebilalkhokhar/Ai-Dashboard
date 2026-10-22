@@ -976,6 +976,7 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
         used: list[str] = []
         count = 0
         regen_count = 0
+        validation_started = False
         usage = empty_usage()
         final_text = ""
         emitted_tokens = 0
@@ -1071,6 +1072,7 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
                             ok = False
                             log.exception("chat tool %s failed", name)
                             result = {"error": "The requested business data could not be loaded."}
+                        evidence = tool_evidence(name, result) if ok else None
                         if task_id:
                             # aggregate counts only: no money, no rows, no filter
                             # values - this payload reaches every dashboard client
@@ -1080,20 +1082,47 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
                                 "duration_ms": round((monotonic_time.monotonic() - tool_started) * 1000),
                             }
                             if ok:
-                                completed_payload.update(
-                                    evidence_counts(tool_evidence(name, result))
-                                )
+                                completed_payload.update(evidence_counts(evidence))
                             await service.emit(
                                 task_id=task_id, type="tool.completed", agent_id="chat",
                                 payload=completed_payload,
                             )
+                            # The data stages the tool genuinely performed, as
+                            # their own events so the command center can draw
+                            # them: a paged tool matched a set and delivered a
+                            # page of it (filtering), and an aggregate tool
+                            # totalled values in Python (aggregation). Counts
+                            # and key names only - never money values or rows.
+                            if ok and evidence:
+                                page_block = _page_block(result)
+                                if page_block is not None:
+                                    filter_payload = {
+                                        "tool": name,
+                                        "matched": page_block["total_count"],
+                                        "returned": page_block["returned"],
+                                        "complete": page_block.get("all_records_returned") is True,
+                                    }
+                                    if page_block.get("remaining_count") is not None:
+                                        filter_payload["remaining"] = page_block["remaining_count"]
+                                    await service.emit(
+                                        task_id=task_id, type="data.filter_completed",
+                                        agent_id="chat", payload=filter_payload,
+                                    )
+                                aggregate_key = evidence.get("money_label") or (
+                                    "record_count" if "record_count" in evidence else None
+                                )
+                                if aggregate_key:
+                                    await service.emit(
+                                        task_id=task_id, type="data.aggregation_completed",
+                                        agent_id="chat",
+                                        payload={"tool": name, "aggregate": aggregate_key},
+                                    )
                         results.append({"tool": name, "result": result})
                         page = _page_block(result)
                         if ok and page is not None:
                             contexts.append(
                                 query_context(name, effective_args, page, _last_user_text(messages))
                             )
-                        evidence = tool_evidence(name, result) if ok else None
                         if events is not None and evidence:
                             # additive: a client that ignores unknown frames is
                             # only poorer by the evidence, never broken by it
@@ -1109,6 +1138,24 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
 
             final_text = _format_answer_money(_message_text(response))
             period_phrase = _period_phrase(named_period)
+            # A no-tool-call response IS the answer generation, and the guard
+            # below is the validation stage: both are real boundaries in this
+            # loop, so they are recorded as events for the command center.
+            # Emission is best-effort (the event service never raises) and
+            # changes nothing about the answer itself.
+            task_id = state.get("task_id")
+            if task_id:
+                service = get_event_service()
+                await service.emit(
+                    task_id=task_id, type="chat.response_started", agent_id="chat",
+                    payload={"attempt": regen_count + 1},
+                )
+                if not validation_started:
+                    validation_started = True
+                    await service.emit(
+                        task_id=task_id, type="chat.validation_started", agent_id="chat",
+                        payload={},
+                    )
             # Wording/displayed-count consistency the numeric guard cannot see.
             # Computed on the model's prose before any substitution; it can only
             # ADD rejections, never remove one.
@@ -1123,6 +1170,11 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
             if errors:
                 log.warning("numeric validation failed: %s | text=%s", errors, final_text[:600])
             if not errors:
+                if task_id:
+                    await service.emit(
+                        task_id=task_id, type="chat.validation_completed", agent_id="chat",
+                        payload={"outcome": "passed" if regen_count == 0 else "corrected"},
+                    )
                 break
             if regen_count == 0:
                 if events is not None and attempt_emitted:
@@ -1148,6 +1200,11 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
             # discarded entirely - never shown - and, when the tools computed a
             # real figure, replaced with a backend-only summary of it. Fabricated
             # claims never reach the user; a verified total is never lost.
+            if task_id:
+                await service.emit(
+                    task_id=task_id, type="chat.validation_completed", agent_id="chat",
+                    payload={"outcome": "replaced"},
+                )
             final_text = _evidence_summary(results, period_phrase) or _fallback_text(_last_user_text(messages))
             break
 
