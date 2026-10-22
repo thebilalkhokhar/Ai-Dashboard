@@ -177,6 +177,23 @@ def test_event_schema_valid_and_versioned():
     assert round_trip.task_id == "task-1"
 
 
+def test_event_schema_accepts_chat_data_lifecycle_types():
+    # the chat loop's real stages: paged filtering, Python aggregation, the
+    # numeric guard's verdict, and answer generation
+    for event_type in (
+        "data.filter_completed",
+        "data.aggregation_completed",
+        "chat.validation_started",
+        "chat.validation_completed",
+        "chat.response_started",
+    ):
+        event = TaskEvent(
+            task_id="t", seq=1, ts=datetime.now(timezone.utc),
+            type=event_type, agent_id="chat", payload={"tool": "get_payments"},
+        )
+        assert event.type == event_type
+
+
 def test_event_schema_rejects_unknown_type_and_bad_seq():
     from pydantic import ValidationError
 

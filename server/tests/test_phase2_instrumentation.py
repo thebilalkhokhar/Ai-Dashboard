@@ -560,3 +560,116 @@ async def test_chat_stream_announces_the_task_id_of_its_own_events():
     # the persisted task events for this turn carry exactly that task id
     assert {e["task_id"] for e in recorder.events} == {announced}
     assert recorder.of("task.started") and recorder.of("task.completed")
+
+
+# ---------------------------------------------------------------------------
+# chat data-lifecycle events: filter / aggregation / validation / response
+# ---------------------------------------------------------------------------
+
+
+def _paged_tool():
+    async def read_tool(database=None):
+        return {
+            "offset": 0, "limit": 10, "total_count": 25, "returned": 10,
+            "remaining_count": 15, "has_more": True, "next_offset": 10,
+            "all_records_returned": False,
+            "sum_amount": 4321.0, "sum_amount_covers": "all matched records",
+            "records": [],
+        }
+
+    return ChatTool("fake_read", "Return one page of matched records", EmptyArgs, read_tool)
+
+
+@pytest.mark.asyncio
+async def test_chat_emits_filter_and_aggregation_events_with_real_counts():
+    recorder = RecordingEventService()
+    set_event_service(recorder)
+    model = FakeModel([tool_call(), plain_answer("Done.")])
+    await run_chat(
+        "thread-data", "Show payments", model=model, tools=[_paged_tool()],
+        database=_FakeDb(),
+    )
+
+    types = recorder.types()
+    # the data stages sit between the tool's own lifecycle and the answer's
+    assert types.index("tool.completed") < types.index("data.filter_completed")
+    assert types.index("data.filter_completed") < types.index("chat.response_started")
+
+    filtered = recorder.of("data.filter_completed")
+    assert len(filtered) == 1
+    assert filtered[0]["payload"] == {
+        "tool": "fake_read", "matched": 25, "returned": 10,
+        "remaining": 15, "complete": False,
+    }
+    aggregated = recorder.of("data.aggregation_completed")
+    assert len(aggregated) == 1
+    # the aggregate's key name only - the money value itself never rides an event
+    assert aggregated[0]["payload"] == {"tool": "fake_read", "aggregate": "sum_amount"}
+
+
+@pytest.mark.asyncio
+async def test_chat_emits_validation_passed_for_a_clean_answer():
+    recorder = RecordingEventService()
+    set_event_service(recorder)
+    model = FakeModel([plain_answer("Hello there.")])
+    await run_chat("thread-val", "hi", model=model, tools=[], database=_FakeDb())
+
+    assert len(recorder.of("chat.response_started")) == 1
+    assert len(recorder.of("chat.validation_started")) == 1
+    completed = recorder.of("chat.validation_completed")
+    assert len(completed) == 1
+    assert completed[0]["payload"] == {"outcome": "passed"}
+
+
+@pytest.mark.asyncio
+async def test_chat_emits_validation_corrected_after_a_regeneration():
+    recorder = RecordingEventService()
+    set_event_service(recorder)
+
+    async def read_tool(database=None):
+        return {"count": 4}
+
+    tool = ChatTool("fake_read", "Return a fixed count", EmptyArgs, read_tool)
+    model = FakeModel([
+        tool_call(),
+        plain_answer("There are 999 open quotes."),
+        plain_answer("There are 4 open quotes."),
+    ])
+    outcome = await run_chat(
+        "thread-fix", "How many open quotes?", model=model, tools=[tool],
+        database=_FakeDb(),
+    )
+
+    assert outcome["text"] == "There are 4 open quotes."
+    # two answer generations, one validation stage, verdict: corrected
+    assert len(recorder.of("chat.response_started")) == 2
+    assert len(recorder.of("chat.validation_started")) == 1
+    completed = recorder.of("chat.validation_completed")
+    assert len(completed) == 1
+    assert completed[0]["payload"] == {"outcome": "corrected"}
+
+
+@pytest.mark.asyncio
+async def test_chat_emits_validation_replaced_when_prose_is_discarded():
+    recorder = RecordingEventService()
+    set_event_service(recorder)
+
+    async def read_tool(database=None):
+        return {"count": 4}
+
+    tool = ChatTool("fake_read", "Return a fixed count", EmptyArgs, read_tool)
+    model = FakeModel([
+        tool_call(),
+        plain_answer("There are 999 open quotes."),
+        plain_answer("There are 888 open quotes."),
+    ])
+    outcome = await run_chat(
+        "thread-repl", "How many open quotes?", model=model, tools=[tool],
+        database=_FakeDb(),
+    )
+
+    # the unsupported prose never reached the user
+    assert "999" not in outcome["text"] and "888" not in outcome["text"]
+    completed = recorder.of("chat.validation_completed")
+    assert len(completed) == 1
+    assert completed[0]["payload"] == {"outcome": "replaced"}
