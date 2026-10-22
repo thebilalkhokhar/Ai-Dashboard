@@ -165,6 +165,40 @@ describe("execution lifecycle", () => {
     expect(screen.getByTestId("flow-node-synthesize")).toHaveTextContent("done");
   });
 
+  it("grows a routing tree: lookups appear under the specialist whose territory they belong to", async () => {
+    renderApp();
+    const stream = await startTurn("Show overdue invoices and stuck leads");
+    await emit(stream, taskEvent({ type: "task.started", task_id: "task-live", seq: 1, agent_id: "chat" }));
+    await emit(
+      stream,
+      taskEvent({ type: "tool.started", task_id: "task-live", seq: 2, agent_id: "chat", payload: { tool: "get_invoices" } }),
+    );
+    await emit(
+      stream,
+      taskEvent({ type: "tool.started", task_id: "task-live", seq: 3, agent_id: "chat", payload: { tool: "get_stuck_leads" } }),
+    );
+
+    // one branch per territory a real lookup touched, each carrying its leaf
+    const collections = screen.getByTestId("flow-branch-collections");
+    expect(within(collections).getByText("Collections Assistant")).toBeInTheDocument();
+    expect(within(collections).getByText("working")).toBeInTheDocument();
+    expect(within(collections).getByText(/routed by Chat Assistant/i)).toBeInTheDocument();
+    const leads = screen.getByTestId("flow-branch-lead_followup");
+    expect(within(leads).getByText("Lead Follow-up Assistant")).toBeInTheDocument();
+    expect(screen.getByTestId("flow-node-tool-get_invoices")).toBeInTheDocument();
+    expect(screen.getByTestId("flow-node-tool-get_stuck_leads")).toBeInTheDocument();
+    // no lookup touched quotes, so no Negotiation branch is drawn
+    expect(screen.queryByTestId("flow-branch-negotiation")).not.toBeInTheDocument();
+
+    await emit(
+      stream,
+      taskEvent({ type: "tool.completed", task_id: "task-live", seq: 4, agent_id: "chat", payload: { tool: "get_invoices", ok: true } }),
+    );
+    // the branch settles only when its own lookup's completion event arrived
+    expect(within(screen.getByTestId("flow-branch-collections")).getByText("done")).toBeInTheDocument();
+    expect(within(screen.getByTestId("flow-branch-lead_followup")).getByText("working")).toBeInTheDocument();
+  });
+
   it("never stays visually active when the backend records an ending it never streamed", async () => {
     renderApp();
     const stream = await startTurn();
