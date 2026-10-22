@@ -29,8 +29,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # change; consumers read `v` before trusting any optional payload field.
 SCHEMA_VERSION = 1
 
-# The full, closed set of event types supported in Phase 1. Task/agent/tool/erp
-# lifecycle events; there is no free-form type.
+# The full, closed set of event types. Task/agent/tool/erp lifecycle events,
+# plus the chat data-lifecycle events added when the command center learned
+# to draw fetching/filtering/aggregation/validation as real stages: each of
+# those is emitted at the actual boundary in the chat loop (a paged tool's
+# match counts, a Python-computed aggregate, the numeric guard's verdict,
+# the start of an answer generation). There is no free-form type.
 EventType = Literal[
     "task.created",
     "task.started",
@@ -47,6 +51,11 @@ EventType = Literal[
     "erp.sync_started",
     "erp.sync_completed",
     "erp.sync_failed",
+    "data.filter_completed",
+    "data.aggregation_completed",
+    "chat.validation_started",
+    "chat.validation_completed",
+    "chat.response_started",
 ]
 
 EVENT_TYPES: frozenset[str] = frozenset(
@@ -66,6 +75,11 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "erp.sync_started",
         "erp.sync_completed",
         "erp.sync_failed",
+        "data.filter_completed",
+        "data.aggregation_completed",
+        "chat.validation_started",
+        "chat.validation_completed",
+        "chat.response_started",
     )
 )
 
