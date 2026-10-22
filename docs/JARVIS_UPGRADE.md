@@ -103,3 +103,26 @@ cite tool evidence, and the two provenances would never be merged into
 one claim. That requires its own decision on ingestion, storage and
 permissions; this upgrade deliberately adds no embeddings, training,
 new databases or ingestion jobs.
+
+## Chat storage and cross-chat recall
+
+Every conversation is stored on the server in `chat_threads` (turns,
+title from the first question, the bounded last-query and pending-action
+records). On top of that store:
+
+- `GET /api/chats` lists all conversations (title, turn count, last
+  activity); `GET /api/chats/{thread_id}` returns one in full;
+  `DELETE /api/chats/{thread_id}` removes it (usage/audit logs stay).
+- The **Chats tab** lists them in the app; opening one restores its
+  saved turns in the Command Center and continues that same thread.
+  The chat panel also restores the current conversation on load: the
+  thread id is kept in `localStorage` (previously `sessionStorage`,
+  which died with the tab session).
+- **New chat** starts a fresh thread; the old one stays stored.
+- The `recall_conversations` tool searches the stored chats, so JARVIS
+  answers "what did we discuss about X" from real past exchanges. Its
+  excerpts are deliberately kept out of the numeric evidence set: a
+  figure from an old answer is context, and citing it as current still
+  requires a fresh data tool call. This is retrieval over stored
+  history — no model training or fine-tuning is involved, per the
+  project's standing decision.
