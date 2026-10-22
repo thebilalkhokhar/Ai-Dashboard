@@ -481,6 +481,21 @@ export function summarizeEvent(event: TaskEvent): string {
     }
     case "erp.sync_failed":
       return `ERP sync failed${p.error_kind ? `: ${String(p.error_kind)}` : ""}`;
+    case "data.filter_completed": {
+      const matched = typeof p.matched === "number" ? p.matched : null;
+      const returned = typeof p.returned === "number" ? p.returned : null;
+      return matched !== null && returned !== null
+        ? `Filtered · ${matched} matched, ${returned} returned`
+        : "Filtered";
+    }
+    case "data.aggregation_completed":
+      return `Aggregation completed${p.aggregate ? ` · ${String(p.aggregate)}` : ""}`;
+    case "chat.validation_started":
+      return "Validation started";
+    case "chat.validation_completed":
+      return `Validation ${p.outcome ? String(p.outcome) : "completed"}`;
+    case "chat.response_started":
+      return "Response generation started";
     default:
       return event.type;
   }

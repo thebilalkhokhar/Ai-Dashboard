@@ -213,6 +213,18 @@ export function describeEvent(event: TaskEvent): string {
       return "Business data is up to date";
     case "erp.sync_failed":
       return "Business data refresh did not complete";
+    case "data.filter_completed":
+      return "Filtered the matched records";
+    case "data.aggregation_completed":
+      return "Totals calculated by the backend";
+    case "chat.validation_started":
+      return "Checking the answer against the records";
+    case "chat.validation_completed":
+      if (payload.outcome === "corrected") return "Answer corrected and verified";
+      if (payload.outcome === "replaced") return "Answer rebuilt from verified figures";
+      return "Answer verified against the records";
+    case "chat.response_started":
+      return "Writing the response";
     default:
       return "Assistant activity";
   }
@@ -444,6 +456,46 @@ export function deriveOperation(input: OperationInput): OperationView {
           tone: latest.toolOk === false ? "failed" : "working",
           evidence: latest.type,
         };
+      case "data.filter_completed":
+        return {
+          phase: "Records filtered",
+          detail: latest.human,
+          agent: latestWorkingAgent(timeline, agents) ?? agent,
+          tone: "working",
+          evidence: latest.type,
+        };
+      case "data.aggregation_completed":
+        return {
+          phase: "Totals calculated",
+          detail: latest.human,
+          agent: latestWorkingAgent(timeline, agents) ?? agent,
+          tone: "working",
+          evidence: latest.type,
+        };
+      case "chat.validation_started":
+        return {
+          phase: "Verifying the answer",
+          detail: "Checking every figure in the answer against the recorded results.",
+          agent: latestWorkingAgent(timeline, agents) ?? agent,
+          tone: "working",
+          evidence: latest.type,
+        };
+      case "chat.validation_completed":
+        return {
+          phase: "Answer verified",
+          detail: latest.human,
+          agent: latestWorkingAgent(timeline, agents) ?? agent,
+          tone: "done",
+          evidence: latest.type,
+        };
+      case "chat.response_started":
+        return {
+          phase: "Writing the response",
+          detail: "Preparing the final answer from the verified results.",
+          agent: latestWorkingAgent(timeline, agents) ?? agent,
+          tone: "working",
+          evidence: latest.type,
+        };
       case "erp.sync_started":
         return {
           phase: "Refreshing business data",
@@ -627,6 +679,174 @@ export function deriveStages(input: StageInput): OperationStage[] {
   });
 
   return stages;
+}
+
+// ------------------------------------------------- execution tree model
+//
+// The big live view does not lay stages out for itself: this pure model
+// groups the flat stage list into the tree the request actually formed -
+// the routing root, one branch per specialist territory a real lookup
+// touched, the lookups as leaves, the data stages each lookup genuinely
+// performed (filtering with its real counts, aggregation) hanging off
+// their leaf, then the answer-validation stage and the response. Every
+// state and count is read from this task's own events and their bounded
+// payloads; a stage that no event supports does not appear at all.
+
+export interface TreeToolCounts {
+  total: number;
+  returned: number;
+  remaining: number | null;
+  complete: boolean;
+}
+
+export interface TreeToolStage {
+  stage: OperationStage;
+  tool: string;
+  durationMs: number | null;
+  counts: TreeToolCounts | null;
+  filter: { matched: number; returned: number; remaining: number | null; complete: boolean } | null;
+  aggregation: { aggregate: string } | null;
+}
+
+export interface TreeBranch {
+  agentId: string;
+  label: string;
+  state: StageState;
+  tools: TreeToolStage[];
+}
+
+export interface ExecutionTree {
+  root: OperationStage;
+  branches: TreeBranch[];
+  directTools: TreeToolStage[];
+  agentStages: OperationStage[];
+  moreStage: OperationStage | null;
+  validation: { state: StageState; outcome: string | null } | null;
+  response: OperationStage;
+}
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+export function deriveExecutionTree(
+  input: StageInput & { details?: Record<string, Record<string, unknown>> },
+): ExecutionTree {
+  const details = input.details ?? {};
+  const stages = deriveStages(input);
+  const root = stages[0];
+  const response = stages[stages.length - 1];
+  const middle = stages.slice(1, -1);
+  const ordered = [...input.timeline].reverse(); // oldest first
+
+  const toolStage = (stage: OperationStage): TreeToolStage => {
+    const tool = stage.id.slice("tool-".length);
+    const completed = [...ordered]
+      .reverse()
+      .find((entry) => entry.type === "tool.completed" && entry.toolName === tool);
+    const payload = completed ? details[completed.event_id] : undefined;
+    const total = numberOrNull(payload?.records_total);
+    const returnedCount = numberOrNull(payload?.records_returned);
+    const counts: TreeToolCounts | null =
+      total !== null && returnedCount !== null
+        ? {
+            total,
+            returned: returnedCount,
+            remaining: numberOrNull(payload?.records_remaining),
+            complete: payload?.complete === true,
+          }
+        : null;
+
+    const filterEntry = ordered.find(
+      (entry) => entry.type === "data.filter_completed" && entry.toolName === tool,
+    );
+    const filterPayload = filterEntry ? details[filterEntry.event_id] : undefined;
+    const matched = numberOrNull(filterPayload?.matched);
+    const filterReturned = numberOrNull(filterPayload?.returned);
+    const filter =
+      matched !== null && filterReturned !== null
+        ? {
+            matched,
+            returned: filterReturned,
+            remaining: numberOrNull(filterPayload?.remaining),
+            complete: filterPayload?.complete === true,
+          }
+        : null;
+
+    const aggregationEntry = ordered.find(
+      (entry) => entry.type === "data.aggregation_completed" && entry.toolName === tool,
+    );
+    const aggregationPayload = aggregationEntry ? details[aggregationEntry.event_id] : undefined;
+    const aggregation =
+      typeof aggregationPayload?.aggregate === "string"
+        ? { aggregate: aggregationPayload.aggregate }
+        : null;
+
+    return {
+      stage,
+      tool,
+      durationMs: completed?.durationMs ?? null,
+      counts,
+      filter,
+      aggregation,
+    };
+  };
+
+  const branches: TreeBranch[] = [];
+  const directTools: TreeToolStage[] = [];
+  for (const stage of middle) {
+    if (!stage.id.startsWith("tool-") || stage.id === "tool-more") continue;
+    const tool = toolStage(stage);
+    const domain = toolDomainAgent(tool.tool);
+    if (domain === "chat") {
+      directTools.push(tool);
+      continue;
+    }
+    let branch = branches.find((item) => item.agentId === domain);
+    if (!branch) {
+      branch = { agentId: domain, label: agentLabel(domain), state: "pending", tools: [] };
+      branches.push(branch);
+    }
+    branch.tools.push(tool);
+  }
+  for (const branch of branches) {
+    branch.state = branch.tools.some((tool) => tool.stage.state === "active")
+      ? "active"
+      : branch.tools.some((tool) => tool.stage.state === "failed")
+        ? "failed"
+        : branch.tools.every((tool) => tool.stage.state === "done")
+          ? "done"
+          : "pending";
+  }
+
+  const validationStarted = ordered.some((entry) => entry.type === "chat.validation_started");
+  const validationCompleted = [...ordered]
+    .reverse()
+    .find((entry) => entry.type === "chat.validation_completed");
+  let validation: ExecutionTree["validation"] = null;
+  if (validationCompleted) {
+    const payload = details[validationCompleted.event_id];
+    validation = {
+      state: "done",
+      outcome: typeof payload?.outcome === "string" ? payload.outcome : null,
+    };
+  } else if (validationStarted) {
+    validation = {
+      state:
+        input.execution === "failed" || input.execution === "cancelled" ? "failed" : "active",
+      outcome: null,
+    };
+  }
+
+  return {
+    root,
+    branches,
+    directTools,
+    agentStages: middle.filter((stage) => stage.id.startsWith("agent-")),
+    moreStage: middle.find((stage) => stage.id === "tool-more") ?? null,
+    validation,
+    response,
+  };
 }
 
 // ---------------------------------------------------- answer provenance
