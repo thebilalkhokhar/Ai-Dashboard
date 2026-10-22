@@ -28,6 +28,13 @@ from app.config import settings
 # offset, sometimes naive. NH / naive values are read with that offset.
 ERP_TZ = timezone(timedelta(hours=-5))
 
+# The reader's calendar. Payment instants and the chat's relative dates
+# ("today", "yesterday") are interpreted on this calendar, because that is
+# the day the user means; the ERP's own business-date fields (invoice
+# dates, quote dates) stay on ERP_TZ. Asia/Karachi has no daylight saving,
+# so a fixed +05:00 is exact, not an approximation.
+USER_TZ = timezone(timedelta(hours=5))
+
 # --------------------------------------------------------------------------
 # Quote statuses that mean the opportunity is over. Anything else counts as
 # "open". Only closed values are listed, so a future new open status is
