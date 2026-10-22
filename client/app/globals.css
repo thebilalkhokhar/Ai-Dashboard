@@ -662,17 +662,29 @@ button {
    point here is the path one request took, not the standing roster. */
 
 .jstage--flow {
-  width: min(100%, 720px);
-  aspect-ratio: 4 / 3;
+  width: min(100%, 1040px);
+  aspect-ratio: 16 / 10;
 }
 
-.jflow {
+/* The operation tree (v3): the route drawn LARGE - real avatar faces for
+   the root and the specialists it routed to, clear lookup nodes, the data
+   stages each lookup actually performed as pills, a validation shield and
+   the response orb. Interactive: every node is a button whose recorded
+   detail appears in the strip under the stage. */
+.jtree {
   position: absolute;
   inset: 0;
-  pointer-events: none;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  pointer-events: auto;
 }
 
-.jflow-svg {
+.jtree-stage {
+  position: relative;
+  min-height: 0;
+}
+
+.jtree-svg {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -680,280 +692,373 @@ button {
   overflow: visible;
 }
 
-.jflow-line {
+.jtree-line {
   fill: none;
-  stroke: rgba(146, 170, 208, 0.28);
-  stroke-width: 0.36;
+  stroke: rgba(140, 165, 220, 0.30);
+  stroke-width: 1.4;
   stroke-dasharray: 1;
-  transition: stroke 600ms ease, stroke-width 600ms ease;
-  /* the link draws itself in when its node first appears, so the tree is
-     seen growing branch by branch as the events arrive */
-  animation: jflow-draw 700ms ease-out both;
+  stroke-dashoffset: 0;
+  animation: jtree-draw 0.9s ease-out both;
+  transition: opacity 0.45s ease, stroke 0.45s ease;
 }
 
-@keyframes jflow-draw {
+@keyframes jtree-draw {
   from { stroke-dashoffset: 1; }
   to { stroke-dashoffset: 0; }
 }
 
-.jflow-node--core {
-  max-width: 150px;
+.jtree-edge[data-flowing="true"] .jtree-line {
+  stroke: rgba(125, 211, 252, 0.55);
 }
 
-/* The core sits at the head of the route, so it is the small variant: the large
-   idle hero orb belongs to the waiting state and is never repeated here. Its own
-   caption is hidden because the node already carries the stage label. */
-.jo--core {
-  --jo-size: clamp(72px, 15vw, 116px);
+.jtree-edge[data-settled="true"] .jtree-line {
+  stroke: rgba(52, 211, 153, 0.38);
 }
 
-.jflow-node--core .jo-caption {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  border: 0;
-}
-
-.jflow-core {
-  display: grid;
-  place-items: center;
-}
-
-.jflow-edge[data-settled="true"] .jflow-line {
-  stroke: rgba(94, 234, 212, 0.34);
-  stroke-width: 0.4;
-}
-
-.jflow-edge[data-flowing="true"] .jflow-line {
-  stroke: rgba(125, 240, 255, 0.55);
-  stroke-width: 0.5;
-}
-
-.jflow-line-flow {
-  stroke-width: 0.8;
+.jtree-line-flow {
+  stroke-width: 2.4;
   stroke-linecap: round;
-  stroke-dasharray: 0.07 0.93;
-  animation: jflow-dash 1.5s linear infinite;
-  opacity: 0.95;
+  stroke-dasharray: 0.22 0.78;
+  animation: jtree-draw 0.9s ease-out both, jtree-dash 1.15s linear infinite;
 }
 
-.jflow-particle {
-  fill: #e9fdff;
-  filter: drop-shadow(0 0 1.4px rgba(125, 240, 255, 0.95));
+@keyframes jtree-dash {
+  to { stroke-dashoffset: -1; }
 }
 
-@keyframes jflow-dash {
-  from { stroke-dashoffset: 1; }
-  to { stroke-dashoffset: 0; }
+.jtree-particle {
+  fill: #a5f3fc;
+  filter: drop-shadow(0 0 5px rgba(125, 240, 255, 0.95));
 }
 
-.jflow-node {
+/* ------------------------------------------------------- tree nodes */
+
+.jtree-node {
   position: absolute;
-  z-index: 2;
+  z-index: 3;
   transform: translate(-50%, -50%);
   display: grid;
   justify-items: center;
-  gap: 0.28rem;
-  max-width: 132px;
-  /* nodes pop in as their stage is recorded (staggered inline), so the
-     tree visibly grows while the request is being worked */
-  animation: jflow-grow 450ms cubic-bezier(0.2, 0.9, 0.3, 1.35) both;
+  gap: 0.4rem;
+  max-width: 168px;
+  padding: 0;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  text-align: center;
+  animation: jtree-grow 0.55s cubic-bezier(0.2, 0.9, 0.3, 1.35) both;
 }
 
-@keyframes jflow-grow {
-  from { opacity: 0; transform: translate(-50%, -50%) scale(0.45); }
-  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+@keyframes jtree-grow {
+  from { scale: 0.4; opacity: 0; }
+  to { scale: 1; opacity: 1; }
 }
 
-/* A specialist branch: bigger than a lookup leaf, it is the desk the root
-   routed part of the request to. */
-.jflow-branch {
-  max-width: 150px;
+.jtree-node:focus-visible {
+  outline: 2px solid rgba(125, 240, 255, 0.8);
+  outline-offset: 4px;
+  border-radius: 999px;
 }
 
-.jflow-branch-dot {
-  width: 16px;
-  height: 16px;
-  background: #5b4a8a;
-  box-shadow: 0 0 0 7px rgba(167, 139, 250, 0.12), 0 0 18px rgba(167, 139, 250, 0.3);
+.jtree-text {
+  display: grid;
+  gap: 0.14rem;
+  justify-items: center;
+  padding: 0.28rem 0.55rem;
+  border-radius: 10px;
+  background: radial-gradient(120% 160% at 50% 0%, rgba(4, 8, 20, 0.82), rgba(4, 8, 20, 0.55) 78%);
 }
 
-.jflow-branch[data-state="active"] .jflow-branch-dot {
-  background: #a78bfa;
-  box-shadow: 0 0 0 8px rgba(167, 139, 250, 0.18), 0 0 24px rgba(167, 139, 250, 0.5);
-}
-
-.jflow-branch[data-state="done"] .jflow-branch-dot {
-  background: #5eead4;
-  box-shadow: 0 0 0 7px rgba(94, 234, 212, 0.13), 0 0 16px rgba(94, 234, 212, 0.25);
-}
-
-.jflow-branch[data-state="failed"] .jflow-branch-dot {
-  background: #f87171;
-  box-shadow: 0 0 0 7px rgba(248, 113, 113, 0.14);
-}
-
-.jflow-branch .jflow-label {
-  font-size: 0.74rem;
+.jtree-label {
+  font-size: 0.8rem;
   font-weight: 600;
+  letter-spacing: 0.01em;
+  color: #f2f7ff;
+  line-height: 1.25;
 }
 
-.jflow-branch-tag {
-  font-size: 0.52rem;
-  letter-spacing: 0.05em;
+.jtree-state {
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: rgba(167, 139, 250, 0.75);
+  color: #93a5cc;
+  line-height: 1.2;
 }
 
-/* A lookup leaf under a branch (or directly on the root): the actual
-   record reading, one step smaller than the branch it hangs from. */
-.jflow-node--leaf {
-  max-width: 118px;
+.jtree-node[data-state="active"] .jtree-state { color: #7dd3fc; }
+.jtree-node[data-state="done"] .jtree-state { color: #34d399; }
+.jtree-node[data-state="failed"] .jtree-state { color: #fca5a5; }
+
+.jtree-sub {
+  font-size: 0.64rem;
+  color: rgba(170, 190, 225, 0.85);
+  line-height: 1.3;
 }
 
-.jflow-node--leaf .jflow-dot {
-  width: 10px;
-  height: 10px;
+.jtree-counts {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: #a5f3fc;
+  line-height: 1.3;
+  white-space: nowrap;
 }
 
-.jflow-node--leaf .jflow-label {
-  font-size: 0.66rem;
-}
-
-/* A rotating arc around a stage that is actively filtering/processing, so
-   "working" reads as motion on the node itself, not just a glow. */
-.jflow-ring {
-  position: absolute;
-  inset: -9px;
-  border-radius: 50%;
-  border: 1px solid transparent;
-  border-top-color: rgba(125, 240, 255, 0.85);
-  border-right-color: rgba(125, 240, 255, 0.3);
-  animation: jflow-spin 1.1s linear infinite;
-}
-
-@keyframes jflow-spin {
-  to { transform: rotate(360deg); }
-}
-
-.jflow-node--intake,
-.jflow-node--out {
-  max-width: 120px;
-}
-
-.jflow-dot {
+/* avatars (root + branch specialists) */
+.jtree-avatar {
   position: relative;
   display: block;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: #46536e;
-  box-shadow: 0 0 0 6px rgba(146, 170, 208, 0.06);
-  transition: background 500ms ease, box-shadow 500ms ease;
+  border-radius: 999px;
+  overflow: visible;
+  background: #060a18;
+  border: 2px solid rgba(148, 184, 255, 0.35);
+  box-shadow: 0 0 0 5px rgba(56, 130, 246, 0.10), 0 10px 30px rgba(2, 4, 12, 0.55);
 }
 
-.jflow-node--out .jflow-dot {
-  width: 17px;
-  height: 17px;
+.jtree-avatar--lg { width: 92px; height: 92px; }
+.jtree-avatar--md { width: 68px; height: 68px; }
+
+.jtree-node[data-state="active"] .jtree-avatar {
+  border-color: rgba(125, 240, 255, 0.85);
+  box-shadow: 0 0 0 6px rgba(56, 189, 248, 0.16), 0 0 34px rgba(56, 189, 248, 0.35), 0 10px 30px rgba(2, 4, 12, 0.55);
 }
 
-.jflow-node[data-state="active"] .jflow-dot {
-  background: #7df0ff;
-  box-shadow: 0 0 0 7px rgba(125, 240, 255, 0.16), 0 0 20px rgba(125, 240, 255, 0.45);
-}
+.jtree-node[data-state="done"] .jtree-avatar { border-color: rgba(52, 211, 153, 0.75); }
+.jtree-node[data-state="failed"] .jtree-avatar { border-color: rgba(248, 113, 113, 0.8); }
+.jtree-node[data-state="pending"] .jtree-avatar { opacity: 0.75; }
 
-.jflow-node[data-state="done"] .jflow-dot {
-  background: #5eead4;
-  box-shadow: 0 0 0 6px rgba(94, 234, 212, 0.13), 0 0 16px rgba(94, 234, 212, 0.22);
-}
-
-.jflow-node[data-state="failed"] .jflow-dot {
-  background: #f87171;
-  box-shadow: 0 0 0 6px rgba(248, 113, 113, 0.14);
-}
-
-.jflow-check {
+.jtree-clip {
   position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 4px;
-  height: 8px;
-  border-right: 2px solid #06121a;
-  border-bottom: 2px solid #06121a;
-  transform: translate(-50%, -60%) rotate(40deg);
-}
-
-.jflow-cross {
-  position: absolute;
-  inset: 30%;
-  transform: rotate(45deg);
-}
-
-.jflow-cross::before,
-.jflow-cross::after {
-  content: "";
-  position: absolute;
-  background: #1b0707;
-}
-
-.jflow-cross::before {
-  left: 50%;
-  top: 0;
-  width: 2px;
-  height: 100%;
-  transform: translateX(-50%);
-}
-
-.jflow-cross::after {
-  top: 50%;
-  left: 0;
-  height: 2px;
+  inset: 0;
   width: 100%;
-  transform: translateY(-50%);
+  height: 100%;
+  object-fit: cover;
+  border-radius: 999px;
 }
 
-.jflow-pulse {
+.jtree-core {
+  display: block;
+  border-radius: 999px;
+  box-shadow: 0 0 44px rgba(56, 189, 248, 0.28);
+}
+
+/* the orb at the head of the route is the small variant */
+.jtree .jo--core {
+  --jo-size: clamp(84px, 11vw, 104px);
+}
+
+.jtree-badge {
   position: absolute;
-  inset: -6px;
-  border-radius: 50%;
-  border: 1px solid rgba(125, 240, 255, 0.58);
-  animation: jn-pulse 2.1s ease-out infinite;
+  right: 2px;
+  bottom: 2px;
+  z-index: 2;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 2px solid #060a18;
 }
 
-.jflow-text {
+.jtree-badge--done { background: #34d399; }
+.jtree-badge--failed { background: #f87171; }
+
+/* lookup + agent-stage dots: big enough to read at a glance */
+.jtree-dot {
+  position: relative;
+  display: block;
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  background: radial-gradient(circle at 35% 30%, #2b3f6e, #0b1226 72%);
+  border: 2px solid rgba(148, 184, 255, 0.4);
+  box-shadow: 0 8px 22px rgba(2, 4, 12, 0.5);
+}
+
+.jtree-node[data-state="active"] .jtree-dot {
+  border-color: rgba(125, 240, 255, 0.9);
+  background: radial-gradient(circle at 40% 32%, #67e8f9, #2563eb 55%, #0b1226 100%);
+  box-shadow: 0 0 26px rgba(56, 189, 248, 0.5);
+}
+
+.jtree-node[data-state="done"] .jtree-dot {
+  border-color: rgba(52, 211, 153, 0.8);
+  background: radial-gradient(circle at 40% 32%, #6ee7b7, #059669 60%, #06251b 100%);
+}
+
+.jtree-node[data-state="failed"] .jtree-dot {
+  border-color: rgba(248, 113, 113, 0.85);
+  background: radial-gradient(circle at 40% 32%, #fca5a5, #b91c1c 60%, #2b0a0a 100%);
+}
+
+.jtree-check,
+.jtree-cross {
+  position: absolute;
+  inset: 0;
   display: grid;
-  justify-items: center;
-  gap: 0.1rem;
-  text-align: center;
+  place-items: center;
+  color: #04160d;
+  font-weight: 800;
 }
 
-.jflow-label {
-  font-size: 0.7rem;
-  line-height: 1.25;
-  color: rgba(237, 244, 255, 0.9);
+.jtree-check::before { content: "✓"; font-size: 19px; }
+.jtree-cross::before { content: "×"; font-size: 21px; color: #ffe4e6; }
+
+.jtree-pulse {
+  position: absolute;
+  inset: -2px;
+  border-radius: 999px;
+  border: 2px solid rgba(125, 240, 255, 0.55);
+  animation: jtree-pulse 1.6s ease-out infinite;
 }
 
-.jflow-state {
-  font-size: 0.58rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: rgba(146, 170, 208, 0.85);
+@keyframes jtree-pulse {
+  0% { scale: 1; opacity: 0.9; }
+  100% { scale: 1.65; opacity: 0; }
 }
 
-.jflow-node[data-state="active"] .jflow-state {
+.jtree-ring {
+  position: absolute;
+  inset: -9px;
+  border-radius: 999px;
+  border: 2px dashed rgba(125, 240, 255, 0.65);
+  border-top-color: transparent;
+  animation: jtree-spin 2.6s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes jtree-spin {
+  to { rotate: 360deg; }
+}
+
+/* data-stage pills: what the lookup actually did to the records */
+.jtree-pill {
+  position: absolute;
+  z-index: 3;
+  transform: translate(-50%, -50%);
+  padding: 0.34rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  color: #d1fae5;
+  background: rgba(6, 40, 28, 0.85);
+  border: 1px solid rgba(52, 211, 153, 0.55);
+  box-shadow: 0 6px 18px rgba(2, 4, 12, 0.45);
+  cursor: pointer;
+  animation: jtree-grow 0.5s cubic-bezier(0.2, 0.9, 0.3, 1.35) both;
+}
+
+.jtree-pill--agg {
+  color: #e9d5ff;
+  background: rgba(46, 16, 74, 0.85);
+  border-color: rgba(192, 132, 252, 0.55);
+}
+
+.jtree-pill:focus-visible {
+  outline: 2px solid rgba(125, 240, 255, 0.8);
+  outline-offset: 3px;
+}
+
+/* validation shield */
+.jtree-shield {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 50px;
+  height: 50px;
+  border-radius: 999px;
+  color: #a5f3fc;
+  background: radial-gradient(circle at 38% 30%, #164e63, #0b1226 75%);
+  border: 2px solid rgba(125, 240, 255, 0.5);
+  box-shadow: 0 8px 22px rgba(2, 4, 12, 0.5);
+}
+
+.jtree-shield[data-state="active"] {
   color: #7df0ff;
+  border-color: rgba(125, 240, 255, 0.9);
+  box-shadow: 0 0 26px rgba(56, 189, 248, 0.45);
 }
 
-.jflow-node[data-state="failed"] .jflow-state {
+.jtree-shield[data-state="done"] {
+  color: #6ee7b7;
+  border-color: rgba(52, 211, 153, 0.8);
+}
+
+.jtree-shield[data-state="failed"] {
   color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.85);
+}
+
+/* response orb */
+.jtree-orb-mini {
+  position: relative;
+  display: block;
+  width: 54px;
+  height: 54px;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at 36% 30%, rgba(186, 240, 255, 0.95), rgba(56, 189, 248, 0.55) 34%, rgba(37, 99, 235, 0.35) 58%, rgba(11, 18, 38, 0.9) 82%);
+  border: 2px solid rgba(148, 184, 255, 0.45);
+  box-shadow: 0 0 30px rgba(56, 189, 248, 0.35), 0 10px 26px rgba(2, 4, 12, 0.55);
+}
+
+.jtree-orb-mini[data-state="active"] {
+  border-color: rgba(125, 240, 255, 0.9);
+  animation: jtree-orb-pulse 1.8s ease-in-out infinite;
+}
+
+.jtree-orb-mini[data-state="done"] { border-color: rgba(52, 211, 153, 0.75); }
+.jtree-orb-mini[data-state="failed"] { border-color: rgba(248, 113, 113, 0.85); }
+
+@keyframes jtree-orb-pulse {
+  0%, 100% { scale: 1; }
+  50% { scale: 1.07; }
+}
+
+/* ------------------------------------------------------- detail strip */
+
+.jtree-detail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem 0.9rem;
+  margin-top: 0.7rem;
+  padding: 0.65rem 0.85rem;
+  border-radius: 12px;
+  background: rgba(6, 10, 24, 0.66);
+  border: 1px solid rgba(120, 150, 220, 0.18);
+  min-height: 2.6rem;
+}
+
+.jtree-detail-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #f2f7ff;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.jtree-detail-state {
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #93a5cc;
+}
+
+.jtree-detail-state[data-state="active"] { color: #7dd3fc; }
+.jtree-detail-state[data-state="done"] { color: #34d399; }
+.jtree-detail-state[data-state="failed"] { color: #fca5a5; }
+
+.jtree-detail-line {
+  font-size: 0.74rem;
+  color: rgba(196, 212, 240, 0.92);
+  line-height: 1.45;
 }
 
 /* Read by screen readers as the ordered list of steps; the picture is decorative. */
-.jflow-summary {
+.jtree-summary {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -1068,7 +1173,7 @@ button {
 /* The overlay is the roomy view: give the operation tree a wider, shorter
    stage so branches and leaves spread instead of stacking. */
 .joverlay .jstage--flow {
-  width: min(100%, 780px);
+  width: min(100%, 1020px);
   aspect-ratio: 16 / 10;
 }
 
@@ -1283,11 +1388,11 @@ button {
 .cc-main {
   display: grid;
   gap: 0.9rem;
-  /* visual panel ~53%, conversation ~47% - the chat is the reading surface,
-     so it gets the extra room and the taller row */
-  grid-template-columns: minmax(0, 1.12fr) minmax(430px, 1fr);
+  /* the network/tree stage is the dominant surface; the chat sits beside
+     it in a compact column that stays comfortable to read and type in */
+  grid-template-columns: minmax(0, 1fr) minmax(370px, 410px);
   /* on a very short window the chat keeps a usable height and the page scrolls */
-  height: max(500px, calc(100dvh - var(--cc-chrome)));
+  height: max(560px, calc(100dvh - var(--cc-chrome)));
   align-items: stretch;
 }
 
@@ -1305,7 +1410,7 @@ button {
 }
 
 .cc-stage {
-  width: min(100%, 720px);
+  width: min(100%, 1080px);
   height: 100%;
   min-height: 0;
   aspect-ratio: auto;
@@ -1314,7 +1419,7 @@ button {
 }
 
 .cc-stage .jo--hero {
-  --jo-size: clamp(220px, min(30vw, 32vh), 300px);
+  --jo-size: clamp(240px, min(34vw, 38vh), 340px);
 }
 
 .cc-visual-foot {
@@ -2148,8 +2253,8 @@ button {
   .jn-stage,
   .jn-stage *,
   .jn-svg,
-  .jflow,
-  .jflow *,
+  .jtree,
+  .jtree *,
   .chat-typing i,
   .chat-streaming,
   .joverlay,
@@ -2233,17 +2338,22 @@ button {
     aspect-ratio: 1 / 1;
   }
 
-  .jflow-label {
-    font-size: 0.6rem;
+  .jtree-label {
+    font-size: 0.68rem;
   }
 
-  .jflow-state {
-    font-size: 0.5rem;
+  .jtree-state {
+    font-size: 0.52rem;
   }
 
-  .jflow-node {
-    max-width: 104px;
+  .jtree-node {
+    max-width: 118px;
   }
+
+  .jtree-avatar--lg { width: 64px; height: 64px; }
+  .jtree-avatar--md { width: 50px; height: 50px; }
+  .jtree-dot { width: 32px; height: 32px; }
+  .jtree-counts { white-space: normal; }
 
   .jo--core {
     --jo-size: clamp(62px, 20vw, 88px);
