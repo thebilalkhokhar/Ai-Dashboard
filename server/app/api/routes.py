@@ -249,6 +249,35 @@ async def chat(request: ChatRequest) -> StreamingResponse:
     )
 
 
+@router.get("/chats")
+async def list_chats() -> dict:
+    """Every stored conversation, newest first (title, size, last activity)."""
+    from app.agents.chat import list_chat_threads
+
+    return {"chats": await list_chat_threads(get_db())}
+
+
+@router.get("/chats/{thread_id}")
+async def get_chat(thread_id: str) -> dict:
+    """One stored conversation in full, for reopening it."""
+    from app.agents.chat import get_chat_thread
+
+    thread = await get_chat_thread(thread_id, get_db())
+    if thread is None:
+        raise HTTPException(status_code=404, detail="Chat not found.")
+    return thread
+
+
+@router.delete("/chats/{thread_id}")
+async def delete_chat(thread_id: str) -> dict:
+    """Delete one stored conversation (usage/audit logs are kept)."""
+    from app.agents.chat import delete_chat_thread
+
+    if not await delete_chat_thread(thread_id, get_db()):
+        raise HTTPException(status_code=404, detail="Chat not found.")
+    return {"deleted": True, "thread_id": thread_id}
+
+
 @router.get("/agents")
 async def get_agents() -> dict:
     """The agents that actually exist, plus a status derived from real events.
