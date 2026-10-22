@@ -7,6 +7,10 @@ const h = vi.hoisted(() => {
 });
 
 vi.mock("@/services/api", () => ({
+  getChatThreadId: vi.fn(() => "test-thread"),
+  setChatThreadId: vi.fn(),
+  startNewChatThread: vi.fn(() => "test-thread-new"),
+  fetchChatThread: vi.fn(async () => ({ thread_id: "test-thread", title: "", turns: [], updated_at: null })),
   ApiError: class ApiError extends Error {
     status: number;
     constructor(message: string, status = 0) {

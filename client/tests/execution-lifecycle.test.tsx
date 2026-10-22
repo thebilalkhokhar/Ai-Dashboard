@@ -31,6 +31,10 @@ const h = vi.hoisted(() => {
 });
 
 vi.mock("@/services/api", () => ({
+  getChatThreadId: vi.fn(() => "test-thread"),
+  setChatThreadId: vi.fn(),
+  startNewChatThread: vi.fn(() => "test-thread-new"),
+  fetchChatThread: vi.fn(async () => ({ thread_id: "test-thread", title: "", turns: [], updated_at: null })),
   ApiError: h.ApiError,
   fetchAgents: vi.fn(),
   fetchTasks: vi.fn(),

@@ -59,6 +59,7 @@ describe("Dashboard navigation", () => {
       "Pipeline",
       "Leads",
       "AI review",
+      "Chats",
     ]);
     // the default landing content is the Command Center
     expect(screen.getByText("command-center-panel")).toBeInTheDocument();
