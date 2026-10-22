@@ -131,7 +131,7 @@ describe("state visuals", () => {
 
     // the web stays visibly wired to the core while it waits...
     expect(document.querySelectorAll(".jn-link-flow--ambient")).toHaveLength(2);
-    expect(document.querySelectorAll(".jn-traveler--ambient")).toHaveLength(2);
+    expect(document.querySelectorAll(".jn-traveler--ambient")).toHaveLength(4);
     // ...but nothing runs at working strength and no node reports working
     expect(document.querySelectorAll(".jn-link-flow:not(.jn-link-flow--ambient)")).toHaveLength(0);
     expect(document.querySelectorAll('.jn-link-group[data-working="true"]')).toHaveLength(0);
