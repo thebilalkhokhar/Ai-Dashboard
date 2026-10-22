@@ -21,7 +21,7 @@
 import { useId, useState, type ReactNode } from "react";
 import { ShieldCheck } from "lucide-react";
 import { useReducedMotion } from "@/hooks/use-reduced-motion";
-import type { ExecutionPhase } from "@/lib/task-events";
+import { isLivePhase, type ExecutionPhase } from "@/lib/task-events";
 import type {
   ExecutionTree,
   OperationStage,
@@ -38,12 +38,12 @@ const AGENT_CLIPS: Record<string, string> = {
 };
 
 // Tree columns, in percent of the stage.
-const ROOT_X = 8;
-const BRANCH_X = 29;
-const LEAF_X = 50;
-const PROC_X = 69;
-const VALID_X = 85;
-const OUT_X = 94;
+const ROOT_X = 7;
+const BRANCH_X = 26;
+const LEAF_X = 46;
+const PROC_X = 66;
+const VALID_X = 83;
+const OUT_X = 93;
 const CENTER_Y = 50;
 
 function stateWord(state: StageState): string {
@@ -77,6 +77,7 @@ interface Edge {
   to: Placed;
   flowing: boolean;
   settled: boolean;
+  contract?: boolean;
 }
 
 interface DetailInfo {
@@ -119,7 +120,7 @@ export function OperationFlow({
   for (const stage of tree.agentStages) slots.push({ kind: "agent", ref: stage });
   if (tree.moreStage) slots.push({ kind: "more", ref: tree.moreStage });
 
-  const span = Math.min(78, Math.max(0, (slots.length - 1) * 19));
+  const span = Math.min(84, Math.max(0, (slots.length - 1) * 21));
   const slotY = (index: number) =>
     slots.length <= 1 ? CENTER_Y : CENTER_Y - span / 2 + (span / (slots.length - 1)) * index;
 
@@ -162,13 +163,14 @@ export function OperationFlow({
   // ------------------------------------------------------------- edges
   const edges: Edge[] = [];
   const terminal: Placed[] = [];
-  const pushEdge = (key: string, from: Placed, to: Placed, toState: StageState, fromState: StageState) => {
+  const pushEdge = (key: string, from: Placed, to: Placed, toState: StageState, fromState: StageState, contract = false) => {
     edges.push({
       key,
       from,
       to,
       flowing: toState === "active",
       settled: fromState === "done" && toState === "done",
+      contract,
     });
   };
   for (const branch of tree.branches) {
@@ -195,7 +197,7 @@ export function OperationFlow({
       const present = kind === "filter" ? tool.filter : tool.aggregation;
       if (!present) continue;
       const pp = procPos.get(`${kind}-${tool.tool}`)!;
-      pushEdge(`${tool.stage.id}-${kind}`, tp, pp, "done", tool.stage.state);
+      pushEdge(`${tool.stage.id}-${kind}`, tp, pp, "done", tool.stage.state, kind === "filter");
       last = pp;
     }
     terminal.push(last);
@@ -322,6 +324,18 @@ export function OperationFlow({
             return (
               <g key={edge.key} className="jtree-edge" data-flowing={edge.flowing ? "true" : "false"} data-settled={edge.settled ? "true" : "false"}>
                 <path id={pathId} d={link(edge.from, edge.to)} className="jtree-line" pathLength={1} vectorEffect="non-scaling-stroke" />
+                {edge.contract && !reducedMotion && isLivePhase(execution) && (
+                  <>
+                    {[0, 1, 2].map((dot) => (
+                      <circle key={dot} className="jtree-contract-dot" r="1">
+                        <animateMotion dur="1.9s" repeatCount="indefinite" begin={`${-dot * 0.63}s`}>
+                          <mpath href={`#${pathId}`} />
+                        </animateMotion>
+                        <animate attributeName="r" values="1.05;0.38" dur="1.9s" repeatCount="indefinite" begin={`${-dot * 0.63}s`} />
+                      </circle>
+                    ))}
+                  </>
+                )}
                 {edge.flowing && !reducedMotion && (
                   <>
                     <path d={link(edge.from, edge.to)} className="jtree-line jtree-line-flow" stroke={`url(#${uid}-flow)`} pathLength={1} vectorEffect="non-scaling-stroke" />

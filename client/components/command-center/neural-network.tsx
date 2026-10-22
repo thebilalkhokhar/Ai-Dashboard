@@ -53,6 +53,19 @@ function linkPath(x: number, y: number, bend = 0.16): string {
   return `M ${CENTER} ${CENTER} Q ${mx - dy * bend} ${my + dx * bend} ${x} ${y}`;
 }
 
+// The midpoint of the bowed link (quadratic Bezier at t=0.5), where a small
+// relay node sits: the web reads as a layered network, not bare spokes.
+function relayPoint(x: number, y: number, bend = 0.16): { x: number; y: number } {
+  const mx = (CENTER + x) / 2;
+  const my = (CENTER + y) / 2;
+  const qx = mx - (y - CENTER) * bend;
+  const qy = my + (x - CENTER) * bend;
+  return {
+    x: 0.25 * CENTER + 0.5 * qx + 0.25 * x,
+    y: 0.25 * CENTER + 0.5 * qy + 0.25 * y,
+  };
+}
+
 function isWorking(node: AgentNodeState): boolean {
   return node.status === "running" || node.activeTools.length > 0;
 }
@@ -180,6 +193,29 @@ export function NeuralNetwork({
                       <mpath href={`#${pathId}`} />
                     </animateMotion>
                   </circle>
+                  {!working && (
+                    <circle className="jn-traveler jn-traveler--ambient" r={0.42}>
+                      <animateMotion
+                        dur={`${duration * 2.6}s`}
+                        repeatCount="indefinite"
+                        begin={`${-(duration * 1.3 + (index % 3) * 0.7)}s`}
+                      >
+                        <mpath href={`#${pathId}`} />
+                      </animateMotion>
+                    </circle>
+                  )}
+                  {(() => {
+                    const relay = relayPoint(x, y);
+                    return (
+                      <circle
+                        cx={relay.x}
+                        cy={relay.y}
+                        r={0.55}
+                        className="jn-relay"
+                        style={{ animationDelay: `${(index % 5) * 0.6}s` }}
+                      />
+                    );
+                  })()}
                 </>
               )}
             </g>
