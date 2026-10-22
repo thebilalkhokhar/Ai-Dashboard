@@ -24,7 +24,13 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { sendMessage } from "@/services/api";
+import {
+  fetchChatThread,
+  getChatThreadId,
+  sendMessage,
+  setChatThreadId,
+  startNewChatThread,
+} from "@/services/api";
 import { useAgents } from "@/hooks/use-agents";
 import { useTaskEvents } from "@/hooks/use-task-events";
 import type { ChatStreamEvent, ChatToolResultEvent, RegistryAgent } from "@/types/api";
@@ -83,6 +89,12 @@ interface ExecutionController {
   send(prompt: string): boolean;
   /** Re-submit the last request after a failure. */
   retry(): void;
+  /** The stored conversation this panel is showing. */
+  threadId: string;
+  /** Reopen a stored conversation: its saved turns replace the panel. */
+  openThread(threadId: string): void;
+  /** Start a fresh conversation (the old one stays stored). */
+  newChat(): void;
   /** Escape / close: hide the overlay. The request itself keeps running. */
   dismiss(): void;
 }
@@ -123,6 +135,79 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const { agents, error: agentsError } = useAgents();
+
+  // The stored conversation behind this panel. Its turns live on the
+  // server (chat_threads), so reopening the app - or picking the chat on
+  // the Chats tab - restores exactly what was said, and sending continues
+  // the same thread instead of starting over.
+  const [threadId, setThreadId] = useState("");
+  const seededThreadRef = useRef("");
+  const messagesRef = useRef<ChatMessage[]>([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  const loadStoredTurns = useCallback(async (id: string) => {
+    try {
+      const stored = await fetchChatThread(id);
+      if (seededThreadRef.current !== id) return;
+      if (turnRef.current !== null || sendingRef.current) return;
+      if (messagesRef.current.length > 0) return;
+      setMessages(
+        (stored.turns ?? []).flatMap((storedTurn, index) => [
+          { id: `${id}-q${index}`, role: "user" as const, content: storedTurn.question },
+          { id: `${id}-a${index}`, role: "assistant" as const, content: storedTurn.answer },
+        ]),
+      );
+    } catch {
+      // A thread the server has never seen (a brand-new conversation)
+      // simply starts empty.
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const id = getChatThreadId();
+    seededThreadRef.current = id;
+    void (async () => {
+      await loadStoredTurns(id);
+      if (active) setThreadId(id);
+    })();
+    return () => {
+      active = false;
+    };
+  }, [loadStoredTurns]);
+
+  const resetConversationView = useCallback(() => {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    turnRef.current = null;
+    setTurn(null);
+    setLastTurn(null);
+    setMessages([]);
+    setFacts({ turnId: "", frames: [] });
+    setChatError("");
+    setActiveTool("");
+  }, []);
+
+  const openThread = useCallback(
+    (id: string) => {
+      if (sendingRef.current || !id) return;
+      setChatThreadId(id);
+      setThreadId(id);
+      seededThreadRef.current = id;
+      resetConversationView();
+      void loadStoredTurns(id);
+    },
+    [loadStoredTurns, resetConversationView],
+  );
+
+  const newChat = useCallback(() => {
+    if (sendingRef.current) return;
+    const id = startNewChatThread();
+    setThreadId(id);
+    seededThreadRef.current = id;
+    resetConversationView();
+  }, [resetConversationView]);
 
   // One stream for the active or most recently completed turn. While a new
   // turn has no task id yet, this is intentionally null rather than the
@@ -387,6 +472,9 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
       dismiss,
       send,
       retry,
+      threadId,
+      openThread,
+      newChat,
     }),
     [
       turn,
@@ -405,6 +493,9 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
       dismiss,
       send,
       retry,
+      threadId,
+      openThread,
+      newChat,
     ],
   );
 
