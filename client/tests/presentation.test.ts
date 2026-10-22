@@ -515,3 +515,32 @@ describe("deriveExecutionTree", () => {
     ).toBe("Answer verified against the records");
   });
 });
+
+describe("deriveExecutionTree pagination", () => {
+  it("shows a pagination stage only when the backend really walked pages", () => {
+    const timeline = [
+      entry({ seq: 4, type: "tool.completed", toolName: "get_payments", toolOk: true, durationMs: 40 }),
+      entry({ seq: 3, type: "tool.completed", toolName: "get_payments", toolOk: true, durationMs: 55 }),
+      entry({ seq: 2, type: "tool.started", toolName: "get_payments" }),
+      entry({ seq: 1, type: "task.started" }),
+    ];
+    const details = {
+      e3: { records_total: 60, records_returned: 30, records_remaining: 30, complete: false, offset: 0 },
+      e4: { records_total: 60, records_returned: 30, records_remaining: 0, complete: true, offset: 30 },
+    };
+    const tree = deriveExecutionTree({ execution: "completed", agents: {}, timeline, details });
+    const leaf = tree.branches.flatMap((branch) => branch.tools).find((tool) => tool.tool === "get_payments")
+      ?? tree.directTools.find((tool) => tool.tool === "get_payments");
+    expect(leaf?.pagination).toEqual({ pages: 2, lastOffset: 30 });
+
+    const single = deriveExecutionTree({
+      execution: "completed",
+      agents: {},
+      timeline: timeline.slice(1),
+      details: { e3: details.e3 },
+    });
+    const singleLeaf = single.branches.flatMap((branch) => branch.tools).find((tool) => tool.tool === "get_payments")
+      ?? single.directTools.find((tool) => tool.tool === "get_payments");
+    expect(singleLeaf?.pagination).toBeNull();
+  });
+});
