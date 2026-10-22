@@ -228,6 +228,11 @@ export function OperationFlow({
           (tool.counts.remaining !== null ? `, ${tool.counts.remaining} still to fetch.` : "."),
       );
     }
+    if (tool.pagination) {
+      lines.push(
+        `Fetched across ${tool.pagination.pages} ${tool.pagination.pages === 1 ? "page" : "pages"}.`,
+      );
+    }
     return { title: tool.stage.label, state: tool.stage.state, lines };
   }
 
@@ -478,6 +483,11 @@ export function OperationFlow({
                 <span className="jtree-state">
                   {stateWord(tool.stage.state)}{duration ? ` · ${duration}` : ""}
                 </span>
+                {tool.pagination && (
+                  <span className="jtree-sub">
+                    {tool.pagination.pages} {tool.pagination.pages === 1 ? "page" : "pages"} fetched
+                  </span>
+                )}
                 {tool.counts && (
                   <span className="jtree-counts">
                     {tool.counts.returned.toLocaleString("en-US")} of {tool.counts.total.toLocaleString("en-US")} matched
