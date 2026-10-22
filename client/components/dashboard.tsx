@@ -13,6 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { OverviewPanel } from "@/components/dashboard/overview-panel";
 import { LeadsPanel, PipelinePanel, ReceivablesPanel } from "@/components/dashboard/panels";
 import { CommandCenter } from "@/components/command-center/command-center";
+import { ChatHistoryPanel } from "@/components/chat-history";
 import { formatDateTime } from "@/lib/format";
 
 export function Dashboard({
@@ -119,6 +120,7 @@ export function Dashboard({
           <TabsTrigger value="pipeline">Pipeline</TabsTrigger>
           <TabsTrigger value="leads">Leads</TabsTrigger>
           <TabsTrigger value="ai-review">AI review</TabsTrigger>
+          <TabsTrigger value="chats">Chats</TabsTrigger>
         </TabsList>
 
         <TabsContent value="command-center">
@@ -148,6 +150,9 @@ export function Dashboard({
         </TabsContent>
 
         <TabsContent value="ai-review">{actionCenter}</TabsContent>
+        <TabsContent value="chats">
+          <ChatHistoryPanel onOpenThread={() => selectTab("command-center")} />
+        </TabsContent>
       </Tabs>
 
       <p className="text-[11px] text-muted">

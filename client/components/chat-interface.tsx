@@ -8,7 +8,7 @@
 // exactly one in-flight request. No raw tool identifiers are shown.
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Bot, RotateCcw, Send, Sparkles } from "lucide-react";
+import { Bot, Plus, RotateCcw, Send, Sparkles } from "lucide-react";
 import { useExecutionController } from "@/components/command-center/execution-context";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { AnswerProvenance } from "@/components/chat-provenance";
@@ -34,6 +34,7 @@ export function ChatInterface() {
     chatError,
     send,
     retry,
+    newChat,
     lastTurn,
     events,
     resultFrames,
@@ -95,6 +96,16 @@ export function ChatInterface() {
         {activeTool && (
           <span className="truncate text-[11px] text-cyan-200/80">{toolPhrase(activeTool)}</span>
         )}
+        <button
+          type="button"
+          onClick={newChat}
+          disabled={isSending}
+          className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-muted transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-50"
+          title="Start a new conversation - this one stays stored under Chats"
+        >
+          <Plus size={12} aria-hidden="true" />
+          New chat
+        </button>
       </div>
 
       <div
