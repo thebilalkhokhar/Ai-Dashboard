@@ -3,9 +3,12 @@
 Rules this client follows:
   * Read endpoints only. The class deliberately has NO methods for the
     write endpoints (POST /customer-360/trigger-call places a real phone
-    call; POST /customer-360/save-draft writes into a rep's mailbox) and
-    none for /customer-360/analysis (their LLM output bypasses this app's
-    numeric guard, so it never enters a chat answer).
+    call; POST /customer-360/save-draft writes into a rep's mailbox).
+    /customer-360/analysis IS exposed (fetch_analysis) because the user
+    explicitly ordered it on Oct 24 - but only through the dedicated
+    chat tool that fires when the user names a record and asks for its
+    analysis; its text is the CRM AI's own output, labeled as such, and
+    never a source of verified figures.
   * Auth is a real user's email + password (settings, server/.env only)
     traded for a 7-day JWT at POST /auth/login - the API has no key flow.
     The token is shared through Redis exactly like the ERP token (one
@@ -283,4 +286,19 @@ class Customer360Client:
         body = await self._request("GET", f"/{module}", params=params)
         if not body.get("success"):
             raise Customer360Error(f"Customer 360 {module} list did not return success")
+        return body
+
+    async def fetch_analysis(self, record_id: str, record_type: str) -> dict:
+        """The CRM's own AI follow-up analysis for one record (GET, but it
+        re-aggregates and calls OpenAI on every request - uncached and
+        slow when cold). Returns the raw body; the caller must surface
+        `apiKeyStatus`: anything other than "Verified" means the CRM is
+        in fallback/simulation mode and the analysis is a placeholder."""
+        body = await self._request(
+            "GET",
+            "/customer-360/analysis",
+            params={"id": record_id, "type": record_type},
+        )
+        if not body.get("success"):
+            raise Customer360Error("Customer 360 analysis did not return success")
         return body
