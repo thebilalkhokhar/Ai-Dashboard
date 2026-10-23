@@ -14,7 +14,10 @@ You rarely need to run this by hand: the server launches it on its own
 whenever the mirror is older than C360_SYNC_HOURS (see the scheduler's
 c360 auto-sync). This script is for an immediate refresh. A Redis lock
 (shared with the automatic launcher) keeps two syncs from overlapping;
-`--auto` is how the scheduler marks its launches in the run log.
+`--auto` is how the scheduler marks its launches in the run log, and
+`--recent` runs the cheap pass instead: only the first C360_RECENT_PAGES
+pages of each module - the lists are newest-first, so a minute or two
+of work freshens everything new without the full 750-page run.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import sys
 import uuid
 
 from app import db as app_db
+from app.config import settings
 from app.services.customer360_client import Customer360Client
 from app.services.customer360_sync import MODULES, SYNC_LOCK_KEY, sync_all
 from app.services.redis_client import get_redis
@@ -60,8 +64,10 @@ async def _release_sync_lock(token: str | None) -> None:
 
 
 async def main() -> None:
-    argv = [arg for arg in sys.argv[1:] if arg != "--auto"]
+    flags = {"--auto", "--recent"}
+    argv = [arg for arg in sys.argv[1:] if arg not in flags]
     mode = "auto" if "--auto" in sys.argv[1:] else "manual"
+    recent = "--recent" in sys.argv[1:]
     modules = tuple(argv) or MODULES
     unknown = [name for name in modules if name not in MODULES]
     if unknown:
@@ -72,7 +78,11 @@ async def main() -> None:
         return
     client = Customer360Client()
     try:
-        summary = await sync_all(app_db.get_db(), client, modules, mode=mode)
+        summary = await sync_all(
+            app_db.get_db(), client, modules, mode=mode,
+            scope="recent" if recent else "full",
+            max_pages=int(settings.C360_RECENT_PAGES) if recent else None,
+        )
     finally:
         await client.close()
         await app_db.close()
