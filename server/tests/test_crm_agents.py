@@ -155,6 +155,7 @@ def detail_payload(last_direction: str) -> dict:
                 "type": "WhatsApp", "title": "WhatsApp message",
                 "timestamp": (NOW - timedelta(days=5)).isoformat(),
                 "direction": last_direction,
+                "content": "I need 500 boxes - what is the price?",
             },
             {
                 "type": "Email", "title": "Quote sent",
@@ -198,6 +199,10 @@ def test_engagement_payload_shape():
     payload = crm_engagement_payload(summary, "Lead", 5)
     assert payload["waiting"]["waiting_days"] == 5
     assert payload["record"]["name"] == "Ismat Khalil"
+    # the analyst sees what the customer actually said, not just titles
+    recent = payload["waiting"]["recent_messages"]
+    assert recent[0]["direction"] == "Inbound"
+    assert recent[0]["content"] == "I need 500 boxes - what is the price?"
     import json
 
     blob = json.dumps(payload).lower()

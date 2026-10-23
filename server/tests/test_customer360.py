@@ -616,3 +616,52 @@ def test_tool_evidence_reports_the_crm_payments_total():
     assert frame["money_label"] == "sum_amount_received"
     assert frame["money_total"] == 20890.0
     assert frame["window"] == {"date_from": "2026-10-23", "date_to": "2026-10-23"}
+
+
+# ------------------------------------------------------- conversation
+
+def test_summarize_detail_carries_message_bodies():
+    """The Oct 24 manager ask, as a fixture: the timeline's message
+    bodies (what was sent, what the customer replied) must survive the
+    summarizer - counts alone are not the conversation."""
+    payload = detail_payload()
+    payload["timeline"] = [
+        {"type": "SMS", "direction": "Outbound", "title": "SMS to Billy Johnson",
+         "timestamp": "2026-06-09T17:08:50Z",
+         "content": "Hi Billy, are you still looking for display boxes?"},
+        {"type": "SMS", "direction": "Inbound", "title": "SMS from Billy Johnson",
+         "timestamp": "2026-06-09T17:15:58Z", "content": "Too expensive"},
+        {"type": "Call", "direction": "Outbound", "title": "Outgoing Zoho Voice Call",
+         "timestamp": "2026-06-09T17:06:08Z", "content": "Successful call",
+         "metadata": "{'durationSeconds': 8, 'transcript': 'Customer asked for a discount.'}"},
+    ]
+    summary = c360_service.summarize_detail(payload)
+    convo = summary["conversation"]
+    assert [entry["direction"] for entry in convo] == ["Inbound", "Outbound", "Outbound"]
+    assert convo[0]["content"] == "Too expensive"
+    assert convo[1]["content"].startswith("Hi Billy")
+    call = convo[2]
+    assert call["duration_seconds"] == 8
+    assert call["transcript"] == "Customer asked for a discount."
+
+
+@pytest.mark.asyncio
+async def test_get_customer360_rejects_an_erp_numeric_id_without_calling(stub):
+    result = await get_customer360("4902", "Customer", database=CacheDb())
+    assert result["available"] is False
+    assert "search_customer360" in result["note"]
+    assert stub.detail_calls == 0
+
+
+def test_tool_evidence_card_carries_the_last_message():
+    from app.agents.chat import tool_evidence
+
+    result = {
+        "source": "customer360",
+        "entity": {"name": "Johnson", "record_type": "Customer"},
+        "conversation": [
+            {"type": "SMS", "direction": "Inbound", "content": "Too expensive"},
+        ],
+    }
+    frame = tool_evidence("get_customer360", result)
+    assert frame["customer_card"]["last_message"] == "Too expensive"
