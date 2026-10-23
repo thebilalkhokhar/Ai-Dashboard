@@ -100,10 +100,11 @@ async def test_yes_continues_the_filtered_list_the_answer_offered():
     assert pending["total_count"] == 30
     assert pending["next_offset"] == 10
 
-    page_two = "\n".join(lead_line(i) for i in range(10, 30))
+    # page 2 keeps the recorded 10-row page size, so it holds leads 10-19
+    page_two = "\n".join(lead_line(i) for i in range(10, 20))
     second = FakeModel([
         AIMessage(content=(
-            "Here are the next leads that need follow-up.\n\n"
+            "Here are the next leads that need follow-up (10 of 30, 10 remain).\n\n"
             + page_two
             + "\n\nTotal leads in this view: 30"
         )),
@@ -118,10 +119,14 @@ async def test_yes_continues_the_filtered_list_the_answer_offered():
     ]
     assert any('"total_count": 30' in content for content in seeded)
     assert any('"offset": 10' in content for content in seeded)
-    assert result["text"].startswith("Here are the next leads that need follow-up.")
+    assert result["text"].startswith("Here are the next leads that need follow-up")
     assert "couldn't verify" not in result["text"]
-    # the filtered set is fully delivered now, so nothing stays pending
-    assert thread_doc(database)["pending_action"] is None
+    # 30 leads at 10 per page has one page left, and the pending action stays
+    # on the SAME filtered query for it
+    pending = thread_doc(database)["pending_action"]
+    assert pending["tool"] == "get_leads"
+    assert pending["args"].get("stuck_only") is True
+    assert pending["next_offset"] == 20
 
 
 @pytest.mark.anyio
@@ -163,8 +168,10 @@ async def test_next_page_continues_the_stuck_leads_list_not_a_wider_call():
     assert any('"total_count": 30' in content for content in seeded)
     assert any('"offset": 10' in content for content in seeded)
     assert result["text"] == "Here is the next page of stuck leads (30 total)."
-    # the whole stuck list was delivered by the confirmed page
-    assert thread_doc(database)["pending_action"] is None
+    # page 2 of 3 was delivered, and the last page stays on the stuck query
+    pending = thread_doc(database)["pending_action"]
+    assert pending["tool"] == "get_stuck_leads"
+    assert pending["next_offset"] == 20
 
 
 @pytest.mark.anyio
