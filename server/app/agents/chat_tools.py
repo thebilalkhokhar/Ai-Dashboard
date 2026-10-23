@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app import db as app_db
 from app.config import settings
 from app.services import customer360 as c360_service
+from app.services import customer360_index as c360_index
 from app.services import metrics, periods, processors
 from app.services.customer360_client import Customer360Client, Customer360Error
 
@@ -1619,22 +1620,24 @@ async def search_customer360(query: str, database: Any = None) -> dict:
     """Search the Zoho CRM (Customer 360) for leads, contacts, customers.
 
     This is a DIFFERENT system from the Print247 ERP the other tools read:
-    CRM records and their communication history live there. Results are
-    capped at 10 per type by that API, and the note says so - the model
-    must not present a capped list as every match in existence.
+    CRM records and their communication history live there. The live API
+    caps results at 10 per type, so the live matches are merged with the
+    locally harvested record index (customer360_index), duplicates
+    removed by record id - the merged list is broader than either source
+    alone, and the counts say how much came from each. The note keeps the
+    cap honest: even merged, this is what search could reach, not proof
+    of every match in their database.
     """
     args = Customer360SearchArgs.model_validate({"query": query})
+    db = _database(database)
+    index_hits = await c360_index.search_index(db, args.query)
+    live_error: Customer360Error | None = None
+    live_rows: list[dict] = []
     try:
-        results = await _c360_client().search(args.query)
+        live_rows = await _c360_client().search(args.query)
     except Customer360Error as exc:
-        return {
-            "source": "customer360",
-            "available": False,
-            "query": args.query,
-            "total_count": 0,
-            "results": [],
-            "note": f"Customer 360 could not be reached: {exc}",
-        }
+        live_error = exc
+
     cleaned = [
         {
             "record_id": row.get("id"),
@@ -1645,20 +1648,47 @@ async def search_customer360(query: str, database: Any = None) -> dict:
             "company": row.get("company"),
             "status": row.get("status"),
         }
-        for row in results
+        for row in live_rows
         if isinstance(row, dict)
     ]
+    live_count = len(cleaned)
+    seen = {row["record_id"] for row in cleaned}
+    for hit in index_hits:
+        if hit.get("record_id") not in seen:
+            cleaned.append(hit)
+            seen.add(hit.get("record_id"))
+
+    if live_error is not None and not cleaned:
+        return {
+            "source": "customer360",
+            "available": False,
+            "query": args.query,
+            "total_count": 0,
+            "results": [],
+            "note": f"Customer 360 could not be reached: {live_error}",
+        }
+
+    note = (
+        "Matches from the Zoho CRM (Customer 360), a separate system from the "
+        "Print247 ERP data: live search results merged with the locally "
+        "harvested record index, duplicates removed. The CRM caps live "
+        "results at 10 per type. Pass a result's record_id and record_type "
+        "to get_customer360 for its full view."
+    )
+    if live_error is not None:
+        note = (
+            "The live CRM could not be reached just now, so these matches "
+            "come from the local index only and may be out of date. " + note
+        )
     return {
         "source": "customer360",
         "available": True,
         "query": args.query,
         "total_count": len(cleaned),
+        "live_matches": live_count,
+        "local_index_matches": len(index_hits),
         "results": cleaned,
-        "note": (
-            "Matches from the Zoho CRM (Customer 360), a separate system from the "
-            "Print247 ERP data. The CRM caps results at 10 per type. Pass a "
-            "result's record_id and record_type to get_customer360 for its full view."
-        ),
+        "note": note,
     }
 
 
@@ -2656,7 +2686,7 @@ CHAT_TOOLS = [
     ),
     ChatTool(
         "search_customer360",
-        "Search the Zoho CRM (Customer 360 - a separate system from the Print247 ERP) for leads, contacts and customers by name, email, phone or company. Use it when a question is about a CRM record or its communication history, or when the ERP tools find nobody. Returns up to 10 matches per type, each with the record_id and record_type that get_customer360 needs.",
+        "Search the Zoho CRM (Customer 360 - a separate system from the Print247 ERP) for leads, contacts and customers by name, email, phone or company. Use it when a question is about a CRM record or its communication history, or when the ERP tools find nobody. Also call it WITHOUT asking the user first whenever the ERP finds the person but has no email or phone for them - missing contact details are exactly what this source is for; search here, then answer. Live results (capped at 10 per type by that API) are merged with the locally harvested record index, duplicates removed; each match carries the record_id and record_type that get_customer360 needs.",
         Customer360SearchArgs,
         search_customer360,
     ),

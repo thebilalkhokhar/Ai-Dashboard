@@ -506,6 +506,23 @@ def validate_numeric_claims(
             errors.append(f"unsupported reference {token}")
     scanned = _mask(scanned, reference_spans)
 
+    # 1b) the CRM wired into this dashboard is NAMED "Customer 360": in
+    # "Customer 360", "Zoho 360", "CRM 360" or "a 360 view/record/profile" the
+    # 360 is part of a product name, not a figure a claim can make. Mask it
+    # before the number scan - two correct live answers died on the name
+    # alone (Oct 24: "search the CRM (Zoho 360)" failed as 'unsupported
+    # number 360'). A real count is untouched: "360 leads" has no product
+    # prefix and no view/record/profile after it, so it is still checked.
+    product_spans = [
+        (match.start(), match.end())
+        for match in re.finditer(
+            r"(?:customer|zoho|crm)[\s-]*360\b|\b360(?=\s+(?:view|record|profile)\b)",
+            scanned,
+            re.I,
+        )
+    ]
+    scanned = _mask(scanned, product_spans)
+
     # 2) rounded money ("$147k", "$2.4M") may only differ by the rounding
     suffix_spans = []
     for match in _SUFFIXED_MONEY_RE.finditer(scanned):
