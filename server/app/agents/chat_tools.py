@@ -18,7 +18,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app import db as app_db
 from app.config import settings
+from app.services import customer360 as c360_service
 from app.services import metrics, periods, processors
+from app.services.customer360_client import Customer360Client, Customer360Error
 
 log = logging.getLogger("chat_tools")
 
@@ -885,6 +887,15 @@ class CustomerProfileArgs(ToolArgs):
     name_or_id: str = Field(min_length=1, max_length=120)
 
 
+class Customer360SearchArgs(ToolArgs):
+    query: str = Field(min_length=1, max_length=120)
+
+
+class Customer360DetailArgs(ToolArgs):
+    record_id: str = Field(min_length=1, max_length=40)
+    record_type: str = Field(pattern="^(Lead|Contact|Customer)$")
+
+
 class RecordArgs(ToolArgs):
     collection: str = Field(pattern="^(payments|invoices|orders|quotes|leads)$")
     id: str = Field(min_length=1, max_length=40)
@@ -1590,6 +1601,116 @@ async def get_customer_profile(name_or_id: str, database: Any = None) -> dict:
         for value in bounded.values()
     )
     return bounded
+
+
+_c360_client_singleton: Customer360Client | None = None
+
+
+def _c360_client() -> Customer360Client:
+    """The shared Customer 360 client (it shares its JWT via Redis, so a
+    second instance would still not cause a second login)."""
+    global _c360_client_singleton
+    if _c360_client_singleton is None:
+        _c360_client_singleton = Customer360Client()
+    return _c360_client_singleton
+
+
+async def search_customer360(query: str, database: Any = None) -> dict:
+    """Search the Zoho CRM (Customer 360) for leads, contacts, customers.
+
+    This is a DIFFERENT system from the Print247 ERP the other tools read:
+    CRM records and their communication history live there. Results are
+    capped at 10 per type by that API, and the note says so - the model
+    must not present a capped list as every match in existence.
+    """
+    args = Customer360SearchArgs.model_validate({"query": query})
+    try:
+        results = await _c360_client().search(args.query)
+    except Customer360Error as exc:
+        return {
+            "source": "customer360",
+            "available": False,
+            "query": args.query,
+            "total_count": 0,
+            "results": [],
+            "note": f"Customer 360 could not be reached: {exc}",
+        }
+    cleaned = [
+        {
+            "record_id": row.get("id"),
+            "record_type": row.get("type"),
+            "name": row.get("name"),
+            "email": row.get("email"),
+            "phone": row.get("phone"),
+            "company": row.get("company"),
+            "status": row.get("status"),
+        }
+        for row in results
+        if isinstance(row, dict)
+    ]
+    return {
+        "source": "customer360",
+        "available": True,
+        "query": args.query,
+        "total_count": len(cleaned),
+        "results": cleaned,
+        "note": (
+            "Matches from the Zoho CRM (Customer 360), a separate system from the "
+            "Print247 ERP data. The CRM caps results at 10 per type. Pass a "
+            "result's record_id and record_type to get_customer360 for its full view."
+        ),
+    }
+
+
+async def get_customer360(record_id: str, record_type: str, database: Any = None) -> dict:
+    """One CRM record's full 360 summary, via the Mongo fetch-through cache.
+
+    A fresh cached copy is served without touching their slow backend.
+    On a live-fetch failure a stale copy is served WITH a note saying so;
+    with no copy at all the tool reports itself unavailable - it never
+    invents a profile.
+    """
+    args = Customer360DetailArgs.model_validate(
+        {"record_id": record_id, "record_type": record_type}
+    )
+    db = _database(database)
+    payload, fetched_at, fresh = await c360_service.get_cached_detail(
+        db, args.record_id, args.record_type
+    )
+    if payload is not None and fresh:
+        summary = c360_service.summarize_detail(payload)
+        summary.update({"available": True, "from_cache": True, "fetched_at": fetched_at})
+        return summary
+
+    try:
+        live = await _c360_client().detail(args.record_id, args.record_type)
+    except Customer360Error as exc:
+        if payload is not None:
+            summary = c360_service.summarize_detail(payload)
+            summary.update(
+                {
+                    "available": True,
+                    "from_cache": True,
+                    "fetched_at": fetched_at,
+                    "note": (
+                        "Customer 360 could not be reached just now, so this is "
+                        "the last saved copy and may be out of date."
+                    ),
+                }
+            )
+            return summary
+        return {
+            "source": "customer360",
+            "available": False,
+            "record_id": args.record_id,
+            "record_type": args.record_type,
+            "note": f"Customer 360 could not be reached and no saved copy exists: {exc}",
+        }
+
+    await c360_service.put_cached_detail(db, args.record_id, args.record_type, live)
+    summary = c360_service.summarize_detail(live)
+    summary.update({"available": True, "from_cache": False})
+    return summary
 
 
 async def get_record(collection: str, id: str, database: Any = None) -> dict:
@@ -2532,6 +2653,18 @@ CHAT_TOOLS = [
         "Full 360 view for one customer (name or ID): contact, quote/order/payment totals, unpaid invoices and their balances, recent payments with references and invoice numbers.",
         CustomerProfileArgs,
         get_customer_profile,
+    ),
+    ChatTool(
+        "search_customer360",
+        "Search the Zoho CRM (Customer 360 - a separate system from the Print247 ERP) for leads, contacts and customers by name, email, phone or company. Use it when a question is about a CRM record or its communication history, or when the ERP tools find nobody. Returns up to 10 matches per type, each with the record_id and record_type that get_customer360 needs.",
+        Customer360SearchArgs,
+        search_customer360,
+    ),
+    ChatTool(
+        "get_customer360",
+        "Full Customer 360 view for one CRM record (record_id + record_type from search_customer360): identity and status, related leads/contacts/customers, the interaction timeline (calls, emails, SMS, notes: counts by type, the last interaction, the five most recent), projects/deals, estimates, invoices and payments - with backend-computed totals where the records carry a consistent money field. This is Zoho CRM data, separate from the ERP quotes/orders/payments tools.",
+        Customer360DetailArgs,
+        get_customer360,
     ),
     ChatTool(
         "get_record",
