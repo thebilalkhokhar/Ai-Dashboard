@@ -563,3 +563,56 @@ async def test_analysis_tool_reports_unavailability(monkeypatch):
     monkeypatch.setattr(chat_tools, "_c360_client", lambda: client)
     result = await get_customer360_analysis("665f2ab1c360", "Lead")
     assert result["available"] is False
+
+
+# ------------------------------------------------------- evidence frames
+
+def test_tool_evidence_builds_a_bounded_customer_card():
+    from app.agents.chat import tool_evidence
+
+    result = {
+        "source": "customer360",
+        "entity": {
+            "name": "Frank Jr", "company": "Arellano Jerky", "status": "New",
+            "email": "frank@example.com", "phone": "2143923587",
+            "record_type": "Contact",
+        },
+        "projects_count": 2, "estimates_count": 1, "invoices_count": 0,
+        "payments_count": 0, "timeline_count": 56,
+        "estimates_total_amount": 1400.0,
+        "last_interaction": {
+            "type": "WhatsApp", "at": "2026-10-21T15:12:31.000Z",
+            "direction": "Outbound", "title": "not part of the card",
+        },
+    }
+    frame = tool_evidence("get_customer360", result)
+    assert frame is not None
+    card = frame["customer_card"]
+    assert card["name"] == "Frank Jr"
+    assert card["email"] == "frank@example.com"
+    assert card["counts"] == {
+        "projects": 2, "estimates": 1, "invoices": 0, "payments": 0, "timeline": 56,
+    }
+    assert card["totals"] == {"estimates_total_amount": 1400.0}
+    assert card["last_interaction"] == {
+        "type": "WhatsApp", "at": "2026-10-21T15:12:31.000Z", "direction": "Outbound",
+    }
+    # other tools never grow a card, and a detail result with no entity
+    # produces no frame at all
+    assert "customer_card" not in (tool_evidence("get_payments", {"total_amount": 5}) or {})
+    assert tool_evidence("get_customer360", {"source": "customer360"}) is None
+
+
+def test_tool_evidence_reports_the_crm_payments_total():
+    from app.agents.chat import tool_evidence
+
+    result = {
+        "source": "customer360", "ledger": "zoho_crm_payments",
+        "sum_amount_received": 20890.0, "total_count": 4,
+        "date_from": "2026-10-23", "date_to": "2026-10-23",
+    }
+    frame = tool_evidence("get_crm_payments", result)
+    assert frame is not None
+    assert frame["money_label"] == "sum_amount_received"
+    assert frame["money_total"] == 20890.0
+    assert frame["window"] == {"date_from": "2026-10-23", "date_to": "2026-10-23"}
