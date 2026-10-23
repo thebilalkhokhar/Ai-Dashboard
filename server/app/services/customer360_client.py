@@ -264,3 +264,23 @@ class Customer360Client:
         if not body.get("success"):
             raise Customer360Error("Customer 360 detail did not return success")
         return body
+
+    async def list_page(
+        self, module: str, page: int = 1, limit: int = 100, search: str = ""
+    ) -> dict:
+        """One page of a module list (payments, invoices, projects,
+        estimates, leads, contacts, customers).
+
+        These endpoints are NOT capped like the customer-360 search: they
+        paginate the whole module and report its total in `pagination`
+        (verified live Oct 24: payments 7,847 rows, ordered by receive
+        date newest first; `search` filters server-side). The integration
+        guide never documented them - the CRM frontend's module pages use
+        them, which is how they were found."""
+        params: dict[str, Any] = {"page": page, "limit": limit}
+        if search:
+            params["search"] = search
+        body = await self._request("GET", f"/{module}", params=params)
+        if not body.get("success"):
+            raise Customer360Error(f"Customer 360 {module} list did not return success")
+        return body

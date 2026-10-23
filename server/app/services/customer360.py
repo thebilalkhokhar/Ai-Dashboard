@@ -249,3 +249,116 @@ async def put_cached_detail(
         )
     except Exception:
         log.warning("customer360 cache write failed", exc_info=True)
+
+
+# ------------------------------------------------------- CRM module lists
+#
+# The module list endpoints (see customer360_client.list_page) expose the
+# CRM's own ledgers - payments first. Chat needs them because a payment
+# can exist in the CRM while the ERP payments tool shows none for that
+# day or customer (live failure Oct 24: "aaj kitni payment aayi" answered
+# 0 while the CRM held four receipts that day, one of them MNJ's $4,627).
+
+PAYMENT_PAGE_SIZE = 100
+MAX_PAYMENT_PAGES = 10  # a scan reads at most 1,000 rows and says so
+
+
+def _payment_row(row: dict) -> dict:
+    received = str(row.get("amountReceiveDate") or "")
+    return {
+        "payment_name": row.get("paymentName"),
+        "erp_id": row.get("erpId"),
+        "customer_name": row.get("customerName"),
+        "project_name": row.get("projectName"),
+        "amount_received": _to_float(row.get("amountReceived")),
+        "total_amount": _to_float(row.get("totalAmount")),
+        "invoice_status": row.get("invoiceStatus"),
+        "owner": row.get("ownerName"),
+        "receive_date": received[:10] if received else None,
+        "record_created_at": row.get("createdAt"),
+    }
+
+
+async def collect_crm_payments(
+    client: Any,
+    *,
+    date_from: str,
+    date_to: str,
+    search: str = "",
+) -> dict:
+    """CRM payments whose receive date falls in [date_from, date_to].
+
+    The payments list is ordered by receive date, newest first (verified
+    live), so paging stops as soon as a whole page is older than the
+    range. Totals are computed here, in Python, and only when every
+    matched row carries the field - the same discipline as the detail
+    summarizer. The coverage block states exactly how far the scan got:
+    a bounded scan is never dressed up as the whole ledger.
+    """
+    matched: list[dict] = []
+    scanned = 0
+    pages_read = 0
+    module_total: Any = None
+    complete = False
+    for page in range(1, MAX_PAYMENT_PAGES + 1):
+        body = await client.list_page(
+            "payments", page=page, limit=PAYMENT_PAGE_SIZE, search=search
+        )
+        rows = [row for row in (body.get("payments") or []) if isinstance(row, dict)]
+        pagination = body.get("pagination") or {}
+        if pagination.get("total") is not None:
+            module_total = pagination["total"]
+        pages_read = page
+        if not rows:
+            complete = True
+            break
+        scanned += len(rows)
+        page_days = [str(row.get("amountReceiveDate") or "")[:10] for row in rows]
+        for row, day in zip(rows, page_days):
+            if date_from <= day <= date_to:
+                matched.append(_payment_row(row))
+        if page_days and max(page_days) < date_from:
+            complete = True  # newest first: everything further is older still
+            break
+        total_pages = pagination.get("pages")
+        if total_pages is not None and page >= int(total_pages):
+            complete = True
+            break
+
+    received = [row["amount_received"] for row in matched]
+    totals = [row["total_amount"] for row in matched]
+    return {
+        "source": "customer360",
+        "ledger": "zoho_crm_payments",
+        "available": True,
+        "date_from": date_from,
+        "date_to": date_to,
+        "search": search or None,
+        "total_count": len(matched),
+        "sum_amount_received": (
+            round(sum(v for v in received if v is not None), 2)
+            if all(v is not None for v in received)
+            else None
+        ),
+        "sum_total_amount": (
+            round(sum(v for v in totals if v is not None), 2)
+            if all(v is not None for v in totals)
+            else None
+        ),
+        "coverage": {
+            "module_total": module_total,
+            "rows_scanned": scanned,
+            "pages_read": pages_read,
+            "complete_for_range": complete,
+        },
+        "results": matched,
+        "note": (
+            "Zoho CRM payments - a separate ledger from the ERP payments "
+            "tool. CRM rows mirror ERP payments (each carries its erp_id) "
+            "and also include CRM-only payments, so report the two ledgers "
+            "under separate labels and never add their totals together. "
+            "receive_date is the calendar date the CRM records; no clock "
+            "time is stored for a payment. record_created_at is when the "
+            "CRM record was created/synced, not when the money arrived."
+        ),
+    }
