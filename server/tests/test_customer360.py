@@ -90,13 +90,34 @@ class CacheCollection:
         self.docs[key] = doc
 
 
+class RecordsCursor:
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def to_list(self, limit):
+        return self._rows[:limit]
+
+
+class RecordsCollection:
+    """Stand-in for the harvested customer360_records index."""
+
+    def __init__(self, docs=None):
+        self.docs: dict[str, dict] = dict(docs or {})
+
+    def find(self, query, projection=None):
+        return RecordsCursor(list(self.docs.values()))
+
+
 class CacheDb:
-    def __init__(self):
+    def __init__(self, records=None):
         self.cache = CacheCollection()
+        self.records = RecordsCollection(records)
 
     def __getitem__(self, name):
-        assert name == "customer360_cache"
-        return self.cache
+        return {
+            "customer360_cache": self.cache,
+            "customer360_records": self.records,
+        }[name]
 
 
 class FakeRedis:
@@ -303,6 +324,47 @@ async def test_search_tool_reports_unavailability(monkeypatch):
     result = await search_customer360("ismat", database=CacheDb())
     assert result["available"] is False
     assert result["results"] == []
+
+
+@pytest.mark.asyncio
+async def test_search_tool_merges_local_index_without_duplicates(stub):
+    db = CacheDb(records={
+        # The same person the live search returns - must appear once.
+        "665f2ab1c360": {
+            "_id": "665f2ab1c360", "record_type": "Lead", "name": "Ismat Khalil",
+            "email": "ismat@example.com", "phone": "1", "company": "Rinada",
+            "status": "Contacted",
+        },
+        # A record only the harvested index knows about.
+        "L9": {
+            "_id": "L9", "record_type": "Lead", "name": "Ismat Other",
+            "email": "other@example.com", "phone": "9", "company": "Elsewhere",
+            "status": "New",
+        },
+    })
+    result = await search_customer360("ismat", database=db)
+    assert result["available"] is True
+    assert result["live_matches"] == 1
+    assert result["local_index_matches"] == 2
+    assert result["total_count"] == 2
+    assert [row["record_id"] for row in result["results"]] == ["665f2ab1c360", "L9"]
+
+
+@pytest.mark.asyncio
+async def test_search_tool_live_down_serves_index_with_a_note(monkeypatch):
+    down = StubClient(error=Customer360Error("network error: ReadTimeout"))
+    monkeypatch.setattr(chat_tools, "_c360_client", lambda: down)
+    db = CacheDb(records={
+        "L9": {
+            "_id": "L9", "record_type": "Lead", "name": "Ismat Other",
+            "email": "other@example.com", "phone": "9", "company": "Elsewhere",
+            "status": "New",
+        },
+    })
+    result = await search_customer360("ismat", database=db)
+    assert result["available"] is True
+    assert result["total_count"] == 1
+    assert "local index only" in result["note"]
 
 
 @pytest.mark.asyncio

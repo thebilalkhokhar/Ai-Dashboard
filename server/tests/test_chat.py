@@ -378,6 +378,42 @@ def test_numeric_guard_accepts_verbatim_quotes_from_record_text():
     assert validate_numeric_claims("The budget is $25,000.", results)
 
 
+def test_numeric_guard_treats_customer_360_as_a_name_not_a_number():
+    """Oct 24 live failure (server log 23:57:58 and 23:58:04): the model
+    found Frank Jr in the ERP (Arellano Jerky, ID 5356), correctly reported
+    his email/phone were not on file, and OFFERED to search the CRM - both
+    drafts were discarded as 'unsupported number 360' because the product
+    name itself contains a number no ERP tool had returned. The two logged
+    drafts, verbatim, must pass; a genuine count of 360 must still fail."""
+    from app.agents.chat import validate_numeric_claims
+
+    results = [{"tool": "find_customer", "result": {"customers": [
+        {"customer_id": 5356, "name": "Frank Jr", "company": "Arellano Jerky",
+         "email": None, "phone": None},
+    ]}}]
+    draft_one = (
+        "Contact details for Frank Jr (Arellano Jerky, ID 5356) are not on file.\n\n"
+        "- Email: not on file\n- Phone: not on file\n\n"
+        "Would you like me to search the CRM (Zoho 360) for updated contact info, "
+        "or pull a 360 view for this customer?"
+    )
+    draft_two = (
+        "Contact details for Frank Jr are not on file.\n\n"
+        "- Email: not on file\n- Phone: not on file\n\n"
+        "Would you like me to pull the CRM 360 record for this customer to fetch "
+        "any updated contact info, or search for the correct contact in Zoho CRM?"
+    )
+    assert validate_numeric_claims(draft_one, results) == []
+    assert validate_numeric_claims(draft_two, results) == []
+    # the name alone, with no tools at all, is never a claim
+    assert validate_numeric_claims("Customer 360 has the record.", []) == []
+    # but a real count written as 360 is still checked and still fails
+    assert validate_numeric_claims("360 leads need follow-up.", results)
+    assert validate_numeric_claims("We found 360 customers this week.", results)
+    # and the name does not smuggle a count: the second 360 here is a claim
+    assert validate_numeric_claims("Customer 360 holds 360 leads.", results)
+
+
 def test_numeric_guard_accepts_prior_numbers_and_rejects_new_numbers():
     from app.agents.chat import validate_numeric_claims
 
