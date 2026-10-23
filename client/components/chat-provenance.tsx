@@ -95,6 +95,7 @@ function CustomerCard({ card }: { card: CrmCustomerCard }) {
               : ""}
         </p>
       )}
+      {card.last_message && <p className="chat-360-message">“{card.last_message}”</p>}
     </section>
   );
 }
