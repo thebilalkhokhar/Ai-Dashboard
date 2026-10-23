@@ -290,6 +290,18 @@ export interface CrmCustomerCard {
   last_message?: string;
 }
 
+// The CRM AI's own analysis verdict, projected by the backend from the
+// get_customer360_analysis result - never model text.
+export interface CrmAnalysisCard {
+  source?: string;
+  ai_status?: string;
+  follow_up_required?: boolean;
+  urgency?: string;
+  reasoning?: string;
+  action_needed?: string;
+  has_email_draft?: boolean;
+}
+
 export interface ChatToolResultEvent {
   tool: string;
   records_total?: number;
@@ -303,6 +315,7 @@ export interface ChatToolResultEvent {
   money_covers?: string;
   window?: { date_from?: string | null; date_to?: string | null };
   customer_card?: CrmCustomerCard;
+  analysis_card?: CrmAnalysisCard;
 }
 
 export interface ChatTokenEvent {
@@ -426,6 +439,10 @@ export interface CrmEngagementOutput {
   contact_name?: string | null;
   company?: string | null;
   waiting_days?: number;
+  // pipeline-filled by the backend: the channel the customer is
+  // waiting on (WhatsApp, SMS, Email...) and their actual last words
+  channel?: string | null;
+  last_customer_message?: string | null;
   situation?: string;
   action_plan?: string;
   message_draft?: string | null;
