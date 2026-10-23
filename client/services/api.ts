@@ -324,20 +324,22 @@ export function getChatThreadId(): string {
   if (inMemoryChatThreadId) return inMemoryChatThreadId;
 
   try {
-    // localStorage, not sessionStorage: the current conversation is stored
-    // on the server under this id, and the id must survive a browser
-    // restart so the conversation can be reopened exactly where it ended.
-    const storedThreadId =
-      window.localStorage.getItem(CHAT_THREAD_STORAGE_KEY) ??
-      window.sessionStorage.getItem(CHAT_THREAD_STORAGE_KEY);
+    // sessionStorage, deliberately: the chat panel shows the CURRENT
+    // session's conversation only. A page refresh inside the session
+    // keeps it; a new visit starts a fresh conversation, and every older
+    // conversation stays stored server-side under the Chats tab, where
+    // it can be reopened on demand. A legacy localStorage id from the
+    // previous build is ignored here (and cleared) so a previous
+    // session's chat never reopens itself uninvited.
+    window.localStorage.removeItem(CHAT_THREAD_STORAGE_KEY);
+    const storedThreadId = window.sessionStorage.getItem(CHAT_THREAD_STORAGE_KEY);
     if (storedThreadId) {
       inMemoryChatThreadId = storedThreadId;
-      window.localStorage.setItem(CHAT_THREAD_STORAGE_KEY, storedThreadId);
       return storedThreadId;
     }
 
     inMemoryChatThreadId = createThreadId();
-    window.localStorage.setItem(CHAT_THREAD_STORAGE_KEY, inMemoryChatThreadId);
+    window.sessionStorage.setItem(CHAT_THREAD_STORAGE_KEY, inMemoryChatThreadId);
   } catch {
     inMemoryChatThreadId = createThreadId();
   }
@@ -348,7 +350,7 @@ export function getChatThreadId(): string {
 export function setChatThreadId(threadId: string): void {
   inMemoryChatThreadId = threadId;
   try {
-    window.localStorage.setItem(CHAT_THREAD_STORAGE_KEY, threadId);
+    window.sessionStorage.setItem(CHAT_THREAD_STORAGE_KEY, threadId);
   } catch {
     // storage unavailable: the in-memory id still identifies this session
   }
