@@ -983,6 +983,8 @@ _MONEY_KEYS = (
     "revenue_total",
     "total_payments",
     "total_amount",
+    # the Zoho CRM payments ledger's own total (get_crm_payments)
+    "sum_amount_received",
 )
 _COUNT_KEYS = ("payment_count", "invoice_count", "quote_count", "order_count", "lead_count")
 
@@ -1001,6 +1003,54 @@ def _money_value(result: dict, key: str) -> Any:
         except ValueError:
             return None
     return None
+
+
+def _customer_card(result: dict) -> dict | None:
+    """The bounded Customer 360 card a chat answer is rendered with.
+
+    Projected from the get_customer360 summary the backend computed -
+    identity, contact details (showing them is the point of the 360
+    view; the user's Oct 24 decision), section counts, Python totals
+    and the last interaction. Strings are the record's own; nothing
+    here comes from the model.
+    """
+    entity = result.get("entity")
+    if not isinstance(entity, dict):
+        return None
+    card: dict[str, Any] = {"source": "customer360"}
+    for key in ("name", "company", "status", "email", "phone", "record_type"):
+        value = entity.get(key)
+        if isinstance(value, str) and value.strip():
+            card[key] = value.strip()[:120]
+    counts: dict[str, int] = {}
+    for section in ("projects", "estimates", "invoices", "payments", "timeline"):
+        count = result.get(f"{section}_count")
+        if isinstance(count, int) and not isinstance(count, bool):
+            counts[section] = count
+    if counts:
+        card["counts"] = counts
+    totals: dict[str, float] = {}
+    for key in (
+        "estimates_total_amount",
+        "projects_total_amount",
+        "invoices_total_amount",
+        "payments_total_amount",
+    ):
+        value = result.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            totals[key] = value
+    if totals:
+        card["totals"] = totals
+    last = result.get("last_interaction")
+    if isinstance(last, dict):
+        brief = {
+            key: last[key]
+            for key in ("type", "at", "direction")
+            if isinstance(last.get(key), str) and last[key]
+        }
+        if brief:
+            card["last_interaction"] = brief
+    return card if len(card) > 1 else None
 
 
 def tool_evidence(name: str, result: Any) -> dict | None:
@@ -1054,7 +1104,16 @@ def tool_evidence(name: str, result: Any) -> dict | None:
         }
         if window:
             evidence["window"] = window
-    if page is None and "money_total" not in evidence and "record_count" not in evidence:
+    if name == "get_customer360":
+        card = _customer_card(result)
+        if card is not None:
+            evidence["customer_card"] = card
+    if (
+        page is None
+        and "money_total" not in evidence
+        and "record_count" not in evidence
+        and "customer_card" not in evidence
+    ):
         return None
     return evidence
 
