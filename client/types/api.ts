@@ -286,6 +286,8 @@ export interface CrmCustomerCard {
   counts?: Record<string, number>;
   totals?: Record<string, number>;
   last_interaction?: { type?: string; at?: string; direction?: string };
+  // the record's actual last message body, excerpted by the backend
+  last_message?: string;
 }
 
 export interface ChatToolResultEvent {
