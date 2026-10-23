@@ -391,8 +391,14 @@ class DashboardScheduler:
             if await self._daily_run_due(now):
                 return await self._run_agent("daily_run", now, ignore_cache=True)
 
-            new_quotes, new_invoices, new_leads = await self._new_items(now)
-            if not new_quotes and not new_invoices and not new_leads:
+            (
+                new_quotes, new_invoices, new_leads,
+                new_crm_engagement, new_crm_deals,
+            ) = await self._new_items(now)
+            if (
+                not new_quotes and not new_invoices and not new_leads
+                and not new_crm_engagement and not new_crm_deals
+            ):
                 log.info("scheduler: no new or changed items - no agent run")
                 return {"ok": True, "ran": False, "new_count": 0}
 
@@ -402,12 +408,15 @@ class DashboardScheduler:
                     ("new_quote", new_quotes),
                     ("new_overdue_invoice", new_invoices),
                     ("new_lead", new_leads),
+                    ("new_crm_engagement", new_crm_engagement),
+                    ("new_crm_deal", new_crm_deals),
                 )
                 if chosen
             )
             return await self._run_agent(
                 trigger, now, new_quotes=new_quotes, new_invoices=new_invoices,
-                new_leads=new_leads,
+                new_leads=new_leads, new_crm_engagement=new_crm_engagement,
+                new_crm_deals=new_crm_deals,
             )
         except Exception as exc:  # trigger evaluation itself broke
             log.exception("agent trigger check failed")
@@ -436,7 +445,9 @@ class DashboardScheduler:
             return False
         return True
 
-    async def _current_items(self, now: datetime) -> tuple[list[dict], list[dict], list[dict]]:
+    async def _current_items(
+        self, now: datetime
+    ) -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict]]:
         """Reuse the graph's own loading node so hashes match the pipeline.
 
         `_erp=None` on purpose: the lead-outcomes ERP calls add nothing to the
@@ -458,6 +469,8 @@ class DashboardScheduler:
             state.get("negotiation_input") or [],
             state.get("collections_input") or [],
             state.get("lead_followup_input") or [],
+            state.get("crm_engagement_input") or [],
+            state.get("crm_deal_watch_input") or [],
         )
 
     async def _previous_hashes(self) -> set[str]:
@@ -472,20 +485,26 @@ class DashboardScheduler:
             return set()
         run = docs[0]
         hashes: set[str] = set()
-        for kind in ("negotiation", "collections", "lead_followup"):
+        for kind in ("negotiation", "collections", "lead_followup", "crm_engagement", "crm_deal_watch"):
             for item in run.get(kind) or []:
                 if item.get("input_hash"):
                     hashes.add(item["input_hash"])
         return hashes
 
-    async def _new_items(self, now: datetime) -> tuple[list[dict], list[dict], list[dict]]:
+    async def _new_items(
+        self, now: datetime
+    ) -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict]]:
         """Items whose input hash the previous run has never seen."""
-        negotiation, collections, leads = await self._current_items(now)
+        negotiation, collections, leads, crm_engagement, crm_deals = await self._current_items(now)
         previous = await self._previous_hashes()
         new_quotes = [item for item in negotiation if item.get("input_hash") not in previous]
         new_invoices = [item for item in collections if item.get("input_hash") not in previous]
         new_leads = [item for item in leads if item.get("input_hash") not in previous]
-        return new_quotes, new_invoices, new_leads
+        new_crm_engagement = [
+            item for item in crm_engagement if item.get("input_hash") not in previous
+        ]
+        new_crm_deals = [item for item in crm_deals if item.get("input_hash") not in previous]
+        return new_quotes, new_invoices, new_leads, new_crm_engagement, new_crm_deals
 
     async def _run_agent(
         self,
@@ -495,11 +514,15 @@ class DashboardScheduler:
         new_quotes: Optional[list[dict]] = None,
         new_invoices: Optional[list[dict]] = None,
         new_leads: Optional[list[dict]] = None,
+        new_crm_engagement: Optional[list[dict]] = None,
+        new_crm_deals: Optional[list[dict]] = None,
     ) -> dict:
         """One pipeline call + the trigger log + the published briefing."""
         new_quotes = new_quotes or []
         new_invoices = new_invoices or []
         new_leads = new_leads or []
+        new_crm_engagement = new_crm_engagement or []
+        new_crm_deals = new_crm_deals or []
         local_day = now.astimezone().date().isoformat()
         if trigger == "daily_run":
             self._last_daily_day = local_day
@@ -507,8 +530,10 @@ class DashboardScheduler:
         run_id = str(uuid.uuid4())
         started_at = datetime.now(timezone.utc)
         log.info(
-            "scheduler: agent run %s (%s, new_quotes=%d, new_invoices=%d, new_leads=%d, full=%s)",
-            run_id, trigger, len(new_quotes), len(new_invoices), len(new_leads), ignore_cache,
+            "scheduler: agent run %s (%s, new_quotes=%d, new_invoices=%d, new_leads=%d, "
+            "new_crm_engagement=%d, new_crm_deals=%d, full=%s)",
+            run_id, trigger, len(new_quotes), len(new_invoices), len(new_leads),
+            len(new_crm_engagement), len(new_crm_deals), ignore_cache,
         )
 
         try:

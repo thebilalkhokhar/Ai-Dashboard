@@ -135,6 +135,9 @@ def _timeline(rows: list[dict]) -> dict:
             "type": row.get("type"),
             "title": str(title)[:120] if title is not None else None,
             "at": row.get("timestamp") or row.get("createdAt"),
+            # "Inbound" = the customer wrote last (the CRM Engagement
+            # agent's whole signal); "Outbound" = a rep wrote last.
+            "direction": row.get("direction"),
         }
 
     out: dict[str, Any] = {"timeline_by_type": _by_field(rows, "type")}

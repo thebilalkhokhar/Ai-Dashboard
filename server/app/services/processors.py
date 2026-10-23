@@ -968,3 +968,68 @@ async def build_customer_context(
         contact=contact,
         notes=notes,
     )
+
+
+# ------------------------------------------------------------- CRM deals
+#
+# Candidates for the CRM Deal Watch agent, selected from the locally
+# synced module rows (customer360_sync): a project or estimate whose
+# stage is not closed and that has not moved for at least `idle_days`.
+# Pure Python, like every other selector here - the agent only judges.
+
+_CLOSED_STAGE_HINTS = (
+    "won", "closed", "complete", "delivered", "paid", "converted",
+    "lost", "cancel", "rejected", "expired",
+)
+
+
+def _stage_is_closed(stage: Any) -> bool:
+    text = str(stage or "").strip().lower()
+    if not text:
+        return False  # no stage recorded: not provably closed, stays a candidate
+    return any(hint in text for hint in _CLOSED_STAGE_HINTS)
+
+
+def crm_deal_candidates(
+    projects: list[dict],
+    estimates: list[dict],
+    now: datetime,
+    idle_days: int = 14,
+) -> list[dict]:
+    """Stalled CRM projects + estimates, biggest amount first."""
+    candidates: list[dict] = []
+
+    def consider(row: dict, kind: str, name: Any, amount: Any) -> None:
+        if _stage_is_closed(row.get("stage")):
+            return
+        moved = parse_date(row.get("updatedAt") or row.get("createdAt"))
+        idle = age_days(moved, now)
+        if idle is None or idle < idle_days:
+            return
+        candidates.append(
+            {
+                "record_id": str(row.get("_id") or ""),
+                "deal_kind": kind,
+                "deal_name": str(name) if name else None,
+                "account_name": row.get("accountName"),
+                "contact_name": row.get("contactName"),
+                "stage": row.get("stage"),
+                "amount": to_number(amount),
+                "days_idle": int(idle),
+                "last_moved_at": iso_or_none(row.get("updatedAt") or row.get("createdAt")),
+            }
+        )
+
+    for row in projects or []:
+        if isinstance(row, dict):
+            consider(row, "project", row.get("projectName"), row.get("amount"))
+    for row in estimates or []:
+        if isinstance(row, dict):
+            consider(
+                row,
+                "estimate",
+                row.get("subject") or row.get("estimateNumber"),
+                row.get("grandTotal"),
+            )
+    candidates.sort(key=lambda c: (-c["amount"], -c["days_idle"]))
+    return candidates
