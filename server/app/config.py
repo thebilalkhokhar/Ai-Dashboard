@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     # the script. The script stays for an immediate manual refresh.
     C360_SYNC_ENABLED: bool = True
     C360_SYNC_HOURS: float = 6.0
+    # Between full syncs, a cheap recent pass re-reads only the first
+    # pages of every module (the lists are newest-first - verified live
+    # for payments), so new records reach the mirror within minutes
+    # instead of waiting for the next full run.
+    C360_RECENT_SYNC_MINUTES: int = 15
+    C360_RECENT_PAGES: int = 3
 
     # --- How far back the ingestion goes (YYYY-MM-DD). Default: 12 months ago ---
     INGEST_FROM: str = Field(default_factory=lambda: months_ago(12).isoformat())
