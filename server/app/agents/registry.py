@@ -7,6 +7,8 @@ code so the command center can only ever show an agent the backend can run.
   * ``negotiation``   - stale-quote follow-up specialist (graph.py + negotiation.py).
   * ``collections``   - unpaid/overdue invoice specialist (graph.py + collections.py).
   * ``lead_followup`` - stuck-lead specialist (graph.py + lead_followup.py).
+  * ``crm_engagement`` - Zoho CRM awaiting-reply specialist (graph.py + crm_agents.py).
+  * ``crm_deal_watch`` - stalled CRM project/estimate specialist (graph.py + crm_agents.py).
   * ``chat``          - ONE tool-calling read-only assistant (chat.py). Its
                         ``tools`` are exactly the tools chat.py can invoke
                         (chat_tools.CHAT_TOOLS); there are no chat "sub-agents".
@@ -23,7 +25,10 @@ from app.agents.chat_tools import CHAT_TOOLS
 from app.services.events import EventService, get_event_service
 
 # Stable ids that agent events' agent_id must use.
-AGENT_IDS = ("master", "negotiation", "collections", "lead_followup", "chat")
+AGENT_IDS = (
+    "master", "negotiation", "collections", "lead_followup",
+    "crm_engagement", "crm_deal_watch", "chat",
+)
 
 _CAPABILITIES: tuple[dict[str, Any], ...] = (
     {
@@ -55,6 +60,22 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "name": "Lead Follow-up",
         "kind": "specialist",
         "purpose": "Summarises stuck leads and the next action for a human rep, from Python-parsed fields.",
+        "tools": [],
+        "enabled": True,
+    },
+    {
+        "id": "crm_engagement",
+        "name": "CRM Engagement",
+        "kind": "specialist",
+        "purpose": "Drafts replies for Zoho CRM records whose last interaction came from the customer and has waited unanswered.",
+        "tools": [],
+        "enabled": True,
+    },
+    {
+        "id": "crm_deal_watch",
+        "name": "CRM Deal Watch",
+        "kind": "specialist",
+        "purpose": "Drafts follow-ups for stalled Zoho CRM projects and estimates that have not moved in at least 14 days.",
         "tools": [],
         "enabled": True,
     },

@@ -60,6 +60,14 @@ from app.agents.llm import (
 from app.agents.negotiation import negotiation_payload, NEGOTIATION_SYSTEM
 from app.agents.collections import collections_payload, COLLECTIONS_SYSTEM
 from app.agents.lead_followup import lead_followup_payload, LEAD_FOLLOWUP_SYSTEM
+from app.agents.crm_agents import (
+    crm_deal_payload,
+    crm_engagement_payload,
+    CRM_DEAL_WATCH_SYSTEM,
+    CRM_ENGAGEMENT_SYSTEM,
+)
+from app.services import customer360 as c360_service
+from app.services.customer360_client import Customer360Client, Customer360Error
 from app.agents.master import (
     MASTER_SYSTEM,
     build_master_brief,
@@ -79,13 +87,15 @@ from app.schemas.agents import (
     NegotiationOutput,
     CollectionsOutput,
     LeadFollowupOutput,
+    CrmEngagementOutput,
+    CrmDealWatchOutput,
 )
 
 CONCURRENCY = int(settings.AGENT_CONCURRENCY)
 CACHE_HOURS = int(settings.AGENT_CACHE_HOURS)
 MAX_ITEMS = int(settings.MAX_ITEMS_PER_AGENT)
 
-AGENT_KINDS = ("negotiation", "collections", "lead_followup")
+AGENT_KINDS = ("negotiation", "collections", "lead_followup", "crm_engagement", "crm_deal_watch")
 
 
 @dataclass
@@ -127,11 +137,15 @@ class RunState(TypedDict, total=False):
     negotiation_input: list[dict]
     collections_input: list[dict]
     lead_followup_input: list[dict]
+    crm_engagement_input: list[dict]
+    crm_deal_watch_input: list[dict]
     cached_hashes: dict
     signals_summary: dict
     negotiation_out: list[dict]
     collections_out: list[dict]
     lead_followup_out: list[dict]
+    crm_engagement_out: list[dict]
+    crm_deal_watch_out: list[dict]
     grouped: dict
     leads_grouped: list[dict]
     master: dict
@@ -621,6 +635,136 @@ async def _customer_context_map(database, erp: Any, customer_ids: list) -> dict:
     return contexts
 
 
+def _crm_collection(database: Any, name: str) -> Any:
+    """A synced CRM collection, or None - the CRM side is optional
+    infrastructure: no sync yet (or a test double without the attribute)
+    means no CRM items, never a broken ERP run."""
+    try:
+        return database[name]
+    except Exception:
+        return getattr(database, name, None)
+
+
+async def _crm_deal_items(database: Any, now: datetime) -> list[dict]:
+    """Stalled-deal items from the locally synced CRM rows (no API calls)."""
+    try:
+        projects_col = _crm_collection(database, "customer360_projects")
+        estimates_col = _crm_collection(database, "customer360_estimates")
+        projects = (
+            await projects_col.find().to_list(20_000) if projects_col is not None else []
+        )
+        estimates = (
+            await estimates_col.find().to_list(20_000) if estimates_col is not None else []
+        )
+    except Exception:
+        return []
+    items: list[dict] = []
+    for candidate in processors.crm_deal_candidates(projects, estimates, now)[:MAX_ITEMS]:
+        payload = crm_deal_payload(candidate)
+        items.append(
+            {
+                "kind": "crm_deal_watch",
+                "item": candidate,
+                "payload": payload,
+                "input_hash": stable_cache_key("crm_deal_watch", payload),
+            }
+        )
+    return items
+
+
+async def _crm_engagement_items(database: Any, now: datetime) -> list[dict]:
+    """Awaiting-reply items: synced CRM leads idle 2-90 days whose detail
+    timeline ends with an INBOUND interaction (the customer wrote last).
+
+    Details come through the same fetch-through cache chat uses. Live
+    fetches are bounded (at most MAX_ITEMS attempts, giving up after two
+    failures) so a cold or down CRM can never hold the pipeline hostage;
+    any failure simply yields fewer items.
+    """
+    try:
+        leads_col = _crm_collection(database, "customer360_leads")
+        if leads_col is None:
+            return []
+        rows = await leads_col.find().to_list(20_000)
+    except Exception:
+        return []
+
+    window: list[tuple[float, dict]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("status") or "").strip().lower() in (
+            "converted", "closed", "won", "lost", "junk",
+        ):
+            continue
+        idle = processors.age_days(processors.parse_date(row.get("lastActivityAt")), now)
+        if idle is None or idle < 2 or idle > 90:
+            continue
+        window.append((idle, row))
+    window.sort(key=lambda pair: -pair[0])  # longest idle first
+
+    items: list[dict] = []
+    client: Optional[Customer360Client] = None
+    fetch_attempts = 0
+    fetch_failures = 0
+    try:
+        for _idle, row in window[: MAX_ITEMS * 10]:
+            if len(items) >= MAX_ITEMS or fetch_failures >= 2:
+                break
+            record_id = str(row.get("_id") or "")
+            if not record_id:
+                continue
+            payload, _fetched_at, fresh = await c360_service.get_cached_detail(
+                database, record_id, "Lead"
+            )
+            if payload is None or not fresh:
+                if fetch_attempts >= MAX_ITEMS:
+                    continue
+                fetch_attempts += 1
+                if client is None:
+                    client = Customer360Client()
+                try:
+                    payload = await client.detail(record_id, "Lead")
+                    await c360_service.put_cached_detail(
+                        database, record_id, "Lead", payload
+                    )
+                except Customer360Error:
+                    fetch_failures += 1
+                    continue
+            summary = c360_service.summarize_detail(payload)
+            last = summary.get("last_interaction") or {}
+            if str(last.get("direction") or "").strip().lower() != "inbound":
+                continue
+            waiting = processors.age_days(processors.parse_date(last.get("at")), now)
+            if waiting is None or waiting < 1:
+                continue
+            entity = summary.get("entity") or {}
+            item = {
+                "record_id": record_id,
+                "record_type": "Lead",
+                "contact_name": entity.get("name"),
+                "company": entity.get("company"),
+                "waiting_days": int(waiting),
+            }
+            payload_out = crm_engagement_payload(summary, "Lead", int(waiting))
+            items.append(
+                {
+                    "kind": "crm_engagement",
+                    "item": item,
+                    "payload": payload_out,
+                    "input_hash": stable_cache_key("crm_engagement", payload_out),
+                }
+            )
+    except Exception:
+        import logging
+
+        logging.getLogger("graph").warning("crm engagement load failed", exc_info=True)
+    finally:
+        if client is not None:
+            await client.close()
+    return items
+
+
 async def load_signals_node(state: RunState) -> RunState:
     database = state["_database"]
     erp = state.get("_erp")
@@ -697,6 +841,33 @@ async def load_signals_node(state: RunState) -> RunState:
                 )
                 break
 
+    # The same lead may also live in the Zoho CRM (matched by zohoLeadId,
+    # the id space both systems share): its CRM status and last CRM
+    # activity are a note on the lead, exactly like the customer match
+    # above - context for the analyst, never a merge.
+    crm_leads_by_zoho: dict[str, dict] = {}
+    try:
+        crm_leads_col = _crm_collection(database, "customer360_leads")
+        if crm_leads_col is not None:
+            for crow in await crm_leads_col.find().to_list(50_000):
+                if isinstance(crow, dict):
+                    zid = processors.contact_to_s(crow.get("zohoLeadId"))
+                    if zid:
+                        crm_leads_by_zoho[zid] = crow
+    except Exception:
+        crm_leads_by_zoho = {}
+    for row in stuck:
+        # a stuck row's lead_id IS its zoho id when it has one
+        # (processors.stuck_leads), which is the CRM map's key
+        crow = crm_leads_by_zoho.get(row["lead_id"])
+        if not crow:
+            continue
+        crm_note = f"Zoho CRM lead record: status {crow.get('status') or 'unknown'}"
+        if crow.get("lastActivityAt"):
+            crm_note += f", last CRM activity {str(crow['lastActivityAt'])[:10]}"
+        existing = lead_notes.get(row["lead_id"])
+        lead_notes[row["lead_id"]] = f"{existing}; {crm_note}" if existing else crm_note
+
     lead_items: list[dict] = []
     for row in stuck:
         note = lead_notes.get(row["lead_id"])
@@ -705,6 +876,12 @@ async def load_signals_node(state: RunState) -> RunState:
             {"kind": "lead_followup", "item": row, "note": note, "payload": payload, "input_hash": stable_cache_key("lead_followup", payload)}
         )
 
+    # --- CRM specialists: Deal Watch reads the synced rows locally;
+    # Engagement reads detail summaries through the cache. Both degrade
+    # to no items when the CRM side is absent or down. ---
+    crm_deal_items = await _crm_deal_items(database, now)
+    crm_engagement_items = await _crm_engagement_items(database, now)
+
     # --- cache: reuse outputs from the last CACHE_HOURS hours -------------
     cutoff_epoch = state["now_epoch"] - CACHE_HOURS * 3600
     cached: dict = {}
@@ -712,7 +889,12 @@ async def load_signals_node(state: RunState) -> RunState:
         recent = await database.agent_runs.find(
             {"finished_epoch": {"$gt": cutoff_epoch}}
         ).to_list(50)
-        cached = cache_lookup(recent, negotiation_items + collections_items + lead_items, cutoff_epoch)
+        cached = cache_lookup(
+            recent,
+            negotiation_items + collections_items + lead_items
+            + crm_engagement_items + crm_deal_items,
+            cutoff_epoch,
+        )
 
     signals_summary = {
         "quotes_scanned": len(quotes),
@@ -723,11 +905,15 @@ async def load_signals_node(state: RunState) -> RunState:
         "stuck_leads_count": len(stuck),
         "unpaid_balance_total": round(sum(r.get("balance", 0.0) for r in unpaid), 2),
         "stalled_orders": "signal unavailable - unreliable by design (no status timestamps)",
+        "crm_awaiting_reply_count": len(crm_engagement_items),
+        "crm_stalled_deals_count": len(crm_deal_items),
     }
     return {
         "negotiation_input": negotiation_items,
         "collections_input": collections_items,
         "lead_followup_input": lead_items,
+        "crm_engagement_input": crm_engagement_items,
+        "crm_deal_watch_input": crm_deal_items,
         "cached_hashes": cached,
         "signals_summary": signals_summary,
     }
@@ -740,6 +926,27 @@ async def load_signals_node(state: RunState) -> RunState:
 
 def _item_skeleton(kind: str, entry: dict) -> dict:
     row = entry.get("item") or {}
+    if kind == "crm_engagement":
+        return {
+            "kind": kind,
+            "input_hash": entry.get("input_hash"),
+            "record_id": row.get("record_id"),
+            "record_type": row.get("record_type"),
+            "contact_name": row.get("contact_name"),
+            "company": row.get("company"),
+            "waiting_days": row.get("waiting_days"),
+        }
+    if kind == "crm_deal_watch":
+        return {
+            "kind": kind,
+            "input_hash": entry.get("input_hash"),
+            "record_id": row.get("record_id"),
+            "deal_kind": row.get("deal_kind"),
+            "deal_name": row.get("deal_name"),
+            "account_name": row.get("account_name"),
+            "amount": row.get("amount"),
+            "days_idle": row.get("days_idle"),
+        }
     if kind == "lead_followup":
         return {
             "kind": kind,
@@ -902,6 +1109,8 @@ async def _run_one(
             "negotiation": NEGOTIATION_SYSTEM,
             "collections": COLLECTIONS_SYSTEM,
             "lead_followup": LEAD_FOLLOWUP_SYSTEM,
+            "crm_engagement": CRM_ENGAGEMENT_SYSTEM,
+            "crm_deal_watch": CRM_DEAL_WATCH_SYSTEM,
         }[kind]
         messages = [
             {"role": "system", "content": system},
@@ -984,7 +1193,7 @@ async def _run_one(
                                 "approach", "quote_id", "quote_amount", "invoice_id",
                                 "balance", "reason", "blocker", "owner_team",
                                 "action_plan", "missing", "product", "tone",
-                                "escalation_note",
+                                "escalation_note", "situation", "stall_reason",
                             )
                             if hasattr(parsed, key)
                         }
@@ -1008,6 +1217,20 @@ async def _run_one(
                     result["company"] = lead_row.get("company")
                     result["status"] = lead_row.get("status")
                     result["days_since_activity"] = lead_row.get("days_since_activity")
+                if kind == "crm_engagement":
+                    # identity and the wait are Python's facts, never model text
+                    crm_row = entry.get("item") or {}
+                    result["record_id"] = str(crm_row.get("record_id") or "")
+                    result["contact_name"] = crm_row.get("contact_name")
+                    result["company"] = crm_row.get("company")
+                    result["waiting_days"] = crm_row.get("waiting_days")
+                if kind == "crm_deal_watch":
+                    deal_row = entry.get("item") or {}
+                    result["record_id"] = str(deal_row.get("record_id") or "")
+                    result["account_name"] = deal_row.get("account_name")
+                    result["deal_name"] = deal_row.get("deal_name")
+                    result["amount"] = deal_row.get("amount")
+                    result["days_idle"] = deal_row.get("days_idle")
                 async with usage_lock:
                     usage_total.update(add_usage(usage_total, usage))
                     usage_total["sub_call"] = usage_total.get("sub_call", 0) + 1
@@ -1121,6 +1344,12 @@ negotiation_node = _make_specialist_node("negotiation", "negotiation_input", "ne
 collections_node = _make_specialist_node("collections", "collections_input", "collections_out")
 lead_followup_node = _make_specialist_node(
     "lead_followup", "lead_followup_input", "lead_followup_out"
+)
+crm_engagement_node = _make_specialist_node(
+    "crm_engagement", "crm_engagement_input", "crm_engagement_out"
+)
+crm_deal_watch_node = _make_specialist_node(
+    "crm_deal_watch", "crm_deal_watch_input", "crm_deal_watch_out"
 )
 
 
@@ -1242,11 +1471,15 @@ async def save_node(state: RunState) -> RunState:
     negotiation = state["negotiation_out"]
     collections = state["collections_out"]
     lead_followup = state["lead_followup_out"]
-    all_outputs = negotiation + collections + lead_followup
+    crm_engagement = state.get("crm_engagement_out") or []
+    crm_deal_watch = state.get("crm_deal_watch_out") or []
+    all_outputs = negotiation + collections + lead_followup + crm_engagement + crm_deal_watch
     counts = {
         "negotiation_total": len(negotiation),
         "collections_total": len(collections),
         "lead_followup_total": len(lead_followup),
+        "crm_engagement_total": len(crm_engagement),
+        "crm_deal_watch_total": len(crm_deal_watch),
         "unclear": sum(1 for o in all_outputs if "unclear" in (o.get("flags") or [])),
         "needs_review": sum(
             1 for o in all_outputs if "needs_review" in (o.get("flags") or []) or "error" in (o.get("flags") or [])
@@ -1262,6 +1495,8 @@ async def save_node(state: RunState) -> RunState:
         "negotiation": negotiation,
         "collections": collections,
         "lead_followup": lead_followup,
+        "crm_engagement": crm_engagement,
+        "crm_deal_watch": crm_deal_watch,
         "master": state.get("master"),
         "usage": state.get("usage"),
         "errors": state.get("errors", []),
@@ -1281,6 +1516,8 @@ def build_graph() -> Any:
     graph.add_node("negotiation", negotiation_node)
     graph.add_node("collections", collections_node)
     graph.add_node("lead_followup", lead_followup_node)
+    graph.add_node("crm_engagement", crm_engagement_node)
+    graph.add_node("crm_deal_watch", crm_deal_watch_node)
     graph.add_node("group_by_customer", group_by_customer_node)
     graph.add_node("master", master_node)
     graph.add_node("save", save_node)
@@ -1294,6 +1531,15 @@ def build_graph() -> Any:
     graph.add_edge("negotiation", "group_by_customer")
     graph.add_edge("collections", "group_by_customer")
     graph.add_edge("lead_followup", "group_by_customer")
+    # the CRM branches are not ERP customers: the group node ignores
+    # their outputs (they are neither grouped nor briefed by the master),
+    # but they join at group_by_customer like every other branch - a
+    # direct edge into save made save fire on the CRM branches' earlier
+    # superstep, before the master existed (Oct 24 build break).
+    graph.add_edge("load_signals", "crm_engagement")
+    graph.add_edge("load_signals", "crm_deal_watch")
+    graph.add_edge("crm_engagement", "group_by_customer")
+    graph.add_edge("crm_deal_watch", "group_by_customer")
     graph.add_edge("group_by_customer", "master")
     graph.add_edge("master", "save")
     graph.add_edge("save", END)
@@ -1307,6 +1553,8 @@ def default_caller_factory(kind: str):
         "negotiation": NegotiationOutput,
         "collections": CollectionsOutput,
         "lead_followup": LeadFollowupOutput,
+        "crm_engagement": CrmEngagementOutput,
+        "crm_deal_watch": CrmDealWatchOutput,
     }[kind]
     return make_caller(build_model("master" if kind == "master" else "sub"), schema)
 
@@ -1383,6 +1631,8 @@ async def run_pipeline(
         "negotiation": final.get("negotiation_out", []),
         "collections": final.get("collections_out", []),
         "lead_followup": final.get("lead_followup_out", []),
+        "crm_engagement": final.get("crm_engagement_out", []),
+        "crm_deal_watch": final.get("crm_deal_watch_out", []),
         "usage": final.get("usage"),
         "errors": final.get("errors", []),
     }
