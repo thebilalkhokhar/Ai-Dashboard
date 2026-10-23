@@ -395,6 +395,50 @@ export interface LeadFollowupOutput {
   error?: string;
 }
 
+// Sub-agent 4 output (server/app/schemas/agents.py: CrmEngagementOutput).
+// One Zoho CRM record whose last interaction came from the customer.
+// Identity fields are filled by the pipeline, never by the model.
+export interface CrmEngagementOutput {
+  kind?: "crm_engagement";
+  input_hash?: string;
+  record_id?: string;
+  record_type?: string;
+  contact_name?: string | null;
+  company?: string | null;
+  waiting_days?: number;
+  situation?: string;
+  action_plan?: string;
+  message_draft?: string | null;
+  confidence?: AgentConfidence;
+  evidence?: string;
+  flags?: string[];
+  source?: "agent" | "cache";
+  rejected_reason?: string;
+  error?: string;
+}
+
+// Sub-agent 5 output (server/app/schemas/agents.py: CrmDealWatchOutput).
+// One stalled Zoho CRM project or estimate from the synced module rows.
+export interface CrmDealWatchOutput {
+  kind?: "crm_deal_watch";
+  input_hash?: string;
+  record_id?: string;
+  deal_kind?: string;
+  deal_name?: string | null;
+  account_name?: string | null;
+  amount?: number;
+  days_idle?: number;
+  stall_reason?: string;
+  action_plan?: string;
+  message_draft?: string | null;
+  confidence?: AgentConfidence;
+  evidence?: string;
+  flags?: string[];
+  source?: "agent" | "cache";
+  rejected_reason?: string;
+  error?: string;
+}
+
 export interface AgentPriority {
   customer_name: string;
   why: string;
@@ -417,6 +461,9 @@ export interface AgentRunCounts {
   collections_total: number;
   // optional: briefings saved before the lead follow-up agent existed
   lead_followup_total?: number;
+  // optional: briefings saved before the CRM agents existed
+  crm_engagement_total?: number;
+  crm_deal_watch_total?: number;
   unclear: number;
   needs_review: number;
   cached: number;
@@ -443,6 +490,9 @@ export interface AgentRunBriefing {
   collections: CollectionsOutput[];
   // optional: briefings saved before the lead follow-up agent existed
   lead_followup?: LeadFollowupOutput[];
+  // optional: briefings saved before the CRM agents existed
+  crm_engagement?: CrmEngagementOutput[];
+  crm_deal_watch?: CrmDealWatchOutput[];
   master: MasterBriefing | null;
   usage: AgentUsage | null;
   errors: string[];
