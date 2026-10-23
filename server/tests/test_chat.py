@@ -414,6 +414,43 @@ def test_numeric_guard_treats_customer_360_as_a_name_not_a_number():
     assert validate_numeric_claims("Customer 360 holds 360 leads.", results)
 
 
+def test_numeric_guard_accepts_the_same_instant_written_with_a_space():
+    """Oct 24 live failures (01:26:52 and 01:28:42): the tools return ISO
+    timestamps ('2026-10-21T15:12:31.000Z', '2026-08-03T23:47:17-05:00') and
+    the model rendered the same instants with a space before the time; both
+    correct drafts were discarded as 'unsupported date'. The separator is
+    typography, not a different fact - but a different date or a different
+    second is still an invention and still fails."""
+    from app.agents.chat import validate_numeric_claims
+
+    crm = [{"tool": "get_customer360", "result": {
+        "last_interaction": "2026-10-21T15:12:31.000Z"}}]
+    assert validate_numeric_claims("Last interaction: 2026-10-21 15:12:31.", crm) == []
+    assert validate_numeric_claims("Last interaction: 2026-10-21T15:12:31.", crm) == []
+    assert validate_numeric_claims("Last interaction: 2026-10-21.", crm) == []
+    assert validate_numeric_claims("Last interaction: 2026-10-21 15:12:32.", crm)
+    assert validate_numeric_claims("Last interaction: 2026-10-22 15:12:31.", crm)
+    erp = [{"tool": "get_customer_profile", "result": {"quotes": [
+        {"created_at": "2026-08-03T23:47:17-05:00"}]}}]
+    assert validate_numeric_claims("Created at: 2026-08-03 23:47:17-05:00.", erp) == []
+    assert validate_numeric_claims("Created at: 2026-08-03 23:47:18-05:00.", erp)
+
+
+def test_numeric_guard_360_name_in_looser_phrasings():
+    """The second Frank Jr retry (Oct 24, 01:28:58) still died on the product
+    name in a phrasing the first mask did not enumerate. Inside a sentence
+    about the CRM system, a bare 360 that quantifies nothing is the name;
+    followed by a count noun it is a claim and stays checked."""
+    from app.agents.chat import validate_numeric_claims
+
+    assert validate_numeric_claims("See the 360-view for his projects.", []) == []
+    assert validate_numeric_claims(
+        "He lives in the Zoho CRM; the full 360 is not pulled yet.", []) == []
+    assert validate_numeric_claims(
+        "Customer 360 holds 360 leads.", [])
+    assert validate_numeric_claims("The CRM shows 360 records.", [])
+
+
 def test_numeric_guard_accepts_prior_numbers_and_rejects_new_numbers():
     from app.agents.chat import validate_numeric_claims
 
