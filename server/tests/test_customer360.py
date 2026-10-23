@@ -19,6 +19,7 @@ from app.agents import chat_tools
 from app.agents.chat_tools import (
     CHAT_TOOLS,
     CHAT_TOOL_MAP,
+    get_crm_payments,
     get_customer360,
     search_customer360,
 )
@@ -300,6 +301,40 @@ class StubClient:
             raise self.error
         return self.payload
 
+    async def list_page(self, module, page=1, limit=100, search=""):
+        if self.error:
+            raise self.error
+        assert module == "payments"
+        pages = {
+            1: [
+                {"paymentName": "30677", "erpId": "9958", "customerName": "MNJ Enterprise LLC",
+                 "projectName": "Blister Project", "amountReceived": 4627, "totalAmount": 8775,
+                 "invoiceStatus": "Approved", "ownerName": "Eric Dean",
+                 "amountReceiveDate": "2026-10-23T00:00:00.000Z",
+                 "createdAt": "2026-10-23T18:03:44.519Z"},
+                {"paymentName": "30426", "erpId": "9957", "customerName": "MNJ Enterprise LLC",
+                 "projectName": "5ct Blister", "amountReceived": 373, "totalAmount": 373,
+                 "invoiceStatus": "Approved", "ownerName": "Eric Dean",
+                 "amountReceiveDate": "2026-10-23T00:00:00.000Z",
+                 "createdAt": "2026-10-23T18:04:00.000Z"},
+                {"paymentName": "30001", "erpId": "9901", "customerName": "Older Co",
+                 "projectName": "Old", "amountReceived": 100, "totalAmount": 100,
+                 "invoiceStatus": "Approved", "ownerName": "Eric Dean",
+                 "amountReceiveDate": "2026-10-20T00:00:00.000Z",
+                 "createdAt": "2026-10-20T10:00:00.000Z"},
+            ],
+            2: [
+                {"paymentName": "29999", "erpId": "9800", "customerName": "Ancient Co",
+                 "projectName": "Older", "amountReceived": 50, "totalAmount": 50,
+                 "invoiceStatus": "Approved", "ownerName": "Eric Dean",
+                 "amountReceiveDate": "2026-10-10T00:00:00.000Z",
+                 "createdAt": "2026-10-10T10:00:00.000Z"},
+            ],
+        }
+        rows = pages.get(page, [])
+        return {"success": True, "payments": rows,
+                "pagination": {"total": 7847, "page": page, "limit": limit, "pages": 79}}
+
 
 @pytest.fixture
 def stub(monkeypatch):
@@ -409,3 +444,65 @@ def test_tools_are_registered():
     assert "search_customer360" in CHAT_TOOL_MAP
     assert "get_customer360" in CHAT_TOOL_MAP
     assert len(CHAT_TOOLS) == len(CHAT_TOOL_MAP)
+
+
+# ------------------------------------------------------------- CRM payments
+
+@pytest.mark.asyncio
+async def test_collect_crm_payments_filters_by_receive_date_and_totals():
+    """The Oct 24 live failure, as a fixture: two MNJ receipts on
+    2026-10-23 (the $4,627 one is the row the user screenshotted from the
+    CRM) must be found, totalled in Python, and the scan must stop once a
+    whole page is older than the range instead of paging all 7,847."""
+    client = StubClient()
+    result = await c360_service.collect_crm_payments(
+        client, date_from="2026-10-23", date_to="2026-10-23"
+    )
+    assert result["available"] is True
+    assert result["total_count"] == 2
+    assert result["sum_amount_received"] == 5000
+    assert result["sum_total_amount"] == 9148
+    assert result["results"][0]["erp_id"] == "9958"
+    assert result["results"][0]["receive_date"] == "2026-10-23"
+    assert result["coverage"]["rows_scanned"] == 4
+    assert result["coverage"]["pages_read"] == 2
+    assert result["coverage"]["complete_for_range"] is True
+    assert result["coverage"]["module_total"] == 7847
+
+
+@pytest.mark.asyncio
+async def test_collect_crm_payments_no_total_when_a_row_lacks_the_field():
+    class GapClient(StubClient):
+        async def list_page(self, module, page=1, limit=100, search=""):
+            body = await super().list_page(module, page, limit, search)
+            if page == 1:
+                body["payments"][0].pop("amountReceived")
+            return body
+
+    result = await c360_service.collect_crm_payments(
+        GapClient(), date_from="2026-10-23", date_to="2026-10-23"
+    )
+    assert result["total_count"] == 2
+    assert result["sum_amount_received"] is None
+    assert result["sum_total_amount"] == 9148
+
+
+@pytest.mark.asyncio
+async def test_get_crm_payments_tool_and_its_failure_shape(stub):
+    from datetime import date
+
+    result = await get_crm_payments(date(2026, 10, 23), date(2026, 10, 23))
+    assert result["available"] is True
+    assert result["ledger"] == "zoho_crm_payments"
+    assert result["total_count"] == 2
+
+    failing = StubClient(error=Customer360Error("network error: ReadTimeout"))
+    import app.agents.chat_tools as tools_module
+    original = tools_module._c360_client
+    tools_module._c360_client = lambda: failing
+    try:
+        result = await get_crm_payments(date(2026, 10, 23), date(2026, 10, 23))
+    finally:
+        tools_module._c360_client = original
+    assert result["available"] is False
+    assert result["results"] == []
