@@ -4,8 +4,11 @@ Rules this client follows:
   * Read endpoints only. The write endpoints (POST /api/exhibition-quotes,
     POST /api/live-chat/incoming) are never called from anywhere in this app.
   * The refresh token comes from settings (server/.env) and is never logged.
-  * The access token is cached in memory, refreshed ~2 minutes before it
-    expires, and once more after any 401 (retry that request a single time).
+  * The access token is shared by every client through Redis (one token
+    serves the refresh cycle, the agent runs and the API alike), refreshed
+    ~2 minutes before it expires, and once more after any 401 (retry that
+    request a single time). The ERP counts token requests, so minting a
+    fresh token per client was real, needless load on their server.
   * 5xx answers and network/timeout errors are retried with backoff.
   * A small delay sits between calls so we never hammer the ERP.
 
@@ -16,6 +19,7 @@ which is a naive string like "2026-10-19 16:59:52".
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -24,6 +28,7 @@ from typing import Any, Optional
 import httpx
 
 from app.config import settings
+from app.services.redis_client import get_redis
 
 log = logging.getLogger("erp_client")
 
@@ -90,6 +95,52 @@ class ERPClient:
 
     # ---------------------------------------------------------------- token
 
+    _SHARED_TOKEN_KEY = "erp:access_token"
+
+    async def _read_shared_token(self) -> bool:
+        """Adopt the token another client already minted, if still fresh.
+
+        The shared copy lives in Redis so every ERPClient in the process
+        (refresh cycle, agent run, API request) reuses ONE token instead
+        of each minting its own. Redis being down just means minting -
+        the token endpoint stays the fallback, never a hard dependency.
+        """
+        try:
+            raw = await get_redis().get(self._SHARED_TOKEN_KEY)
+            if not raw:
+                return False
+            data = json.loads(raw)
+            expires = datetime.fromisoformat(str(data["expires_at"]))
+            if expires.tzinfo is None:
+                return False
+            if datetime.now(timezone.utc) < expires - timedelta(minutes=2):
+                self._access_token = str(data["token"])
+                self._expires_at = expires
+                return True
+        except Exception:
+            return False
+        return False
+
+    async def _write_shared_token(self) -> None:
+        """Publish the just-minted token for every other client to reuse."""
+        if not self._access_token or not self._expires_at:
+            return
+        try:
+            ttl = int((self._expires_at - datetime.now(timezone.utc)).total_seconds())
+            if ttl > 60:
+                await get_redis().set(
+                    self._SHARED_TOKEN_KEY,
+                    json.dumps(
+                        {
+                            "token": self._access_token,
+                            "expires_at": self._expires_at.isoformat(),
+                        }
+                    ),
+                    ex=ttl,
+                )
+        except Exception:
+            pass
+
     async def get_access_token(self, force: bool = False) -> str:
         """Trade the refresh token for a short-lived access token (cached)."""
         self._require_refresh_token()
@@ -100,6 +151,9 @@ class ERPClient:
             and self._expires_at
             and now < self._expires_at - timedelta(minutes=2)
         ):
+            return self._access_token
+
+        if not force and await self._read_shared_token():
             return self._access_token
 
         await self._throttle()
@@ -127,6 +181,7 @@ class ERPClient:
             expires = expires.replace(tzinfo=ERP_TZ)  # the ERP answer is US Central
         self._expires_at = expires.astimezone(timezone.utc)
         log.info("ERP access token refreshed, expires %s (US Central %s)", self._expires_at.isoformat(), body["expires_at"])
+        await self._write_shared_token()
         return self._access_token
 
     # -------------------------------------------------------------- requests
