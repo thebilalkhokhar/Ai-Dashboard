@@ -25,7 +25,7 @@ const cardFrame: ChatToolResultEvent = {
     email: "frank@example.com",
     phone: "2143923587",
     record_type: "Contact",
-    counts: { projects: 2, estimates: 1, timeline: 56 },
+    counts: { projects: 2, estimates: 1, timeline: 56, whatsapp: 54 },
     totals: { estimates_total_amount: 1400 },
     last_interaction: {
       type: "WhatsApp",
@@ -45,6 +45,7 @@ describe("AnswerProvenance customer card", () => {
     expect(card).toHaveTextContent("frank@example.com · 2143923587");
     expect(card).toHaveTextContent("Projects 2");
     expect(card).toHaveTextContent("Interactions 56");
+    expect(card).toHaveTextContent("WhatsApp 54");
     expect(card).toHaveTextContent("Estimates $1,400");
     expect(card).toHaveTextContent("customer wrote last");
     expect(card).toHaveTextContent("“Too expensive”");
@@ -53,6 +54,28 @@ describe("AnswerProvenance customer card", () => {
   it("renders no card when no frame carries one", () => {
     render(<AnswerProvenance evidence={evidence} frames={[{ tool: "get_payments" }]} />);
     expect(screen.queryByTestId("chat-360-card")).toBeNull();
+  });
+
+  it("renders the CRM AI analysis card from its frame", () => {
+    const analysisFrame: ChatToolResultEvent = {
+      tool: "get_customer360_analysis",
+      analysis_card: {
+        ai_status: "Verified",
+        follow_up_required: true,
+        urgency: "High",
+        reasoning: "The customer asked for a price and heard nothing for two weeks.",
+        action_needed: "Send the quote today.",
+        has_email_draft: true,
+      },
+    };
+    render(<AnswerProvenance evidence={evidence} frames={[analysisFrame]} />);
+    const card = screen.getByTestId("chat-analysis-card");
+    expect(card).toHaveTextContent("CRM AI analysis");
+    expect(card).toHaveTextContent("High urgency");
+    expect(card).toHaveTextContent("Verified AI");
+    expect(card).toHaveTextContent("Follow-up required");
+    expect(card).toHaveTextContent("Send the quote today.");
+    expect(card).toHaveTextContent("Email draft included in the answer.");
   });
 
   it("labels the CRM payments total as the CRM ledger's own", () => {
