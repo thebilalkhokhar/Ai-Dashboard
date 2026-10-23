@@ -371,7 +371,11 @@ def _verbatim_strings(node: Any, out: list[str]) -> None:
         text = normalize_digits(node)
         text = _DATE_STRING_RE.sub(" ", text)
         text = _REFERENCE_TOKEN_RE.sub(" ", text)
-        out.append(re.sub(r"[\s,]+", "", text).lower())
+        # commas go (they only group digits), but spaces STAY: gluing the
+        # words together ("need 25k boxes" -> "need25kboxes") puts a letter
+        # against the token's left boundary and the quote stops matching -
+        # the first version's hole, proven live on 2026-10-23.
+        out.append(text.replace(",", "").lower())
 
 
 def _quoted_verbatim(token: str, verbatim: list[str]) -> bool:
