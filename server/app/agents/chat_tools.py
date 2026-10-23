@@ -897,6 +897,10 @@ class Customer360DetailArgs(ToolArgs):
     record_type: str = Field(pattern="^(Lead|Contact|Customer)$")
 
 
+class Customer360PaymentsArgs(DateRangeArgs):
+    customer: str = Field(default="", max_length=120)
+
+
 class RecordArgs(ToolArgs):
     collection: str = Field(pattern="^(payments|invoices|orders|quotes|leads)$")
     id: str = Field(min_length=1, max_length=40)
@@ -1741,6 +1745,43 @@ async def get_customer360(record_id: str, record_type: str, database: Any = None
     summary = c360_service.summarize_detail(live)
     summary.update({"available": True, "from_cache": False})
     return summary
+
+
+async def get_crm_payments(
+    date_from: Any = None,
+    date_to: Any = None,
+    customer: str = "",
+    database: Any = None,
+) -> dict:
+    """Payments recorded in the Zoho CRM for a date range.
+
+    A separate ledger from the ERP payments tool - the CRM mirrors ERP
+    payments (rows carry the ERP id) and also holds payments the ERP list
+    never shows. Oct 24 live failure: 'how many payments came today' was
+    answered 0 from the ERP alone while the CRM held four receipts that
+    day. The two ledgers are reported side by side, never merged.
+    """
+    args = Customer360PaymentsArgs.model_validate(
+        {"date_from": date_from, "date_to": date_to, "customer": customer}
+    )
+    try:
+        return await c360_service.collect_crm_payments(
+            _c360_client(),
+            date_from=args.date_from.isoformat(),
+            date_to=args.date_to.isoformat(),
+            search=(args.customer or "").strip(),
+        )
+    except Customer360Error as exc:
+        return {
+            "source": "customer360",
+            "ledger": "zoho_crm_payments",
+            "available": False,
+            "date_from": args.date_from.isoformat(),
+            "date_to": args.date_to.isoformat(),
+            "total_count": 0,
+            "results": [],
+            "note": f"The Zoho CRM payments ledger could not be reached: {exc}",
+        }
 
 
 async def get_record(collection: str, id: str, database: Any = None) -> dict:
@@ -2695,6 +2736,12 @@ CHAT_TOOLS = [
         "Full Customer 360 view for one CRM record (record_id + record_type from search_customer360): identity and status, related leads/contacts/customers, the interaction timeline (calls, emails, SMS, notes: counts by type, the last interaction, the five most recent), projects/deals, estimates, invoices and payments - with backend-computed totals where the records carry a consistent money field. This is Zoho CRM data, separate from the ERP quotes/orders/payments tools. Present the answer as a compact contact card: name, email, phone, company and status first, then the counts and the last interaction - do not dump raw field names, and do not print the record_id hex unless the user asks for it.",
         Customer360DetailArgs,
         get_customer360,
+    ),
+    ChatTool(
+        "get_crm_payments",
+        "Payments recorded in the Zoho CRM (Customer 360) for a date range, optionally filtered by a customer/name search. This is a SEPARATE ledger from the ERP payments tool: the CRM mirrors ERP payments (each row carries its erp_id) and also holds CRM-only payments, so for any question about payments received - today, this week, from a customer - call BOTH this and get_payments and report each ledger under its own label with its own total; NEVER add the two totals together and never report 'no payments' from one ledger alone. Receive dates are calendar dates with no clock time recorded; record_created_at is the CRM record's creation/sync time, not the payment time.",
+        Customer360PaymentsArgs,
+        get_crm_payments,
     ),
     ChatTool(
         "get_record",

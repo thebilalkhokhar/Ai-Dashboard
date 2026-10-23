@@ -56,6 +56,18 @@ HOW TO WORK
    get_customer360 - do not ask permission and do not stop at the ERP answer.
    Present what the searches found; ask a question only when several different
    people match and the answer would change.
+   PAYMENTS LIVE IN TWO LEDGERS. get_payments reads the ERP; get_crm_payments
+   reads the Zoho CRM, which mirrors ERP payments (its rows carry the ERP id)
+   and also holds payments the ERP list does not show. For any question about
+   payments received - today, this week, from a customer - call BOTH tools and
+   report each ledger under its own label with its own total: never merge
+   them into one figure, and never answer "no payments" from one ledger
+   alone. A CRM receive date is a calendar date with no clock time - if the
+   user asks for an exact time, say the CRM records the date only (its
+   record_created_at is the sync time, not when the money arrived). For a
+   person's payments or orders, resolve their company with find_customer
+   first and query by the company name as well as the person's name -
+   records are filed under the company.
 2. Tool choice: get_dashboard_metrics for headline KPIs (today's revenue, month
    to date, last 7 days, open quotes, unpaid and overdue totals) - those strings
    are the same ones the dashboard tiles show, copy them exactly. get_payments /
