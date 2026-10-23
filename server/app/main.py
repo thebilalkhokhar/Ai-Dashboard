@@ -38,6 +38,9 @@ def cors_origins() -> list[str]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Open Mongo, prepare indexes, clear stale runs, run the scheduler, close."""
+    from app.logging_setup import setup_logging  # local: keeps imports light
+
+    setup_logging()  # daily files under server/logs/, terminal unchanged
     db.get_client()
     warn_if_auth_disabled()
     try:

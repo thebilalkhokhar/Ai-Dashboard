@@ -91,7 +91,7 @@ class Settings(BaseSettings):
 
     # --- Dashboard scheduler (in-process asyncio tasks) ---
     REFRESH_LOOKBACK_DAYS: int = 2      # only this many days get re-pulled from the ERP
-    REFRESH_MINUTES: int = 10           # dashboard refresh interval
+    REFRESH_MINUTES: int = 5            # dashboard refresh interval (ERP changes land within one cycle)
     AGENT_FULL_RUN_HOUR: int = Field(default=6, ge=0, le=23)  # daily safety net (local time)
     SCHEDULER_ENABLED: bool = True      # tests / dev set this to false
     LIVE_MAX_CLIENTS: int = 20          # concurrent SSE subscribers
