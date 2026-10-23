@@ -36,6 +36,10 @@ MODULES = ("leads", "contacts", "customers", "payments", "invoices", "projects",
 PEOPLE_TYPES = {"leads": "Lead", "contacts": "Contact", "customers": "Customer"}
 PAGE_SIZE = 100
 RUNS_COLLECTION = "customer360_sync_runs"
+# Redis lock shared by the manual script and the scheduler's automatic
+# launcher, so two syncs never run at once (upserts are idempotent, so
+# an overlap would waste API calls, not corrupt data - still avoided).
+SYNC_LOCK_KEY = "c360:sync_lock"
 
 
 def _collection(database: Any, name: str) -> Any:
@@ -166,6 +170,7 @@ async def sync_all(
     modules: tuple[str, ...] = MODULES,
     *,
     max_pages: Optional[int] = None,
+    mode: str = "manual",
 ) -> dict:
     """Sync every module and store the run summary."""
     started_at = _now_iso()
@@ -177,6 +182,7 @@ async def sync_all(
     summary = {
         "started_at": started_at,
         "finished_at": _now_iso(),
+        "mode": mode,
         "modules": per_module,
         "complete": all(item["complete"] for item in per_module.values()),
         "note": (

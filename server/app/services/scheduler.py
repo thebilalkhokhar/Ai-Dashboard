@@ -8,6 +8,11 @@ no extra service. Every REFRESH_MINUTES it does one cycle:
     3. decide whether the agents run      (hash comparison against the last run)
     4. daily safety net at AGENT_FULL_RUN_HOUR, with the cache bypassed
 
+A second, slower loop keeps the Customer 360 mirror fresh: every 15
+minutes it checks the last sync run, and when that is older than
+C360_SYNC_HOURS (or never happened) it launches run_c360_sync.py as a
+subprocess - never inside the refresh cycle, whose lock it must not hold.
+
 Agent runs are event-triggered. After every refresh the current stale-quote,
 unpaid-invoice and stuck-lead items are built with graph.load_signals_node
 (the graph's own code, so the hashes are identical to what the pipeline would
@@ -30,10 +35,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 import time
 import uuid
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from app import db as app_db
@@ -51,6 +58,26 @@ UPDATES_CHANNEL = "dashboard:updates"
 LOCK_KEY = "dashboard:scheduler:lock"
 # one worker is the leader and runs the schedule; the others stand by
 LEADER_KEY = "dashboard:scheduler:leader"
+
+
+def _c360_sync_due(last_run: Any, now: datetime, hours: float) -> bool:
+    """True when the Customer 360 mirror needs a sync: it never ran, the
+    last run's stamp is unreadable, or it started at least `hours` ago.
+    Run docs store ISO strings; a crashed run ages out the same way, so
+    a dead sync never blocks freshness forever."""
+    if not isinstance(last_run, dict):
+        return True
+    started = last_run.get("started_at")
+    if isinstance(started, str):
+        try:
+            started = datetime.fromisoformat(started.replace("Z", "+00:00"))
+        except ValueError:
+            return True
+    if not isinstance(started, datetime):
+        return True
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return (now - started) >= timedelta(hours=hours)
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +113,7 @@ class DashboardScheduler:
         self._pipeline_func = pipeline_func or _default_pipeline
         self._interval = interval_seconds
         self._task: Optional[asyncio.Task] = None
+        self._c360_task: Optional[asyncio.Task] = None
         self._stop: Optional[asyncio.Event] = None
         self._last_daily_day: Optional[str] = None  # e.g. "2026-10-20"
         # this process' identity in the leader election
@@ -177,6 +205,7 @@ class DashboardScheduler:
             return
         self._stop = asyncio.Event()
         self._task = asyncio.create_task(self._loop(), name="dashboard-scheduler")
+        self._c360_task = asyncio.create_task(self._c360_loop(), name="c360-auto-sync")
 
     async def stop(self) -> None:
         if self._stop is not None:
@@ -186,7 +215,72 @@ class DashboardScheduler:
             with suppress(asyncio.CancelledError):
                 await self._task
             self._task = None
+        if self._c360_task is not None:
+            self._c360_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._c360_task
+            self._c360_task = None
         await self.step_down()
+
+    # ---------------------------------------------- job: c360 auto-sync
+
+    async def _job_c360_sync(self, now: Optional[datetime] = None) -> dict:
+        """Launch the Customer 360 mirror sync when it is due. Never
+        raises. The sync runs as a subprocess (the same runner as the
+        manual script) so its ~750 blocking API calls can never stall
+        this process's event loop, and the runner's own Redis lock
+        keeps it from overlapping a manual run."""
+        now = now or datetime.now(timezone.utc)
+        if not settings.C360_SYNC_ENABLED:
+            return {"ok": True, "skipped": "disabled"}
+        if not settings.C360_EMAIL or not settings.C360_PASSWORD:
+            return {"ok": True, "skipped": "unconfigured"}
+        try:
+            last = await self._db().customer360_sync_runs.find_one(
+                sort=[("started_at", -1)]
+            )
+        except Exception:
+            log.exception("could not read the last c360 sync run")
+            return {"ok": False, "error": "run-log-unreadable"}
+        if not _c360_sync_due(last, now, float(settings.C360_SYNC_HOURS)):
+            return {"ok": True, "skipped": "not-due"}
+        try:
+            runner = Path(__file__).resolve().parents[2] / "run_c360_sync.py"
+            log.info("c360 auto-sync: mirror is stale, launching the sync runner")
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, str(runner), "--auto", cwd=str(runner.parent)
+            )
+            code = await proc.wait()
+            log.info("c360 auto-sync: runner exited with code %s", code)
+            return {"ok": code == 0, "exit_code": code}
+        except Exception as exc:
+            log.exception("c360 auto-sync failed to launch")
+            return {"ok": False, "error": type(exc).__name__}
+
+    async def _c360_loop(self) -> None:
+        """Check every 15 minutes whether the mirror sync is due.
+
+        Separate from the refresh cycle on purpose: a sync takes tens
+        of minutes and must never hold the cycle's lock or delay a
+        refresh. The first check waits two minutes so a restart never
+        competes with startup work; only the leader launches."""
+        nap = 120.0
+        while self._stop is not None and not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=nap)
+                return
+            except asyncio.TimeoutError:
+                pass
+            except asyncio.CancelledError:
+                raise
+            nap = 900.0
+            try:
+                if await self.claim_leadership():
+                    await self._job_c360_sync()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # a bad check must never kill the loop
+                log.exception("c360 auto-sync check failed")
 
     async def _loop(self) -> None:
         loop = asyncio.get_running_loop()
