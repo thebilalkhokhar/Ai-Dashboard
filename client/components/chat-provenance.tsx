@@ -12,7 +12,7 @@ import { useState } from "react";
 import { Check, ShieldCheck, X } from "lucide-react";
 import type { AnswerEvidence } from "@/lib/presentation";
 import { formatMoney } from "@/lib/format";
-import type { ChatToolResultEvent } from "@/types/api";
+import type { ChatToolResultEvent, CrmCustomerCard } from "@/types/api";
 
 function milliseconds(value: number | null): string {
   if (value === null) return "still running";
@@ -27,7 +27,77 @@ const MONEY_LABELS: Record<string, string> = {
   revenue_total: "Total revenue",
   total_payments: "Total received",
   total_amount: "Total",
+  // the CRM ledger keeps its own label - the two are never merged
+  sum_amount_received: "Total received · Zoho CRM",
 };
+
+const CARD_COUNT_LABELS: Record<string, string> = {
+  projects: "Projects",
+  estimates: "Estimates",
+  invoices: "Invoices",
+  payments: "Payments",
+  timeline: "Interactions",
+};
+
+const CARD_TOTAL_LABELS: Record<string, string> = {
+  estimates_total_amount: "Estimates",
+  projects_total_amount: "Projects",
+  invoices_total_amount: "Invoices",
+  payments_total_amount: "Payments",
+};
+
+// The Customer 360 card: the CRM record an answer is about, projected by
+// the backend from its own tool summary. Rendered only when a frame
+// carries one - no frame, no card.
+function CustomerCard({ card }: { card: CrmCustomerCard }) {
+  const counts = Object.entries(card.counts ?? {});
+  const totals = Object.entries(card.totals ?? {});
+  const last = card.last_interaction;
+  const lastDate = last?.at ? new Date(last.at) : null;
+  const lastWhen =
+    lastDate && !Number.isNaN(lastDate.getTime())
+      ? lastDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+      : null;
+  return (
+    <section className="chat-360-card" data-testid="chat-360-card" aria-label="Customer 360 summary">
+      <div className="chat-360-head">
+        <p className="chat-360-name">{card.name ?? "CRM record"}</p>
+        <div className="chat-360-badges">
+          {card.record_type && <span className="chat-360-badge">{card.record_type}</span>}
+          {card.status && <span className="chat-360-badge">{card.status}</span>}
+          <span className="chat-360-badge">Zoho CRM</span>
+        </div>
+      </div>
+      {card.company && <p className="chat-360-company">{card.company}</p>}
+      {(card.email || card.phone) && (
+        <p className="chat-360-contact">{[card.email, card.phone].filter(Boolean).join(" · ")}</p>
+      )}
+      {counts.length > 0 && (
+        <p className="chat-360-counts">
+          {counts.map(([key, value]) => `${CARD_COUNT_LABELS[key] ?? key} ${value}`).join(" · ")}
+        </p>
+      )}
+      {totals.length > 0 && (
+        <p className="chat-360-totals">
+          {totals
+            .map(([key, value]) => `${CARD_TOTAL_LABELS[key] ?? key} ${formatMoney(value)}`)
+            .join(" · ")}
+        </p>
+      )}
+      {last && (
+        <p className="chat-360-last">
+          Last interaction: {last.type ?? "activity"}
+          {lastWhen ? ` · ${lastWhen}` : ""}
+          {last.direction === "Inbound"
+            ? " · customer wrote last"
+            : last.direction === "Outbound"
+              ? " · team wrote last"
+              : ""}
+        </p>
+      )}
+    </section>
+  );
+}
 
 // The one thing a reader of a money answer asks next: does that total cover
 // every match, or only the page on screen? Both halves come from the backend.
@@ -100,9 +170,12 @@ export function AnswerProvenance({
         frame.window !== undefined ||
         frame.complete === false,
     );
+  // The Customer 360 card rides its own frame; the latest one wins.
+  const cardFrame = [...frames].reverse().find((frame) => frame.customer_card);
 
   return (
     <div className="chat-proof" data-testid="chat-provenance">
+      {cardFrame?.customer_card && <CustomerCard card={cardFrame.customer_card} />}
       {summary && (
         <dl className="chat-proof-facts" data-testid="chat-proof-facts">
           {(() => {
