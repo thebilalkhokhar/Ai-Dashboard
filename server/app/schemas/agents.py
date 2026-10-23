@@ -88,14 +88,19 @@ class CrmEngagementOutput(BaseModel):
     came FROM the customer and has waited unanswered (direction computed
     by Python from the CRM timeline, never by the model).
 
-    `record_id`, `contact_name`, `company` and `waiting_days` are filled
-    in by the pipeline from the input - a CRM record is not an ERP
-    customer, so there is no customer_id."""
+    `record_id`, `contact_name`, `company`, `waiting_days`, `channel`
+    and `last_customer_message` are filled in by the pipeline from the
+    input - a CRM record is not an ERP customer, so there is no
+    customer_id."""
 
     record_id: str = ""
     contact_name: Optional[str] = None
     company: Optional[str] = None
     waiting_days: int = 0
+    # the channel the customer is waiting on (WhatsApp, SMS, Email...)
+    channel: Optional[str] = None
+    # the customer's actual last words, excerpted by Python
+    last_customer_message: Optional[str] = None
     situation: str = Field(description="What the customer is waiting on, input facts only")
     action_plan: str = Field(description="What a human rep should do next")
     message_draft: str = Field(max_length=600, description="max 80 words, for a human rep to send")
