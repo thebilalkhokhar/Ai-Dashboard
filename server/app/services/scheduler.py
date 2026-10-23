@@ -8,10 +8,12 @@ no extra service. Every REFRESH_MINUTES it does one cycle:
     3. decide whether the agents run      (hash comparison against the last run)
     4. daily safety net at AGENT_FULL_RUN_HOUR, with the cache bypassed
 
-A second, slower loop keeps the Customer 360 mirror fresh: every 15
-minutes it checks the last sync run, and when that is older than
-C360_SYNC_HOURS (or never happened) it launches run_c360_sync.py as a
-subprocess - never inside the refresh cycle, whose lock it must not hold.
+A second, slower loop keeps the Customer 360 mirror fresh: it checks
+the last sync runs every five minutes and launches run_c360_sync.py as
+a subprocess - a full sync when the last one is older than
+C360_SYNC_HOURS, the cheap first-pages pass every
+C360_RECENT_SYNC_MINUTES in between - never inside the refresh cycle,
+whose lock it must not hold.
 
 Agent runs are event-triggered. After every refresh the current stale-quote,
 unpaid-invoice and stuck-lead items are built with graph.load_signals_node
@@ -60,24 +62,47 @@ LOCK_KEY = "dashboard:scheduler:lock"
 LEADER_KEY = "dashboard:scheduler:leader"
 
 
-def _c360_sync_due(last_run: Any, now: datetime, hours: float) -> bool:
-    """True when the Customer 360 mirror needs a sync: it never ran, the
-    last run's stamp is unreadable, or it started at least `hours` ago.
-    Run docs store ISO strings; a crashed run ages out the same way, so
-    a dead sync never blocks freshness forever."""
-    if not isinstance(last_run, dict):
-        return True
-    started = last_run.get("started_at")
+def _c360_started_at(run: Any) -> Optional[datetime]:
+    """A sync run's start stamp (run docs store ISO strings), or None
+    when the run or its stamp is unreadable."""
+    if not isinstance(run, dict):
+        return None
+    started = run.get("started_at")
     if isinstance(started, str):
         try:
             started = datetime.fromisoformat(started.replace("Z", "+00:00"))
         except ValueError:
-            return True
+            return None
     if not isinstance(started, datetime):
-        return True
+        return None
     if started.tzinfo is None:
         started = started.replace(tzinfo=timezone.utc)
+    return started
+
+
+def _c360_sync_due(last_run: Any, now: datetime, hours: float) -> bool:
+    """True when the Customer 360 mirror needs a FULL sync: it never
+    ran, the last run's stamp is unreadable, or it started at least
+    `hours` ago. A crashed run ages out the same way, so a dead sync
+    never blocks freshness forever."""
+    started = _c360_started_at(last_run)
+    if started is None:
+        return True
     return (now - started) >= timedelta(hours=hours)
+
+
+def _c360_recent_due(last_recent: Any, last_full: Any, now: datetime, minutes: int) -> bool:
+    """True when the cheap recent pass should run. Either kind of run
+    freshens the mirror, so the clock is whichever ran last; a full
+    sync an hour ago means no recent pass is owed yet."""
+    stamps = [
+        stamp
+        for stamp in (_c360_started_at(last_recent), _c360_started_at(last_full))
+        if stamp is not None
+    ]
+    if not stamps:
+        return True
+    return (now - max(stamps)) >= timedelta(minutes=minutes)
 
 
 # ---------------------------------------------------------------------------
@@ -224,44 +249,61 @@ class DashboardScheduler:
 
     # ---------------------------------------------- job: c360 auto-sync
 
+    async def _launch_c360_runner(self, args: list[str], label: str) -> dict:
+        """Run the sync runner as a subprocess and report its exit.
+
+        A subprocess (not a coroutine here) because the sync's hundreds
+        of blocking API calls must never stall this process's event
+        loop; the runner's own Redis lock keeps it from overlapping a
+        manual run, and a skipped launch still exits 0."""
+        try:
+            runner = Path(__file__).resolve().parents[2] / "run_c360_sync.py"
+            log.info("c360 auto-sync: launching the %s sync", label)
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, str(runner), *args, cwd=str(runner.parent)
+            )
+            code = await proc.wait()
+            log.info("c360 auto-sync: %s runner exited with code %s", label, code)
+            return {"ok": code == 0, "exit_code": code, "scope": label}
+        except Exception as exc:
+            log.exception("c360 auto-sync failed to launch")
+            return {"ok": False, "error": type(exc).__name__}
+
     async def _job_c360_sync(self, now: Optional[datetime] = None) -> dict:
-        """Launch the Customer 360 mirror sync when it is due. Never
-        raises. The sync runs as a subprocess (the same runner as the
-        manual script) so its ~750 blocking API calls can never stall
-        this process's event loop, and the runner's own Redis lock
-        keeps it from overlapping a manual run."""
+        """Two-speed freshness for the Customer 360 mirror. Never
+        raises. A FULL sync is owed every C360_SYNC_HOURS; between
+        full syncs, the cheap RECENT pass (first pages only - the
+        lists are newest-first) is owed every C360_RECENT_SYNC_MINUTES,
+        so new records land in the mirror within minutes, not hours."""
         now = now or datetime.now(timezone.utc)
         if not settings.C360_SYNC_ENABLED:
             return {"ok": True, "skipped": "disabled"}
         if not settings.C360_EMAIL or not settings.C360_PASSWORD:
             return {"ok": True, "skipped": "unconfigured"}
+        runs = self._db().customer360_sync_runs
         try:
-            last = await self._db().customer360_sync_runs.find_one(
-                sort=[("started_at", -1)]
+            last_full = await runs.find_one(
+                {"scope": {"$ne": "recent"}}, sort=[("started_at", -1)]
+            )
+            last_recent = await runs.find_one(
+                {"scope": "recent"}, sort=[("started_at", -1)]
             )
         except Exception:
-            log.exception("could not read the last c360 sync run")
+            log.exception("could not read the last c360 sync runs")
             return {"ok": False, "error": "run-log-unreadable"}
-        if not _c360_sync_due(last, now, float(settings.C360_SYNC_HOURS)):
-            return {"ok": True, "skipped": "not-due"}
-        try:
-            runner = Path(__file__).resolve().parents[2] / "run_c360_sync.py"
-            log.info("c360 auto-sync: mirror is stale, launching the sync runner")
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable, str(runner), "--auto", cwd=str(runner.parent)
-            )
-            code = await proc.wait()
-            log.info("c360 auto-sync: runner exited with code %s", code)
-            return {"ok": code == 0, "exit_code": code}
-        except Exception as exc:
-            log.exception("c360 auto-sync failed to launch")
-            return {"ok": False, "error": type(exc).__name__}
+        if _c360_sync_due(last_full, now, float(settings.C360_SYNC_HOURS)):
+            return await self._launch_c360_runner(["--auto"], "full")
+        if _c360_recent_due(
+            last_recent, last_full, now, int(settings.C360_RECENT_SYNC_MINUTES)
+        ):
+            return await self._launch_c360_runner(["--auto", "--recent"], "recent")
+        return {"ok": True, "skipped": "not-due"}
 
     async def _c360_loop(self) -> None:
-        """Check every 15 minutes whether the mirror sync is due.
+        """Check every five minutes whether a mirror sync is due.
 
-        Separate from the refresh cycle on purpose: a sync takes tens
-        of minutes and must never hold the cycle's lock or delay a
+        Separate from the refresh cycle on purpose: a sync takes
+        minutes and must never hold the cycle's lock or delay a
         refresh. The first check waits two minutes so a restart never
         competes with startup work; only the leader launches."""
         nap = 120.0
@@ -273,7 +315,7 @@ class DashboardScheduler:
                 pass
             except asyncio.CancelledError:
                 raise
-            nap = 900.0
+            nap = 300.0
             try:
                 if await self.claim_leadership():
                     await self._job_c360_sync()

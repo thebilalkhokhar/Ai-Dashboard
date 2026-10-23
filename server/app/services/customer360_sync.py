@@ -171,6 +171,7 @@ async def sync_all(
     *,
     max_pages: Optional[int] = None,
     mode: str = "manual",
+    scope: str = "full",
 ) -> dict:
     """Sync every module and store the run summary."""
     started_at = _now_iso()
@@ -183,6 +184,7 @@ async def sync_all(
         "started_at": started_at,
         "finished_at": _now_iso(),
         "mode": mode,
+        "scope": scope,
         "modules": per_module,
         "complete": all(item["complete"] for item in per_module.values()),
         "note": (
