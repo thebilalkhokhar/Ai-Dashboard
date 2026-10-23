@@ -2457,3 +2457,63 @@ button {
     right: 0.75rem;
   }
 }
+
+/* The Customer 360 card: the CRM record an answer is about, projected by
+   the backend from its own summary - never from model text. */
+.chat-360-card {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 0.6rem;
+  border: 1px solid rgba(94, 234, 212, 0.25);
+  background: rgba(94, 234, 212, 0.05);
+}
+
+.chat-360-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.chat-360-name {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.chat-360-badges {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.chat-360-badge {
+  padding: 0.08rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 0.6rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.chat-360-company,
+.chat-360-contact,
+.chat-360-counts,
+.chat-360-totals,
+.chat-360-last {
+  margin: 0;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  color: color-mix(in oklab, var(--foreground) 78%, var(--muted));
+}
+
+.chat-360-contact {
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-360-last {
+  color: var(--muted);
+}
