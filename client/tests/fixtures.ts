@@ -199,13 +199,15 @@ export function taskEventFrame(event: TaskEvent): string {
 }
 
 export function registryAgents() {
-  // mirrors GET /api/agents with five real capabilities, all idle
+  // mirrors GET /api/agents with seven real capabilities, all idle
   return {
     agents: [
       { id: "master", name: "Master", kind: "orchestrator" as const, purpose: "", tools: [], enabled: true, status: "idle" as const, status_source: "none" as const },
       { id: "negotiation", name: "Negotiation", kind: "specialist" as const, purpose: "", tools: [], enabled: true, status: "idle" as const, status_source: "none" as const },
       { id: "collections", name: "Collections", kind: "specialist" as const, purpose: "", tools: [], enabled: true, status: "idle" as const, status_source: "none" as const },
       { id: "lead_followup", name: "Lead Follow-up", kind: "specialist" as const, purpose: "", tools: [], enabled: true, status: "idle" as const, status_source: "none" as const },
+      { id: "crm_engagement", name: "CRM Engagement", kind: "specialist" as const, purpose: "", tools: [], enabled: true, status: "idle" as const, status_source: "none" as const },
+      { id: "crm_deal_watch", name: "CRM Deal Watch", kind: "specialist" as const, purpose: "", tools: [], enabled: true, status: "idle" as const, status_source: "none" as const },
       { id: "chat", name: "Chat", kind: "assistant" as const, purpose: "", tools: ["get_revenue"], enabled: true, status: "idle" as const, status_source: "none" as const },
     ],
   };
