@@ -20,6 +20,8 @@ export const AGENT_LABELS: Record<string, string> = {
   negotiation: "Negotiation Assistant",
   collections: "Collections Assistant",
   lead_followup: "Lead Follow-up Assistant",
+  crm_engagement: "CRM Engagement Assistant",
+  crm_deal_watch: "CRM Deal Watch Assistant",
   chat: "Chat Assistant",
 };
 
@@ -126,6 +128,10 @@ const TOOL_PHRASES: Record<string, string> = {
   search_records: "Searching the business records",
   compare_lead_pulls: "Comparing the last two lead pulls",
   describe_data: "Checking what data is available",
+  search_customer360: "Searching the Zoho CRM",
+  get_customer360: "Reviewing the CRM 360 view",
+  get_crm_payments: "Reviewing CRM payment records",
+  get_customer360_analysis: "Running the CRM AI analysis",
 };
 
 export function toolPhrase(toolName: unknown): string {
@@ -162,6 +168,10 @@ const TOOL_DOMAIN_AGENTS: Record<string, string> = {
   search_records: "chat",
   get_orders: "chat",
   describe_data: "chat",
+  search_customer360: "crm_engagement",
+  get_customer360: "crm_engagement",
+  get_customer360_analysis: "crm_engagement",
+  get_crm_payments: "crm_deal_watch",
 };
 
 export function toolDomainAgent(toolName: unknown): string {
@@ -173,6 +183,8 @@ const AGENT_START_PHRASES: Record<string, string> = {
   negotiation: "Reviewing stale quotes",
   collections: "Reviewing unpaid invoices",
   lead_followup: "Reviewing leads awaiting details",
+  crm_engagement: "Reviewing CRM conversations awaiting a reply",
+  crm_deal_watch: "Reviewing stalled CRM deals",
   master: "Preparing the report",
   chat: "Understanding your request",
 };
