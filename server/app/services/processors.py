@@ -650,6 +650,9 @@ def stuck_leads(
                 "status": status,
                 "source": contact_to_s(lead.get("source")) or None,
                 "days_since_activity": int(age),
+                # the same age at the precision get_leads sorts on, so both
+                # stuck-lead views page the identical sequence
+                "age_days": round(age, 1),
                 "last_activity_at": iso_or_none(lead.get("lastActivityAt")),
                 "created_at": iso_or_none(lead.get("createdAt")),
                 "product": parsed.get("product"),
@@ -665,8 +668,12 @@ def stuck_leads(
                 "description": description,
             }
         )
-    # newest activity first
-    result.sort(key=lambda row: row["days_since_activity"])
+    # newest activity first. The lead id is the tiebreaker so two equal ages
+    # keep one stable order - and the same one get_leads uses, because a
+    # follow-up that continues one view must serve the same rows as the other
+    # (the two tools share this list; paging them in different orders would
+    # repeat or skip rows between pages).
+    result.sort(key=lambda row: (row["age_days"], row["lead_id"]))
     return result
 
 
