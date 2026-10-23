@@ -12,7 +12,7 @@ import { useState } from "react";
 import { Check, ShieldCheck, X } from "lucide-react";
 import type { AnswerEvidence } from "@/lib/presentation";
 import { formatMoney } from "@/lib/format";
-import type { ChatToolResultEvent, CrmCustomerCard } from "@/types/api";
+import type { ChatToolResultEvent, CrmAnalysisCard, CrmCustomerCard } from "@/types/api";
 
 function milliseconds(value: number | null): string {
   if (value === null) return "still running";
@@ -37,7 +37,42 @@ const CARD_COUNT_LABELS: Record<string, string> = {
   invoices: "Invoices",
   payments: "Payments",
   timeline: "Interactions",
+  whatsapp: "WhatsApp",
 };
+
+// The CRM AI analysis card: the CRM's own verdict, projected by the
+// backend - urgency, whether a follow-up is due, its reasoning and the
+// next action. A non-"Verified" ai_status is the CRM's placeholder
+// mode and is labeled as such, never dressed up as real AI output.
+function AnalysisCard({ card }: { card: CrmAnalysisCard }) {
+  const verified = card.ai_status === "Verified";
+  return (
+    <section className="chat-360-card" data-testid="chat-analysis-card" aria-label="CRM AI analysis">
+      <div className="chat-360-head">
+        <p className="chat-360-name">CRM AI analysis</p>
+        <div className="chat-360-badges">
+          {card.urgency && <span className="chat-360-badge">{card.urgency} urgency</span>}
+          {card.ai_status && (
+            <span className="chat-360-badge">{verified ? "Verified AI" : "Placeholder output"}</span>
+          )}
+        </div>
+      </div>
+      {card.follow_up_required !== undefined && (
+        <p className="chat-360-counts">
+          {card.follow_up_required ? "Follow-up required" : "No follow-up required"}
+        </p>
+      )}
+      {card.reasoning && <p className="chat-360-company">{card.reasoning}</p>}
+      {card.action_needed && (
+        <p className="chat-360-contact">
+          <span className="chat-360-last">Next action: </span>
+          {card.action_needed}
+        </p>
+      )}
+      {card.has_email_draft && <p className="chat-360-last">Email draft included in the answer.</p>}
+    </section>
+  );
+}
 
 const CARD_TOTAL_LABELS: Record<string, string> = {
   estimates_total_amount: "Estimates",
@@ -173,10 +208,12 @@ export function AnswerProvenance({
     );
   // The Customer 360 card rides its own frame; the latest one wins.
   const cardFrame = [...frames].reverse().find((frame) => frame.customer_card);
+  const analysisFrame = [...frames].reverse().find((frame) => frame.analysis_card);
 
   return (
     <div className="chat-proof" data-testid="chat-provenance">
       {cardFrame?.customer_card && <CustomerCard card={cardFrame.customer_card} />}
+      {analysisFrame?.analysis_card && <AnalysisCard card={analysisFrame.analysis_card} />}
       {summary && (
         <dl className="chat-proof-facts" data-testid="chat-proof-facts">
           {(() => {

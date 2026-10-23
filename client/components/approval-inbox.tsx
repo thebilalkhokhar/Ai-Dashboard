@@ -496,7 +496,12 @@ function RecommendationCard({
         .filter(Boolean)
         .join(" · ")
     : isEngagement
-      ? [engagement?.company, engagement?.record_type, `${engagement?.waiting_days ?? "—"}d waiting for a reply`]
+      ? [
+          engagement?.company,
+          engagement?.record_type,
+          engagement?.channel ? `waiting on ${engagement.channel}` : undefined,
+          `${engagement?.waiting_days ?? "—"}d waiting for a reply`,
+        ]
           .filter(Boolean)
           .join(" · ")
       : isDeal
@@ -588,6 +593,12 @@ function RecommendationCard({
         </>
       ) : isCrm ? (
         <div className="mt-3 grid gap-2 text-sm">
+          {isEngagement && engagement?.last_customer_message && (
+            <p className="italic">
+              <span className="text-muted not-italic">Customer wrote: </span>“
+              {engagement.last_customer_message}”
+            </p>
+          )}
           <p>
             <span className="text-muted">{isEngagement ? "Situation: " : "Stall reason: "}</span>
             {(isEngagement ? engagement?.situation : deal?.stall_reason) || "Not provided"}
