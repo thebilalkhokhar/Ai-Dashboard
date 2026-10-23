@@ -2692,7 +2692,7 @@ CHAT_TOOLS = [
     ),
     ChatTool(
         "get_customer360",
-        "Full Customer 360 view for one CRM record (record_id + record_type from search_customer360): identity and status, related leads/contacts/customers, the interaction timeline (calls, emails, SMS, notes: counts by type, the last interaction, the five most recent), projects/deals, estimates, invoices and payments - with backend-computed totals where the records carry a consistent money field. This is Zoho CRM data, separate from the ERP quotes/orders/payments tools.",
+        "Full Customer 360 view for one CRM record (record_id + record_type from search_customer360): identity and status, related leads/contacts/customers, the interaction timeline (calls, emails, SMS, notes: counts by type, the last interaction, the five most recent), projects/deals, estimates, invoices and payments - with backend-computed totals where the records carry a consistent money field. This is Zoho CRM data, separate from the ERP quotes/orders/payments tools. Present the answer as a compact contact card: name, email, phone, company and status first, then the counts and the last interaction - do not dump raw field names, and do not print the record_id hex unless the user asks for it.",
         Customer360DetailArgs,
         get_customer360,
     ),

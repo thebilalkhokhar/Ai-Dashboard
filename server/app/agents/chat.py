@@ -48,13 +48,23 @@ HOW TO WORK
 1. For any specific record - who paid, which invoices are overdue, a customer's
    status, a stuck lead, an amount - call a tool first. Never answer from memory
    or invent a value, and never tell the user to check the ERP.
+   PEOPLE. A name is enough to start. Never ask the user which person they
+   mean, for an exact spelling, or for a record ID before you have searched.
+   Check the ERP first (find_customer, then get_customer_profile); if the ERP
+   finds nobody, or finds the person but has no email or phone for them, call
+   search_customer360 in the SAME turn and open the best match with
+   get_customer360 - do not ask permission and do not stop at the ERP answer.
+   Present what the searches found; ask a question only when several different
+   people match and the answer would change.
 2. Tool choice: get_dashboard_metrics for headline KPIs (today's revenue, month
    to date, last 7 days, open quotes, unpaid and overdue totals) - those strings
    are the same ones the dashboard tiles show, copy them exactly. get_payments /
    get_invoices / get_quotes / get_orders / get_leads for lists of records,
-   get_customer_profile for one customer, get_agent_briefing for what the AI
-   agents drafted, get_record / search_records for one specific thing, and
-   describe_data when you are not sure a field exists at all. For any comparison
+   get_customer_profile for one customer, search_customer360 / get_customer360
+   for people in the Zoho CRM (Customer 360: contact details, communication
+   timeline, CRM projects, invoices and estimates), get_agent_briefing for what
+   the AI agents drafted, get_record / search_records for one specific thing,
+   and describe_data when you are not sure a field exists at all. For any comparison
    of lead pulls over time, call compare_lead_pulls before answering.
 
 LEAD PULLS. The current leads collection is one upserted snapshot, not a pull
@@ -487,12 +497,20 @@ def validate_numeric_claims(
 
     scanned = text
 
-    # 1) dates: only when the very same date exists in this turn's data
+    # 1) dates: only when the very same date exists in this turn's data.
+    # Compared canonically - the separator between the date and the time is
+    # typography, not a different fact: the tools return ISO strings
+    # ("2026-10-21T15:12:31") and a writer naturally renders the same instant
+    # with a space ("2026-10-21 15:12:31"). Both of tonight's live failures
+    # (Oct 24, CRM timeline times and an ERP quote's created_at) were that
+    # one-character difference on a true date. Precision still counts: a
+    # written time the data does not carry stays unsupported.
+    canonical_dates = {known.replace("T", " ") for known in dates}
     date_spans = [(m.start(), m.end()) for m in _DATE_STRING_RE.finditer(scanned)]
     for match in _DATE_STRING_RE.finditer(scanned):
-        written = match.group(0)
-        if not any(written == known or known.startswith(written) for known in dates):
-            errors.append(f"unsupported date {written}")
+        written = match.group(0).replace("T", " ")
+        if not any(written == known or known.startswith(written) for known in canonical_dates):
+            errors.append(f"unsupported date {match.group(0)}")
     scanned = _mask(scanned, date_spans)
 
     # 0) then a whole ERP reference such as "33563-2026-10": one identifier, so
@@ -516,11 +534,39 @@ def validate_numeric_claims(
     product_spans = [
         (match.start(), match.end())
         for match in re.finditer(
-            r"(?:customer|zoho|crm)[\s-]*360\b|\b360(?=\s+(?:view|record|profile)\b)",
+            r"(?:customer|zoho|crm)[\s-]*360\b|\b360(?=[-\s]*(?:view|record|profile|data)\b)",
             scanned,
             re.I,
         )
     ]
+    # A second live draft still died on the name (Oct 24, 01:28) in a phrasing
+    # the patterns above do not enumerate. The rule underneath them: inside a
+    # sentence that is talking about the CRM system, a bare 360 that does not
+    # quantify anything is the product name. A 360 directly followed by a
+    # count noun (leads, customers, records, ...) is a claim and stays
+    # checked, name context or not - so "Customer 360 holds 360 leads" still
+    # fails on its second 360.
+    for match in re.finditer(r"\b360\b", scanned):
+        start = max(
+            scanned.rfind(".", 0, match.start()),
+            scanned.rfind("!", 0, match.start()),
+            scanned.rfind("?", 0, match.start()),
+            scanned.rfind("\n", 0, match.start()),
+        ) + 1
+        end = len(scanned)
+        for stop in ".!?\n":
+            found = scanned.find(stop, match.end())
+            if found != -1:
+                end = min(end, found)
+        sentence = scanned[start:end]
+        quantifies = re.match(
+            r"\s+(?:leads|customers|orders|quotes|invoices|payments|days|records|"
+            r"messages|projects|estimates|items|emails|calls|contacts)\b",
+            scanned[match.end(): match.end() + 16],
+            re.I,
+        )
+        if not quantifies and re.search(r"customer|zoho|crm", sentence, re.I):
+            product_spans.append((match.start(), match.end()))
     scanned = _mask(scanned, product_spans)
 
     # 2) rounded money ("$147k", "$2.4M") may only differ by the rounding
