@@ -125,6 +125,49 @@ async def test_yes_continues_the_filtered_list_the_answer_offered():
 
 
 @pytest.mark.anyio
+async def test_next_page_continues_the_stuck_leads_list_not_a_wider_call():
+    """Second live form of the Oct 23 failure: the answer came from
+    get_stuck_leads, which recorded NO continuation at all (a head-only
+    top-N result), while the same turn's wider unfiltered get_leads call
+    became the recorded query - so "show next page" fetched page 2 of all
+    18,091 leads. get_stuck_leads is a paged tool now: its own context is
+    recorded, the anchor selects it, and the follow-up serves the stuck
+    list itself."""
+    database = leads_db()
+    first = FakeModel([
+        tool_call("get_stuck_leads", {"limit": 10}),
+        tool_call("get_leads", {"limit": 10}),
+        AIMessage(content=(
+            "Here are the stuck leads needing follow-up (this page, 10 of 30). "
+            "Want me to fetch the next page?"
+        )),
+        AIMessage(content="Here are the stuck leads needing follow-up."),
+    ])
+    await run_chat("thread-1", "Show me the leads that need follow-up.", database=database, model=first)
+
+    pending = thread_doc(database)["pending_action"]
+    assert pending["kind"] == "next_page"
+    assert pending["tool"] == "get_stuck_leads"
+    assert pending["total_count"] == 30
+    assert pending["next_offset"] == 10
+
+    second = FakeModel([
+        AIMessage(content="Here is the next page of stuck leads (30 total)."),
+    ])
+    result = await run_chat("thread-1", "show next page", database=database, model=second)
+
+    seeded = [
+        message.content for message in second.seen_messages[0]
+        if isinstance(message, ToolMessage)
+    ]
+    assert any('"total_count": 30' in content for content in seeded)
+    assert any('"offset": 10' in content for content in seeded)
+    assert result["text"] == "Here is the next page of stuck leads (30 total)."
+    # the whole stuck list was delivered by the confirmed page
+    assert thread_doc(database)["pending_action"] is None
+
+
+@pytest.mark.anyio
 async def test_a_discarded_confirmation_answer_breaks_the_loop():
     database = business_db(
         payments_flat=FakeCollection([payment(i) for i in range(1, 61)])

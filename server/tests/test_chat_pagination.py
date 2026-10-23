@@ -380,8 +380,14 @@ async def test_stuck_leads_and_top_n_answers_admit_what_they_left_out():
     assert page["returned"] == 3
     assert page["has_more"] is True
     assert page["all_records_returned"] is False
-    # deliberately not a paged tool: no cursor to follow
-    assert "next_offset" not in page
+    # paged since Oct 23: this list is the one "show next page" must continue,
+    # so it carries the same cursor as every other record tool - when it was a
+    # head-only answer it recorded no continuation and a wider call in the
+    # same turn hijacked the follow-up instead.
+    assert page["next_offset"] == 3
+    page_two = await invoke_tool("get_stuck_leads", {"limit": 3, "offset": 3}, database=database)
+    assert page_two["total_count"] == 8
+    assert [row["lead_id"] for row in page_two["items"]] == ["L-04", "L-05", "L-06"]
 
     unpaid = await invoke_tool("get_top_unpaid", {"limit": 1}, database=business_db())
     assert unpaid["total_count"] == 1
@@ -427,7 +433,7 @@ async def test_every_paged_tool_carries_the_same_pagination_block():
 @pytest.mark.asyncio
 async def test_pagination_arguments_reach_the_model_schema():
     """A cursor the model cannot see is a cursor the model cannot use."""
-    for name in ("get_payments", "get_invoices", "get_quotes", "get_orders", "get_leads", "search_records", "get_agent_briefing"):
+    for name in ("get_payments", "get_invoices", "get_quotes", "get_orders", "get_leads", "search_records", "get_agent_briefing", "get_stuck_leads"):
         tool = chat_tools.CHAT_TOOL_MAP[name]
         properties = tool.model_schema()["parameters"]["properties"]
         assert "offset" in properties, name

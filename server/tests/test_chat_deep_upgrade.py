@@ -66,6 +66,9 @@ def test_confirmation_kind_classifies_short_replies_only():
     assert _confirmation_kind("Yes!") == "generic"
     assert _confirmation_kind("show me all of them") == "all"
     assert _confirmation_kind("fetch the next page") == "next_page"
+    # the exact words the assistant's offers suggest to the user
+    assert _confirmation_kind("show next page") == "next_page"
+    assert _confirmation_kind("Show the next page.") == "next_page"
     assert _confirmation_kind("what about last week?") is None
     assert _confirmation_kind("yes but why did payments drop in the second week of October?") is None
     assert _confirmation_kind("") is None
