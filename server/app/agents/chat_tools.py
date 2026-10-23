@@ -449,7 +449,11 @@ async def find_customer(name: str, database: Any = None) -> dict:
     scored = [(_name_score(args.name, row["company_name"]), row) for row in found.values()]
     matches = [item for item in scored if item[0] >= 0.45]
     matches.sort(key=lambda item: (-item[0], item[1]["company_name"].casefold()))
-    return {"matches": [row for _, row in matches[:5]]}
+    shown = [row for _, row in matches[:5]]
+    # the counts are Python's: without them a truthful "5 matches" in an
+    # answer is a number no tool returned, and the guard rejects it
+    # (live failure Oct 24)
+    return {"matches": shown, "match_count": len(matches), "returned": len(shown)}
 
 
 async def get_customer_context(customer_id: int, database: Any = None) -> dict:

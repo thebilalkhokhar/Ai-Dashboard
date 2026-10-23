@@ -739,12 +739,26 @@ async def _crm_engagement_items(database: Any, now: datetime) -> list[dict]:
             if waiting is None or waiting < 1:
                 continue
             entity = summary.get("entity") or {}
+            # the channel the customer is waiting on (WhatsApp above
+            # all - the user's standing ask) and their actual last
+            # words, from the summarizer's bounded conversation
+            conversation = summary.get("conversation") or []
+            last_message = next(
+                (
+                    entry.get("content")
+                    for entry in conversation
+                    if isinstance(entry, dict) and entry.get("content")
+                ),
+                None,
+            )
             item = {
                 "record_id": record_id,
                 "record_type": "Lead",
                 "contact_name": entity.get("name"),
                 "company": entity.get("company"),
                 "waiting_days": int(waiting),
+                "channel": last.get("type"),
+                "last_customer_message": (last_message or "")[:200] or None,
             }
             payload_out = crm_engagement_payload(summary, "Lead", int(waiting))
             items.append(
@@ -1224,6 +1238,8 @@ async def _run_one(
                     result["contact_name"] = crm_row.get("contact_name")
                     result["company"] = crm_row.get("company")
                     result["waiting_days"] = crm_row.get("waiting_days")
+                    result["channel"] = crm_row.get("channel")
+                    result["last_customer_message"] = crm_row.get("last_customer_message")
                 if kind == "crm_deal_watch":
                     deal_row = entry.get("item") or {}
                     result["record_id"] = str(deal_row.get("record_id") or "")

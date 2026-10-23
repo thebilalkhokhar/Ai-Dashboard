@@ -95,6 +95,7 @@ def crm_engagement_payload(summary: dict, record_type: str, waiting_days: int) -
             "status": entity.get("status"),
         },
         "waiting": {
+            "channel": last.get("type"),
             "last_interaction_type": last.get("type"),
             "last_interaction_title": last.get("title"),
             "last_interaction_at": last.get("at"),

@@ -50,12 +50,17 @@ HOW TO WORK
    or invent a value, and never tell the user to check the ERP.
    PEOPLE. A name is enough to start. Never ask the user which person they
    mean, for an exact spelling, or for a record ID before you have searched.
-   Check the ERP first (find_customer, then get_customer_profile); if the ERP
-   finds nobody, or finds the person but has no email or phone for them, call
-   search_customer360 in the SAME turn and open the best match with
-   get_customer360 - do not ask permission and do not stop at the ERP answer.
-   Present what the searches found; ask a question only when several different
-   people match and the answer would change.
+   For contact details, conversations and a person's CRM standing, the CRM
+   is the source that holds email, phone and messages: call search_customer360
+   FIRST, open the best match with get_customer360, and lead the answer with
+   that person's details - use the ERP lookups (find_customer, then
+   get_customer_profile) for their quotes, orders and payments. An exact
+   full-name match IS the person asked for; partial matches (Amber Frank for
+   "Frank Jr") are different people - never present them as choices for the
+   same name, and never block the answer on them. Ask a question only when
+   two exact matches in the same system disagree. Never print a numeric
+   customer id or a record_id hex in an answer: refer to people by name and
+   company, and to records by type ("the Lead", "the Contact").
    PAYMENTS LIVE IN TWO LEDGERS. get_payments reads the ERP; get_crm_payments
    reads the Zoho CRM, which mirrors ERP payments (its rows carry the ERP id)
    and also holds payments the ERP list does not show. For any question about
@@ -1040,6 +1045,13 @@ def _customer_card(result: dict) -> dict | None:
         count = result.get(f"{section}_count")
         if isinstance(count, int) and not isinstance(count, bool):
             counts[section] = count
+    # WhatsApp gets its own count: it is the channel the team follows
+    # up on, and a bare timeline total hides whether it exists at all
+    by_type = result.get("timeline_by_type")
+    if isinstance(by_type, dict):
+        whatsapp = by_type.get("WhatsApp")
+        if isinstance(whatsapp, int) and not isinstance(whatsapp, bool) and whatsapp > 0:
+            counts["whatsapp"] = whatsapp
     if counts:
         card["counts"] = counts
     totals: dict[str, float] = {}
@@ -1071,6 +1083,37 @@ def _customer_card(result: dict) -> dict | None:
             if isinstance(content, str) and content.strip():
                 # the customer's (or the team's) actual last words
                 card["last_message"] = content.strip()[:140]
+    return card if len(card) > 1 else None
+
+
+def _analysis_card(result: dict) -> dict | None:
+    """The bounded CRM-AI-analysis card a chat answer is rendered with.
+
+    Projected from the get_customer360_analysis result: the CRM AI's
+    own structured verdict (urgency, follow-up, reasoning, next action)
+    plus whether its email draft exists and whether the output is the
+    real AI or a placeholder (ai_status) - so the analysis is SEEN as a
+    card, not buried in a wall of model text."""
+    analysis = result.get("analysis")
+    if not isinstance(analysis, dict) or not analysis:
+        return None
+    card: dict[str, Any] = {"source": "customer360_analysis"}
+    status = result.get("ai_status")
+    if isinstance(status, str) and status:
+        card["ai_status"] = status
+    if analysis.get("followUpRequired") is not None:
+        card["follow_up_required"] = bool(analysis.get("followUpRequired"))
+    for key, field, limit in (
+        ("urgency", "urgency", 40),
+        ("reasoning", "reasoning", 400),
+        ("actionNeeded", "action_needed", 300),
+    ):
+        value = analysis.get(key)
+        if isinstance(value, str) and value.strip():
+            card[field] = value.strip()[:limit]
+    draft = analysis.get("emailDraft")
+    if isinstance(draft, dict) and (draft.get("subject") or draft.get("body")):
+        card["has_email_draft"] = True
     return card if len(card) > 1 else None
 
 
@@ -1129,11 +1172,16 @@ def tool_evidence(name: str, result: Any) -> dict | None:
         card = _customer_card(result)
         if card is not None:
             evidence["customer_card"] = card
+    if name == "get_customer360_analysis":
+        analysis_card = _analysis_card(result)
+        if analysis_card is not None:
+            evidence["analysis_card"] = analysis_card
     if (
         page is None
         and "money_total" not in evidence
         and "record_count" not in evidence
         and "customer_card" not in evidence
+        and "analysis_card" not in evidence
     ):
         return None
     return evidence
