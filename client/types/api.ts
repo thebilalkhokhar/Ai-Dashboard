@@ -271,6 +271,23 @@ export interface ChatToolEvent {
 // Sent after a tool succeeds: the pagination and aggregate facts the backend
 // actually computed for that call. Every field is optional because a tool only
 // reports what it really knows - the UI must not imply more.
+// The bounded Customer 360 card the backend projects from its own
+// get_customer360 summary (server/app/agents/chat.py: _customer_card).
+// Record data only - identity, contact details, counts, totals, the last
+// interaction - never model text.
+export interface CrmCustomerCard {
+  source?: string;
+  name?: string;
+  company?: string;
+  status?: string;
+  email?: string;
+  phone?: string;
+  record_type?: string;
+  counts?: Record<string, number>;
+  totals?: Record<string, number>;
+  last_interaction?: { type?: string; at?: string; direction?: string };
+}
+
 export interface ChatToolResultEvent {
   tool: string;
   records_total?: number;
@@ -283,6 +300,7 @@ export interface ChatToolResultEvent {
   money_total?: number | null;
   money_covers?: string;
   window?: { date_from?: string | null; date_to?: string | null };
+  customer_card?: CrmCustomerCard;
 }
 
 export interface ChatTokenEvent {
