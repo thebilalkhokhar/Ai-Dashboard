@@ -32,6 +32,7 @@ const cardFrame: ChatToolResultEvent = {
       at: "2026-10-21T15:12:31.000Z",
       direction: "Inbound",
     },
+    last_message: "Too expensive",
   },
 };
 
@@ -46,6 +47,7 @@ describe("AnswerProvenance customer card", () => {
     expect(card).toHaveTextContent("Interactions 56");
     expect(card).toHaveTextContent("Estimates $1,400");
     expect(card).toHaveTextContent("customer wrote last");
+    expect(card).toHaveTextContent("“Too expensive”");
   });
 
   it("renders no card when no frame carries one", () => {
