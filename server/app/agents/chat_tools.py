@@ -1707,6 +1707,22 @@ async def get_customer360(record_id: str, record_type: str, database: Any = None
     args = Customer360DetailArgs.model_validate(
         {"record_id": record_id, "record_type": record_type}
     )
+    if args.record_id.isdigit():
+        # An ERP numeric id is not a CRM record id (theirs are 24-char
+        # hex): their API answers 500 for it, three slow retries deep
+        # (live log Oct 24, id=4902). Steer back to search immediately.
+        return {
+            "source": "customer360",
+            "available": False,
+            "record_id": args.record_id,
+            "record_type": args.record_type,
+            "note": (
+                "That id looks like an ERP numeric id, not a Customer 360 "
+                "record id (CRM ids are long hex strings). Search first "
+                "with search_customer360 and pass the record_id from its "
+                "results to this tool."
+            ),
+        }
     db = _database(database)
     payload, fetched_at, fresh = await c360_service.get_cached_detail(
         db, args.record_id, args.record_type
@@ -2786,7 +2802,7 @@ CHAT_TOOLS = [
     ),
     ChatTool(
         "get_customer360",
-        "Full Customer 360 view for one CRM record (record_id + record_type from search_customer360): identity and status, related leads/contacts/customers, the interaction timeline (calls, emails, SMS, notes: counts by type, the last interaction, the five most recent), projects/deals, estimates, invoices and payments - with backend-computed totals where the records carry a consistent money field. This is Zoho CRM data, separate from the ERP quotes/orders/payments tools. Present the answer as a compact contact card: name, email, phone, company and status first, then the counts and the last interaction - do not dump raw field names, and do not print the record_id hex unless the user asks for it.",
+        "Full Customer 360 view for one CRM record (record_id + record_type from search_customer360): identity and status, related leads/contacts/customers, the interaction timeline (calls, emails, SMS, notes: counts by type, the last interaction, the five most recent), projects/deals, estimates, invoices and payments - with backend-computed totals where the records carry a consistent money field. It also returns `conversation`: the newest timeline entries WITH their message bodies (WhatsApp/SMS/email text, notes, call outcomes and durations), each marked Inbound (from the customer) or Outbound (from the team) - when the user asks what was said, what the customer replied, or for a WhatsApp/SMS/chat history, present that thread from the conversation entries, quoting the bodies; never say the messages are unavailable when conversation entries exist. This is Zoho CRM data, separate from the ERP quotes/orders/payments tools. Present the answer as a compact contact card: name, email, phone, company and status first, then the counts and the last interaction - do not dump raw field names, and do not print the record_id hex unless the user asks for it.",
         Customer360DetailArgs,
         get_customer360,
     ),

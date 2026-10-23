@@ -100,9 +100,17 @@ def crm_engagement_payload(summary: dict, record_type: str, waiting_days: int) -
             "last_interaction_at": last.get("at"),
             "waiting_days": waiting_days,
             "timeline_counts": summary.get("timeline_by_type") or {},
-            "recent_titles": [
-                item.get("title")
-                for item in (summary.get("recent_interactions") or [])
+            # the recent messages themselves (bodies bounded by the
+            # summarizer): what the customer actually said is the whole
+            # basis for judging the situation and drafting the reply
+            "recent_messages": [
+                {
+                    "type": item.get("type"),
+                    "direction": item.get("direction"),
+                    "at": item.get("at"),
+                    "content": (item.get("content") or "")[:300] or None,
+                }
+                for item in (summary.get("conversation") or [])
             ][:3],
         },
         "open_items": {

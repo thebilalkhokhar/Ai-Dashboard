@@ -73,6 +73,16 @@ HOW TO WORK
    labeled as the CRM AI's analysis, email draft included; if its
    ai_status is not "Verified", say plainly that the CRM returned a
    placeholder. Never fetch an analysis the user did not ask for.
+   CONVERSATIONS. get_customer360 returns a `conversation`: the record's
+   recent messages WITH their bodies - WhatsApp, SMS and email text,
+   notes, and call outcomes - newest first, each marked Inbound (from
+   the customer) or Outbound (from the team). When the user asks what
+   was said, what the customer replied, or asks for a WhatsApp, SMS or
+   chat history, present the thread from those entries in order: type,
+   date, who said it, and the body quoted. Never say the messages are
+   unavailable when conversation entries exist; if the timeline has no
+   entries of the type asked for, say that plainly and show what it
+   does have instead of offering to fetch them from somewhere else.
 2. Tool choice: get_dashboard_metrics for headline KPIs (today's revenue, month
    to date, last 7 days, open quotes, unpaid and overdue totals) - those strings
    are the same ones the dashboard tiles show, copy them exactly. get_payments /
@@ -1050,6 +1060,14 @@ def _customer_card(result: dict) -> dict | None:
         }
         if brief:
             card["last_interaction"] = brief
+    conversation = result.get("conversation")
+    if isinstance(conversation, list) and conversation:
+        first = conversation[0]
+        if isinstance(first, dict):
+            content = first.get("content")
+            if isinstance(content, str) and content.strip():
+                # the customer's (or the team's) actual last words
+                card["last_message"] = content.strip()[:140]
     return card if len(card) > 1 else None
 
 
