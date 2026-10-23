@@ -895,6 +895,9 @@ class Customer360SearchArgs(ToolArgs):
 class Customer360DetailArgs(ToolArgs):
     record_id: str = Field(min_length=1, max_length=40)
     record_type: str = Field(pattern="^(Lead|Contact|Customer)$")
+    # the user's Oct 24 pattern: the mirror/cache serves first, but a
+    # request for the latest data must be able to force a live fetch
+    fresh: bool = False
 
 
 class Customer360PaymentsArgs(DateRangeArgs):
@@ -1696,16 +1699,20 @@ async def search_customer360(query: str, database: Any = None) -> dict:
     }
 
 
-async def get_customer360(record_id: str, record_type: str, database: Any = None) -> dict:
+async def get_customer360(
+    record_id: str, record_type: str, fresh: bool = False, database: Any = None
+) -> dict:
     """One CRM record's full 360 summary, via the Mongo fetch-through cache.
 
-    A fresh cached copy is served without touching their slow backend.
-    On a live-fetch failure a stale copy is served WITH a note saying so;
-    with no copy at all the tool reports itself unavailable - it never
-    invents a profile.
+    A fresh cached copy is served without touching their slow backend -
+    unless fresh=true asks for the latest data, which always re-fetches
+    live (the pattern the user asked for: database first, API on
+    demand). On a live-fetch failure a stale copy is served WITH a note
+    saying so; with no copy at all the tool reports itself unavailable -
+    it never invents a profile.
     """
     args = Customer360DetailArgs.model_validate(
-        {"record_id": record_id, "record_type": record_type}
+        {"record_id": record_id, "record_type": record_type, "fresh": fresh}
     )
     if args.record_id.isdigit():
         # An ERP numeric id is not a CRM record id (theirs are 24-char
@@ -1724,10 +1731,10 @@ async def get_customer360(record_id: str, record_type: str, database: Any = None
             ),
         }
     db = _database(database)
-    payload, fetched_at, fresh = await c360_service.get_cached_detail(
+    payload, fetched_at, cache_fresh = await c360_service.get_cached_detail(
         db, args.record_id, args.record_type
     )
-    if payload is not None and fresh:
+    if payload is not None and cache_fresh and not args.fresh:
         summary = c360_service.summarize_detail(payload)
         summary.update({"available": True, "from_cache": True, "fetched_at": fetched_at})
         return summary
@@ -2802,7 +2809,7 @@ CHAT_TOOLS = [
     ),
     ChatTool(
         "get_customer360",
-        "Full Customer 360 view for one CRM record (record_id + record_type from search_customer360): identity and status, related leads/contacts/customers, the interaction timeline (calls, emails, SMS, notes: counts by type, the last interaction, the five most recent), projects/deals, estimates, invoices and payments - with backend-computed totals where the records carry a consistent money field. It also returns `conversation`: the newest timeline entries WITH their message bodies (WhatsApp/SMS/email text, notes, call outcomes and durations), each marked Inbound (from the customer) or Outbound (from the team) - when the user asks what was said, what the customer replied, or for a WhatsApp/SMS/chat history, present that thread from the conversation entries, quoting the bodies; never say the messages are unavailable when conversation entries exist. This is Zoho CRM data, separate from the ERP quotes/orders/payments tools. Present the answer as a compact contact card: name, email, phone, company and status first, then the counts and the last interaction - do not dump raw field names, and do not print the record_id hex unless the user asks for it.",
+        "Full Customer 360 view for one CRM record (record_id + record_type from search_customer360): identity and status, related leads/contacts/customers, the interaction timeline (calls, emails, SMS, notes: counts by type, the last interaction, the five most recent), projects/deals, estimates, invoices and payments - with backend-computed totals where the records carry a consistent money field. It also returns `conversation`: the newest timeline entries WITH their message bodies (WhatsApp/SMS/email text, notes, call outcomes and durations), each marked Inbound (from the customer) or Outbound (from the team) - when the user asks what was said, what the customer replied, or for a WhatsApp/SMS/chat history, present that thread from the conversation entries, quoting the bodies; never say the messages are unavailable when conversation entries exist. A saved copy may be served for speed: when the user asks for the latest, fresh or taaza data, pass fresh=true to re-fetch the record live from the CRM instead. This is Zoho CRM data, separate from the ERP quotes/orders/payments tools. Present the answer as a compact contact card: name, email, phone, company and status first, then the counts and the last interaction - do not dump raw field names, and do not print the record_id hex unless the user asks for it.",
         Customer360DetailArgs,
         get_customer360,
     ),

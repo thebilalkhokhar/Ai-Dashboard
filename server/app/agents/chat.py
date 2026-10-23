@@ -83,6 +83,9 @@ HOW TO WORK
    unavailable when conversation entries exist; if the timeline has no
    entries of the type asked for, say that plainly and show what it
    does have instead of offering to fetch them from somewhere else.
+   When the user asks for the latest or taaza data of a record, call
+   get_customer360 with fresh=true: the saved copy is skipped and the
+   record is re-fetched live from the CRM.
 2. Tool choice: get_dashboard_metrics for headline KPIs (today's revenue, month
    to date, last 7 days, open quotes, unpaid and overdue totals) - those strings
    are the same ones the dashboard tiles show, copy them exactly. get_payments /
