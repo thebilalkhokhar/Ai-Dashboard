@@ -41,7 +41,11 @@ export function SystemHealthProvider({ children }: { children: ReactNode }) {
     }
 
     void checkHealth();
-    const intervalId = window.setInterval(() => void checkHealth(), 30_000);
+    // Poll only while the tab is actually on screen: a dashboard left
+    // open in a background tab must not keep pinging the server forever.
+    const intervalId = window.setInterval(() => {
+      if (!document.hidden) void checkHealth();
+    }, 30_000);
 
     return () => {
       isActive = false;
