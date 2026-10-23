@@ -371,7 +371,12 @@ def _verbatim_strings(node: Any, out: list[str]) -> None:
         text = normalize_digits(node)
         text = _DATE_STRING_RE.sub(" ", text)
         text = _REFERENCE_TOKEN_RE.sub(" ", text)
-        out.append(re.sub(r"[\s,]+", "", text).lower())
+        # Commas and whitespace become one gap, never nothing: '25,000' and
+        # '25 000' still compare equal to '25000', while the boundary between
+        # a word and a number is KEPT. Stripping every gap turned the quote
+        # "pouch 25k" into "pouch25k", so the left-boundary check read it as
+        # the tail of a longer word and discarded the live answer (Oct 23).
+        out.append(re.sub(r"[\s,]+", " ", text).lower())
 
 
 def _quoted_verbatim(token: str, verbatim: list[str]) -> bool:
@@ -384,13 +389,17 @@ def _quoted_verbatim(token: str, verbatim: list[str]) -> bool:
     failed against data the backend itself returned and correct answers
     were discarded (Oct 23 live failure, twice on the first question). A
     token that stands in a returned string - at a left boundary, not the
-    tail of a longer number - is a quotation, not a claim. Money stays
-    strict: this rescue covers bare tokens only.
+    tail of a longer word or number - is a quotation, not a claim. The
+    comparison tolerates the whitespace/commas a writer may vary ('25 k'
+    for '25k', '2 000' for '2000') without erasing the word boundary that
+    makes it a quote. Money stays strict: this rescue covers bare tokens
+    only.
     """
     needle = re.sub(r"[\s,]+", "", normalize_digits(token)).lower().strip("$")
     if not needle:
         return False
-    pattern = re.compile(r"(?<![0-9a-z.])" + re.escape(needle) + r"(?![0-9])")
+    body = r"\s*".join(re.escape(character) for character in needle)
+    pattern = re.compile(r"(?<![0-9a-z.])" + body + r"(?![0-9])")
     return any(pattern.search(haystack) for haystack in verbatim)
 
 
@@ -749,6 +758,7 @@ def _evidence_summary(tool_results: list[dict], period_phrase: str | None = None
     """
     money_evidence = None
     count_evidence = None
+    page_evidence = None
     for entry in tool_results:
         if not isinstance(entry, dict):
             continue
@@ -759,8 +769,14 @@ def _evidence_summary(tool_results: list[dict], period_phrase: str | None = None
             money_evidence = evidence
         if "record_count" in evidence and count_evidence is None:
             count_evidence = evidence
+        # A paged record tool proves its total_count even when it totals no
+        # money (leads, quotes, orders). Without this the only verified fact a
+        # page computed - "560 leads match" - was dropped and the user saw the
+        # generic could-not-verify sentence instead of the count.
+        if "records_total" in evidence and page_evidence is None:
+            page_evidence = evidence
 
-    evidence = money_evidence or count_evidence
+    evidence = money_evidence or count_evidence or page_evidence
     if evidence is None:
         return None
 
@@ -1165,6 +1181,11 @@ def _pending_from_context(context: dict | None) -> dict | None:
             "tool": context.get("tool"),
             "args": context.get("args") or {},
             "next_offset": context.get("next_offset"),
+            # the page size the user is already reading: continuing with a
+            # different one makes the tool number the same walk differently
+            # (offset 20 of a 20-row walk re-labelled "page 1 of 2" when the
+            # continuation asked for 50 rows)
+            "limit": context.get("limit"),
             "total_count": context.get("total_count"),
             "question": context.get("question"),
             "recorded_at": datetime.now(timezone.utc).isoformat(),
@@ -1337,7 +1358,7 @@ async def _execute_pending_action(
         tool_name = pending.get("tool")
         base_args = dict(pending.get("args") or {})
         if tool_name not in registry:
-            return {"results": [], "call_keys": [], "pending": None, "directive": ""}
+            return {"results": [], "call_keys": [], "pending": None, "directive": "", "context": None}
         if kind == "all":
             merged, keys = await _walk_pages(
                 tool_name, base_args, database=database, registry=registry,
@@ -1357,8 +1378,20 @@ async def _execute_pending_action(
                 "them; the totals come from the tool, not from counting rows. Do "
                 "not offer to fetch them again."
             )
-            return {"results": results, "call_keys": call_keys, "pending": new_pending, "directive": directive}
-        args = {**base_args, "offset": pending.get("next_offset"), "limit": MAX_TOOL_ROWS}
+            return {
+                "results": results, "call_keys": call_keys, "pending": new_pending,
+                "directive": directive, "context": None,
+            }
+        # Continue the walk at the page size the user is already reading, so
+        # "page 2" is really the second page of the same walk and the tool's
+        # own page block agrees with it. The model never chooses this size;
+        # it comes from the page the continuation was recorded against.
+        try:
+            recorded_limit = int(pending.get("limit") or MAX_TOOL_ROWS)
+        except (TypeError, ValueError):
+            recorded_limit = MAX_TOOL_ROWS
+        page_limit = max(1, min(recorded_limit, MAX_TOOL_ROWS))
+        args = {**base_args, "offset": pending.get("next_offset"), "limit": page_limit}
         call_keys.append(tool_name + "|" + json.dumps(args, sort_keys=True, default=str))
         result = await _invoke_recorded(
             tool_name, args, database=database, registry=registry, task_id=task_id, events=events
@@ -1366,18 +1399,29 @@ async def _execute_pending_action(
         results.append({"tool": tool_name, "result": result, "_call_keys": call_keys})
         new_pending = None
         page = _page_block(result)
+        # The page just fetched is now where this thread's query stands. It is
+        # handed back so the turn records it: keeping the previous page's record
+        # (offset 0) made the system's "LAST QUERY" note describe a page the
+        # conversation had already moved past, so a later follow-up could be
+        # answered against the wrong cursor.
+        fetched_context = (
+            query_context(tool_name, base_args, page, pending.get("question") or "")
+            if page is not None
+            else None
+        )
         if page is not None and page["has_more"]:
-            new_pending = _pending_from_context(query_context(
-                tool_name, base_args, page, pending.get("question") or ""
-            ))
+            new_pending = _pending_from_context(fetched_context)
         directive = (
             "CONFIRMED RETRIEVAL EXECUTED. The user confirmed, and the backend has "
             "fetched the next page of the recorded query (the tool results below). "
             "Answer from it and do not repeat the previous offer."
         )
-        return {"results": results, "call_keys": call_keys, "pending": new_pending, "directive": directive}
+        return {
+            "results": results, "call_keys": call_keys, "pending": new_pending,
+            "directive": directive, "context": fetched_context,
+        }
 
-    return {"results": [], "call_keys": [], "pending": None, "directive": ""}
+    return {"results": [], "call_keys": [], "pending": None, "directive": "", "context": None}
 
 
 def _message_text(message: Any) -> str:
@@ -1971,6 +2015,10 @@ async def run_chat(
             log.exception("pending action execution failed; falling back to a normal turn")
             forced = {"results": [], "pending": pending_previous, "directive": ""}
     try:
+        # A confirmed page is where the conversation now stands, so the model
+        # is told that page's cursor rather than the previous one; the answer it
+        # is about to write is about the rows just fetched.
+        effective_last_query = forced.get("context") or last_query
         outcome = await execute_chat(
             message,
             turns,
@@ -1979,7 +2027,7 @@ async def run_chat(
             database=db,
             events=events,
             task_id=task_id,
-            last_query=last_query,
+            last_query=effective_last_query,
             forced_results=forced.get("results") or None,
             forced_directive=forced.get("directive") or "",
         )
