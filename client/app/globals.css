@@ -2517,3 +2517,11 @@ button {
 .chat-360-last {
   color: var(--muted);
 }
+
+.chat-360-message {
+  margin: 0;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  font-style: italic;
+  color: color-mix(in oklab, var(--foreground) 85%, var(--muted));
+}
