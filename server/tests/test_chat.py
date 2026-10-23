@@ -346,6 +346,27 @@ def test_count_guard_only_accepts_counts_present_in_tool_results():
     assert validate_numeric_claims("The order data does not include artwork status.", results) == []
 
 
+def test_numeric_guard_accepts_verbatim_quotes_from_record_text():
+    """Oct 23 live failure: a lead's quantity was the string '25k' and a size
+    '360gsm'. The model quoted both word for word; the guard evaluated '25k'
+    as the claim 25,000 (the harvest had read the string as the fact 25) and
+    discarded a correct answer twice. A token that stands verbatim in a
+    returned string is a quotation, not a computed claim."""
+    from app.agents.chat import validate_numeric_claims
+
+    results = [{"tool": "get_stuck_leads", "result": {"items": [
+        {"quantity": "25k", "size": "360gsm", "material": "kraft"},
+    ]}}]
+    assert validate_numeric_claims("Quantity: 25k, size: 360.", results) == []
+    # an invented suffixed figure is still rejected - it stands in no string
+    assert validate_numeric_claims("Quantity: 40k.", results)
+    # the tail of a longer number is not a quote of it
+    longer = [{"tool": "get_leads", "result": {"items": [{"size": "1360mm"}]}}]
+    assert validate_numeric_claims("Size: 360.", longer)
+    # money stays strict: quoting a budget string does not mint an amount
+    assert validate_numeric_claims("The budget is $25,000.", results)
+
+
 def test_numeric_guard_accepts_prior_numbers_and_rejects_new_numbers():
     from app.agents.chat import validate_numeric_claims
 
