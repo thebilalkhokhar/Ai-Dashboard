@@ -14,6 +14,8 @@ import { useLiveData } from "@/hooks/use-live-data";
 import type {
   AgentRunBriefing,
   CollectionsOutput,
+  CrmDealWatchOutput,
+  CrmEngagementOutput,
   LeadFollowupOutput,
   NegotiationOutput,
 } from "@/types/api";
@@ -24,13 +26,17 @@ const RUN_POLL_TIMEOUT_MS = 5 * 60 * 1000;
 type Recommendation =
   | { id: string; kind: "negotiation"; item: NegotiationOutput }
   | { id: string; kind: "collections"; item: CollectionsOutput }
-  | { id: string; kind: "lead_followup"; item: LeadFollowupOutput };
+  | { id: string; kind: "lead_followup"; item: LeadFollowupOutput }
+  | { id: string; kind: "crm_engagement"; item: CrmEngagementOutput }
+  | { id: string; kind: "crm_deal_watch"; item: CrmDealWatchOutput };
 
 type ReviewFilter =
   | "all"
   | "negotiation"
   | "collections"
   | "lead_followup"
+  | "crm_engagement"
+  | "crm_deal_watch"
   | "needs_review";
 
 function formatMoney(value: number | undefined): string {
@@ -76,6 +82,17 @@ function buildRecommendations(briefing: AgentRunBriefing): Recommendation[] {
     ...(briefing.lead_followup ?? []).map((item, index) => ({
       id: `lead_followup-${item.input_hash ?? item.lead_id ?? index}`,
       kind: "lead_followup" as const,
+      item,
+    })),
+    // optional: briefings saved before the CRM agents existed have no sections
+    ...(briefing.crm_engagement ?? []).map((item, index) => ({
+      id: `crm_engagement-${item.input_hash ?? item.record_id ?? index}`,
+      kind: "crm_engagement" as const,
+      item,
+    })),
+    ...(briefing.crm_deal_watch ?? []).map((item, index) => ({
+      id: `crm_deal_watch-${item.input_hash ?? item.record_id ?? index}`,
+      kind: "crm_deal_watch" as const,
       item,
     })),
   ];
@@ -297,6 +314,8 @@ export function AgentReview() {
               <span>{briefing.counts.negotiation_total} negotiation items</span>
               <span>{briefing.counts.collections_total} collections items</span>
               <span>{briefing.counts.lead_followup_total ?? 0} lead follow-up items</span>
+              <span>{briefing.counts.crm_engagement_total ?? 0} CRM engagement items</span>
+              <span>{briefing.counts.crm_deal_watch_total ?? 0} CRM deal watch items</span>
               <span>{briefing.counts.cached} reused from cache</span>
               <span
                 className={
@@ -387,6 +406,8 @@ export function AgentReview() {
                       ["negotiation", "Negotiation"],
                       ["collections", "Collections"],
                       ["lead_followup", "Lead follow-up"],
+                      ["crm_engagement", "CRM engagement"],
+                      ["crm_deal_watch", "CRM deal watch"],
                       ["needs_review", "Needs review"],
                     ] as [ReviewFilter, string][]
                   ).map(([value, label]) => (
@@ -408,7 +429,7 @@ export function AgentReview() {
 
               {recommendations.length === 0 ? (
                 <p className="mt-3 rounded-lg border border-border px-4 py-6 text-center text-sm text-muted">
-                  This run produced no negotiation, collections or lead follow-up recommendations.
+                  This run produced no agent recommendations.
                 </p>
               ) : visibleRecommendations.length === 0 ? (
                 <p className="mt-3 rounded-lg border border-border px-4 py-6 text-center text-sm text-muted">
@@ -452,29 +473,59 @@ function RecommendationCard({
   const { id, kind, item } = recommendation;
   const isNegotiation = kind === "negotiation";
   const isLead = kind === "lead_followup";
+  const isEngagement = kind === "crm_engagement";
+  const isDeal = kind === "crm_deal_watch";
+  const isCrm = isEngagement || isDeal;
   const negotiation = isNegotiation ? (item as NegotiationOutput) : null;
   const collections = kind === "collections" ? (item as CollectionsOutput) : null;
   const lead = isLead ? (item as LeadFollowupOutput) : null;
+  const engagement = isEngagement ? (item as CrmEngagementOutput) : null;
+  const deal = isDeal ? (item as CrmDealWatchOutput) : null;
   const amount = negotiation ? negotiation.quote_amount : collections?.balance;
   const flags = item.flags ?? [];
   const needsReview = flags.includes("needs_review") || flags.includes("error");
   const heading = isLead
     ? lead?.contact_name || lead?.company || "Lead unavailable"
-    : item.customer_name || "Customer unavailable";
+    : isEngagement
+      ? engagement?.contact_name || engagement?.company || "CRM record unavailable"
+      : isDeal
+        ? deal?.deal_name || deal?.account_name || "CRM deal unavailable"
+        : item.customer_name || "Customer unavailable";
   const subheading = isLead
     ? [lead?.company, lead?.status, `${lead?.days_since_activity ?? "—"}d since activity`]
         .filter(Boolean)
         .join(" · ")
-    : isNegotiation
-      ? `Quote ${negotiation?.quote_id ?? "—"}${amount !== undefined ? ` · ${formatMoney(amount)}` : ""}`
-      : `Invoice ${collections?.invoice_id ?? "—"}${amount !== undefined ? ` · ${formatMoney(amount)}` : ""}`;
+    : isEngagement
+      ? [engagement?.company, engagement?.record_type, `${engagement?.waiting_days ?? "—"}d waiting for a reply`]
+          .filter(Boolean)
+          .join(" · ")
+      : isDeal
+        ? [
+            deal?.account_name,
+            humanise(deal?.deal_kind),
+            `${deal?.days_idle ?? "—"}d idle`,
+            deal?.amount !== undefined ? formatMoney(deal.amount) : undefined,
+          ]
+            .filter(Boolean)
+            .join(" · ")
+        : isNegotiation
+          ? `Quote ${negotiation?.quote_id ?? "—"}${amount !== undefined ? ` · ${formatMoney(amount)}` : ""}`
+          : `Invoice ${collections?.invoice_id ?? "—"}${amount !== undefined ? ` · ${formatMoney(amount)}` : ""}`;
 
   return (
     <article className="rounded-lg border border-border bg-background p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-xs font-medium uppercase tracking-wide text-accent">
-            {isLead ? "Lead follow-up" : isNegotiation ? "Negotiation" : "Collections"}
+            {isLead
+              ? "Lead follow-up"
+              : isNegotiation
+                ? "Negotiation"
+                : isEngagement
+                  ? "CRM engagement"
+                  : isDeal
+                    ? "CRM deal watch"
+                    : "Collections"}
           </p>
           <h4 className="mt-1 font-medium">{heading}</h4>
           <p className="mt-1 text-xs text-muted">{subheading}</p>
@@ -535,6 +586,19 @@ function RecommendationCard({
           )}
           {lead?.note && <p className="mt-2 text-xs leading-5 text-muted">Note: {lead.note}</p>}
         </>
+      ) : isCrm ? (
+        <div className="mt-3 grid gap-2 text-sm">
+          <p>
+            <span className="text-muted">{isEngagement ? "Situation: " : "Stall reason: "}</span>
+            {(isEngagement ? engagement?.situation : deal?.stall_reason) || "Not provided"}
+          </p>
+          {(isEngagement ? engagement?.action_plan : deal?.action_plan) && (
+            <p>
+              <span className="text-muted">Action plan: </span>
+              {isEngagement ? engagement?.action_plan : deal?.action_plan}
+            </p>
+          )}
+        </div>
       ) : (
         <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
           <p>
