@@ -665,3 +665,18 @@ def test_tool_evidence_card_carries_the_last_message():
     }
     frame = tool_evidence("get_customer360", result)
     assert frame["customer_card"]["last_message"] == "Too expensive"
+
+
+@pytest.mark.asyncio
+async def test_detail_tool_fresh_flag_forces_a_live_refetch(stub):
+    """The user's pattern: DB first, but 'latest' means the API - a
+    fresh=true call must bypass even a fresh cache copy."""
+    db = CacheDb()
+    first = await get_customer360("665f2ab1c360", "Lead", database=db)
+    assert first["from_cache"] is False and stub.detail_calls == 1
+    forced = await get_customer360("665f2ab1c360", "Lead", fresh=True, database=db)
+    assert forced["from_cache"] is False
+    assert stub.detail_calls == 2  # the API was asked again, cache skipped
+    # and a normal call after that is served from the refreshed copy
+    third = await get_customer360("665f2ab1c360", "Lead", database=db)
+    assert third["from_cache"] is True and stub.detail_calls == 2
