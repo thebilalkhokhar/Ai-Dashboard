@@ -115,9 +115,14 @@ records). On top of that store:
   `DELETE /api/chats/{thread_id}` removes it (usage/audit logs stay).
 - The **Chats tab** lists them in the app; opening one restores its
   saved turns in the Command Center and continues that same thread.
-  The chat panel also restores the current conversation on load: the
-  thread id is kept in `localStorage` (previously `sessionStorage`,
-  which died with the tab session).
+  The chat panel itself shows the CURRENT session's conversation only:
+  the thread id is kept in `sessionStorage`, so a refresh inside the
+  session keeps the conversation, a new visit starts fresh, and older
+  conversations never reopen themselves in the panel - they live in
+  the Chats tab and are opened from there on demand. (One intermediate
+  build kept the id in `localStorage` and restored the previous
+  session's chat automatically; that behavior was reverted on the
+  owner's instruction - the archive is the Chats tab's job.)
 - **New chat** starts a fresh thread; the old one stays stored.
 - The `recall_conversations` tool searches the stored chats, so JARVIS
   answers "what did we discuss about X" from real past exchanges. Its
