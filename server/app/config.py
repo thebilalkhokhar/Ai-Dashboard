@@ -46,6 +46,19 @@ class Settings(BaseSettings):
     ERP_BASE_URL: str = "https://erp.print247.us"
     ERP_REFRESH_TOKEN: str = ""
 
+    # --- Customer 360 (the Zoho-synced CRM backend; read endpoints only) ---
+    # Auth is a real user's email + password traded for a 7-day JWT at
+    # POST /api/auth/login - there is no API key. The credentials live only
+    # in server/.env; the client caches the token in Redis like the ERP one.
+    C360_BASE_URL: str = "https://zoho-ai-backend.vercel.app/api"
+    C360_EMAIL: str = ""
+    C360_PASSWORD: str = ""
+    # Their serverless backend answers a warm detail call in ~8s but a cold
+    # one can take over a minute, so reads get a long timeout and every
+    # detail payload is cached in Mongo for this many minutes.
+    C360_TIMEOUT_SECONDS: float = 120.0
+    C360_CACHE_MINUTES: int = 30
+
     # --- How far back the ingestion goes (YYYY-MM-DD). Default: 12 months ago ---
     INGEST_FROM: str = Field(default_factory=lambda: months_ago(12).isoformat())
 
