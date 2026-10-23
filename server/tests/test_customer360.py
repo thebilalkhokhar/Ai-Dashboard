@@ -273,9 +273,14 @@ def test_jwt_expiry_reads_exp():
 
 
 def test_client_has_no_write_methods():
-    # trigger-call / save-draft / analysis must not be reachable at all.
-    for name in ("trigger_call", "save_draft", "analysis", "trigger", "call_customer"):
+    # The write endpoints must not be reachable at all: trigger-call
+    # places a real phone call, save-draft writes into a rep's mailbox.
+    for name in ("trigger_call", "save_draft", "trigger", "call_customer"):
         assert not hasattr(Customer360Client, name)
+    # fetch_analysis exists by the user's explicit Oct 24 order (chat
+    # shows the CRM's analysis when he names a record and asks for it);
+    # it is a GET and its output is labeled, never a verified fact.
+    assert hasattr(Customer360Client, "fetch_analysis")
 
 
 # ------------------------------------------------------------------ tools
@@ -300,6 +305,21 @@ class StubClient:
         if self.error:
             raise self.error
         return self.payload
+
+    async def fetch_analysis(self, record_id, record_type):
+        if self.error:
+            raise self.error
+        return {
+            "success": True,
+            "apiKeyStatus": getattr(self, "api_status", "Verified"),
+            "analysis": {
+                "followUpRequired": True,
+                "urgency": "Urgent",
+                "reasoning": "Customer has an unpaid invoice 14 days overdue.",
+                "actionNeeded": "Follow up on the overdue invoice.",
+                "emailDraft": {"subject": "Following up", "body": "Hi Ismat,"},
+            },
+        }
 
     async def list_page(self, module, page=1, limit=100, search=""):
         if self.error:
@@ -506,3 +526,40 @@ async def test_get_crm_payments_tool_and_its_failure_shape(stub):
         tools_module._c360_client = original
     assert result["available"] is False
     assert result["results"] == []
+
+
+# ------------------------------------------------------------- CRM analysis
+
+@pytest.mark.asyncio
+async def test_analysis_tool_passes_verified_output_through_labeled(stub):
+    from app.agents.chat_tools import get_customer360_analysis
+
+    result = await get_customer360_analysis("665f2ab1c360", "Lead")
+    assert result["available"] is True
+    assert result["is_real_ai"] is True
+    assert result["ai_status"] == "Verified"
+    assert result["analysis"]["urgency"] == "Urgent"
+    assert "CRM's own AI analysis" in result["note"]
+
+
+@pytest.mark.asyncio
+async def test_analysis_tool_flags_fallback_mode_as_placeholder(monkeypatch):
+    from app.agents.chat_tools import get_customer360_analysis
+
+    client = StubClient()
+    client.api_status = "Failed"
+    monkeypatch.setattr(chat_tools, "_c360_client", lambda: client)
+    result = await get_customer360_analysis("665f2ab1c360", "Lead")
+    assert result["available"] is True
+    assert result["is_real_ai"] is False
+    assert "placeholder" in result["note"]
+
+
+@pytest.mark.asyncio
+async def test_analysis_tool_reports_unavailability(monkeypatch):
+    from app.agents.chat_tools import get_customer360_analysis
+
+    client = StubClient(error=Customer360Error("network error: ReadTimeout"))
+    monkeypatch.setattr(chat_tools, "_c360_client", lambda: client)
+    result = await get_customer360_analysis("665f2ab1c360", "Lead")
+    assert result["available"] is False
