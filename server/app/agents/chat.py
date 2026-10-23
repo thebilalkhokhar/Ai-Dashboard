@@ -158,6 +158,7 @@ class ChatState(TypedDict, total=False):
     retry: bool
     last_query: dict
     query_context: dict
+    validation_replaced: bool
     business_date: Any
     database: Any
     events: Any
@@ -1068,6 +1069,41 @@ def _pending_from_results(results: list[dict]) -> dict | None:
     return None
 
 
+def _answer_anchored_context(contexts: list[dict], final_text: str) -> dict | None:
+    """Which of a turn's paged queries a follow-up must continue.
+
+    A turn can page more than once - the asked-for list, then a wider call
+    to check a total - and the LAST call is not necessarily the list the
+    answer offered to continue. Recording that wider call once sent a
+    confirmed "next page" to the wrong (unfiltered) query entirely: the
+    fetched page contradicted the answer the user had confirmed, every
+    figure failed validation, and each "yes" chained the same wrong page
+    forward. So the record is anchored to the delivered answer: among the
+    contexts whose total the answer actually states, the continuation is
+    the smallest such view (the filtered list the offer was about, not a
+    superset it was counted against). No stated total -> the last context,
+    as before.
+    """
+    if not contexts:
+        return None
+    if final_text:
+        anchored = [
+            ctx
+            for ctx in contexts
+            if isinstance(ctx.get("total_count"), int)
+            and (
+                str(ctx["total_count"]) in final_text
+                or f"{ctx['total_count']:,}" in final_text
+            )
+        ]
+        if anchored:
+            smallest = min(ctx["total_count"] for ctx in anchored)
+            for ctx in reversed(anchored):
+                if ctx["total_count"] == smallest:
+                    return ctx
+    return contexts[-1]
+
+
 def _pending_from_context(context: dict | None) -> dict | None:
     if context and context.get("has_more") and context.get("next_offset") is not None:
         return {
@@ -1364,6 +1400,7 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
         count = 0
         regen_count = 0
         validation_started = False
+        validation_replaced = False
         usage = empty_usage()
         final_text = ""
         emitted_tokens = 0
@@ -1619,6 +1656,7 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
                     task_id=task_id, type="chat.validation_completed", agent_id="chat",
                     payload={"outcome": "replaced"},
                 )
+            validation_replaced = True
             final_text = _evidence_summary(results, period_phrase) or _fallback_text(_last_user_text(messages))
             break
 
@@ -1629,9 +1667,14 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
             "usage": usage,
             "final_text": final_text,
             "emitted_tokens": emitted_tokens,
+            "validation_replaced": validation_replaced,
             # a turn that paged replaces the record; one that did not leaves the
-            # previous query in place, so "yes" can still resume it
-            "query_context": contexts[-1] if contexts else last_query,
+            # previous query in place, so "yes" can still resume it. The record
+            # is the query the delivered answer was about, not just the last
+            # paged call the turn happened to make.
+            "query_context": (
+                _answer_anchored_context(contexts, final_text) if contexts else last_query
+            ),
         }
 
     graph = StateGraph(ChatState)
@@ -1730,6 +1773,7 @@ async def execute_chat(
         "tokens": result.get("usage") or empty_usage(),
         "emitted_tokens": int(result.get("emitted_tokens") or 0),
         "query_context": result.get("query_context") or None,
+        "validation_replaced": bool(result.get("validation_replaced")),
     }
 
 
@@ -1906,6 +1950,18 @@ async def run_chat(
                 _pending_from_results(outcome.get("tool_results") or [])
                 or _pending_from_context(outcome.get("query_context"))
             )
+        # A confirmed retrieval whose answer the validator had to discard
+        # must not chain forward: the record demonstrably does not continue
+        # the conversation the user is having, and keeping it would serve
+        # the same wrong page on every further "yes" (the live failure this
+        # guards against looped exactly that way). Clear the pending action
+        # AND the recorded query, so the next message re-derives the
+        # follow-up from the conversation itself.
+        continuation_broken = bool(
+            executed_pending and outcome.get("validation_replaced")
+        )
+        if continuation_broken:
+            new_pending = None
         updated_turns = trim_turns(
             [
                 *turns,
@@ -1915,7 +1971,7 @@ async def run_chat(
         thread_update = {
                     "turns": updated_turns,
                     # only the bounded page record (tool, filters, cursor) - never rows
-                    "last_query": outcome.get("query_context") or last_query,
+                    "last_query": None if continuation_broken else (outcome.get("query_context") or last_query),
                     # the bounded pending retrieval (kind, ids, cursor) - never rows
                     "pending_action": new_pending,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
