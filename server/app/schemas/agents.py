@@ -83,6 +83,41 @@ class LeadFollowupOutput(BaseModel):
     evidence: str = Field(description="Which input facts the judgment used, one sentence")
 
 
+class CrmEngagementOutput(BaseModel):
+    """CRM Engagement agent output for one record whose last interaction
+    came FROM the customer and has waited unanswered (direction computed
+    by Python from the CRM timeline, never by the model).
+
+    `record_id`, `contact_name`, `company` and `waiting_days` are filled
+    in by the pipeline from the input - a CRM record is not an ERP
+    customer, so there is no customer_id."""
+
+    record_id: str = ""
+    contact_name: Optional[str] = None
+    company: Optional[str] = None
+    waiting_days: int = 0
+    situation: str = Field(description="What the customer is waiting on, input facts only")
+    action_plan: str = Field(description="What a human rep should do next")
+    message_draft: str = Field(max_length=600, description="max 80 words, for a human rep to send")
+    confidence: Confidence
+    evidence: str = Field(description="Which input facts the judgment used, one sentence")
+
+
+class CrmDealWatchOutput(BaseModel):
+    """CRM Deal Watch agent output for one stalled CRM project or
+    estimate (idle days and amount computed by Python from the synced
+    rows; the pipeline fills the identity fields)."""
+
+    record_id: str = ""
+    account_name: Optional[str] = None
+    deal_name: Optional[str] = None
+    stall_reason: str = Field(description="Why this deal is most likely stalled, input facts only")
+    action_plan: str = Field(description="What a human rep should do next")
+    message_draft: str = Field(max_length=600, description="max 80 words, for a human rep to send")
+    confidence: Confidence
+    evidence: str = Field(description="Which input facts the judgment used, one sentence")
+
+
 class Priority(BaseModel):
     customer_name: str
     why: str
