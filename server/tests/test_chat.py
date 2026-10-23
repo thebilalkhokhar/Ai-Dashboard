@@ -358,6 +358,17 @@ def test_numeric_guard_accepts_verbatim_quotes_from_record_text():
         {"quantity": "25k", "size": "360gsm", "material": "kraft"},
     ]}}]
     assert validate_numeric_claims("Quantity: 25k, size: 360.", results) == []
+    # the same quote inside a sentence of record text: word boundaries in
+    # the source are real boundaries, not glue
+    sentence = [{"tool": "search_records", "result": {"items": [
+        {"description": "I need 25k boxes for my store, please quote"},
+    ]}}]
+    assert validate_numeric_claims("Quantity: 25k.", sentence) == []
+    # but the tail of a longer suffixed number is still not a quote
+    longer_k = [{"tool": "search_records", "result": {"items": [
+        {"description": "I need 125k boxes"},
+    ]}}]
+    assert validate_numeric_claims("Quantity: 25k.", longer_k)
     # an invented suffixed figure is still rejected - it stands in no string
     assert validate_numeric_claims("Quantity: 40k.", results)
     # the tail of a longer number is not a quote of it
