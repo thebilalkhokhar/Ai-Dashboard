@@ -443,7 +443,7 @@ def published_events(redis: FakeRedis) -> list[tuple[str, Any]]:
 
 async def seed_previous_run(database, scheduler: DashboardScheduler, now: datetime) -> None:
     """Store the current item hashes as if the agent had just finished a run."""
-    negotiation, collections, leads = await scheduler._current_items(now)
+    negotiation, collections, leads, _crm_eng, _crm_deals = await scheduler._current_items(now)
     assert negotiation and collections and leads  # fixtures produce all three signals
     database.agent_runs.docs.append(
         {

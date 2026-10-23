@@ -484,7 +484,10 @@ async def test_registry_lists_only_real_capabilities_and_starts_idle(clean_servi
     service, _, _ = make_service()
     _install(service)
     agents = await agents_with_status(service)
-    assert [a["id"] for a in agents] == ["master", "negotiation", "collections", "lead_followup", "chat"]
+    assert [a["id"] for a in agents] == [
+        "master", "negotiation", "collections", "lead_followup",
+        "crm_engagement", "crm_deal_watch", "chat",
+    ]
     for agent in agents:
         assert agent["status"] == "idle"
         assert agent["status_source"] == "none"
@@ -527,7 +530,10 @@ def test_agents_and_tasks_endpoints_return_real_state(monkeypatch, clean_service
         agents = client.get("/api/agents").json()["agents"]
         tasks = client.get("/api/tasks").json()["tasks"]
 
-    assert {a["id"] for a in agents} == {"master", "negotiation", "collections", "lead_followup", "chat"}
+    assert {a["id"] for a in agents} == {
+        "master", "negotiation", "collections", "lead_followup",
+        "crm_engagement", "crm_deal_watch", "chat",
+    }
     assert tasks and tasks[0]["task_id"] == "seed-task"
 
 
