@@ -188,6 +188,10 @@ async def test_engagement_items_only_when_the_customer_wrote_last():
     assert len(items) == 1
     assert items[0]["item"]["waiting_days"] == 5
     assert items[0]["item"]["contact_name"] == "Ismat Khalil"
+    # the channel and the customer's own words ride the item, so the
+    # saved output (and its review card) can show them verbatim
+    assert items[0]["item"]["channel"] == "WhatsApp"
+    assert items[0]["item"]["last_customer_message"] == "I need 500 boxes - what is the price?"
 
     cache_doc["payload"] = detail_payload("Outbound")
     db2 = FakeDatabase(customer360_leads=[lead_row], customer360_cache=[cache_doc])
@@ -203,6 +207,7 @@ def test_engagement_payload_shape():
     recent = payload["waiting"]["recent_messages"]
     assert recent[0]["direction"] == "Inbound"
     assert recent[0]["content"] == "I need 500 boxes - what is the price?"
+    assert payload["waiting"]["channel"] == "WhatsApp"
     import json
 
     blob = json.dumps(payload).lower()

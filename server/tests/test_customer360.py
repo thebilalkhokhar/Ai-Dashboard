@@ -19,6 +19,7 @@ from app.agents import chat_tools
 from app.agents.chat_tools import (
     CHAT_TOOLS,
     CHAT_TOOL_MAP,
+    find_customer,
     get_crm_payments,
     get_customer360,
     search_customer360,
@@ -680,3 +681,74 @@ async def test_detail_tool_fresh_flag_forces_a_live_refetch(stub):
     # and a normal call after that is served from the refreshed copy
     third = await get_customer360("665f2ab1c360", "Lead", database=db)
     assert third["from_cache"] is True and stub.detail_calls == 2
+
+
+# ------------------------------------------- counts, cards, WhatsApp
+
+class _FlatCollection:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def find(self, query, projection=None):
+        return self
+
+    async def to_list(self, _limit):
+        return list(self._rows)
+
+
+class _FlatDb:
+    def __init__(self, rows):
+        self.quotes_flat = _FlatCollection(rows)
+        self.orders_flat = _FlatCollection([])
+        self.payments_flat = _FlatCollection([])
+
+
+@pytest.mark.asyncio
+async def test_find_customer_reports_python_counts():
+    """A truthful '2 matches' in an answer needs the count to be a
+    number a tool returned - the list's length alone was rejected by
+    the guard live (Oct 24)."""
+    rows = [
+        {"customer": {"id": 5356, "company_name": "Arellano Jerky"}, "customer_id": 5356},
+        {"customer": {"id": 9001, "company_name": "Arellano Foods"}, "customer_id": 9001},
+    ]
+    result = await find_customer("Arellano", database=_FlatDb(rows))
+    assert result["match_count"] == 2
+    assert result["returned"] == 2
+    assert len(result["matches"]) == 2
+
+
+def test_tool_evidence_builds_the_analysis_card():
+    from app.agents.chat import tool_evidence
+
+    result = {
+        "source": "customer360",
+        "ai_status": "Verified",
+        "is_real_ai": True,
+        "analysis": {
+            "followUpRequired": True,
+            "urgency": "High",
+            "reasoning": "The customer asked for a price two weeks ago and heard nothing.",
+            "actionNeeded": "Send the quote today.",
+            "emailDraft": {"subject": "Your quote", "body": "Hi..."},
+        },
+    }
+    frame = tool_evidence("get_customer360_analysis", result)
+    card = frame["analysis_card"]
+    assert card["urgency"] == "High"
+    assert card["follow_up_required"] is True
+    assert card["ai_status"] == "Verified"
+    assert card["has_email_draft"] is True
+
+
+def test_customer_card_counts_whatsapp_separately():
+    from app.agents.chat import tool_evidence
+
+    result = {
+        "source": "customer360",
+        "entity": {"name": "Frank Jr", "record_type": "Contact"},
+        "timeline_count": 56,
+        "timeline_by_type": {"WhatsApp": 54, "Email": 2},
+    }
+    card = tool_evidence("get_customer360", result)["customer_card"]
+    assert card["counts"]["whatsapp"] == 54
