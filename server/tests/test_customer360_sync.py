@@ -137,3 +137,15 @@ async def test_sync_all_logs_the_run():
     assert summary["complete"] is True
     assert summary["modules"]["leads"]["rows_seen"] == 3
     assert db["customer360_sync_runs"].inserted
+
+
+@pytest.mark.asyncio
+async def test_sync_all_records_the_run_mode():
+    db = FakeDb()
+    summary = await sync.sync_all(db, StubListClient(), ("leads",), mode="auto")
+    assert summary["mode"] == "auto"
+    assert db["customer360_sync_runs"].inserted[0]["mode"] == "auto"
+    # and the default stays a manual run
+    db2 = FakeDb()
+    summary2 = await sync.sync_all(db2, StubListClient(), ("leads",))
+    assert summary2["mode"] == "manual"
