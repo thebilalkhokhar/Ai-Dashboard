@@ -1026,7 +1026,14 @@ _CONFIRM_PREFIXES = (
     "haan ",
 )
 _ALL_PHRASES = ("show all", "show me all", "fetch all", "get all", "all of them", "everything")
-_NEXT_PAGE_PHRASES = ("next page", "fetch the next", "fetch next page", "more", "show more")
+_NEXT_PAGE_PHRASES = (
+    "next page", "fetch the next", "fetch next page", "more", "show more",
+    # the phrasing the assistant's own offers suggest ("tell me 'show next
+    # page'") - before Oct 23 it matched nothing here, so the executor never
+    # ran and the model re-called a tool steered by the recorded query
+    "show next page", "show the next page", "show next", "get next page",
+    "load next page",
+)
 
 
 def _confirmation_kind(message: str) -> str | None:

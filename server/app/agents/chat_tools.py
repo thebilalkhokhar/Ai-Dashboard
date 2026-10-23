@@ -152,7 +152,13 @@ class TopItemsArgs(ToolArgs):
 
 class StuckLeadsArgs(ToolArgs):
     days: int | None = Field(default=None, ge=1, le=90)
-    limit: int | None = Field(default=None, ge=1, le=25)
+    limit: int | None = Field(default=None, ge=1, le=50)
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="How many matching rows to skip before this page. To fetch the rest of a result set, "
+        "re-call the same tool with the same filters and the previous page's next_offset.",
+    )
 
 
 class RepSummaryArgs(DateRangeArgs):
@@ -607,19 +613,30 @@ async def get_top_unpaid(limit: int = 5, database: Any = None) -> dict:
 
 
 async def get_stuck_leads(
-    days: int | None = None, limit: int | None = None, database: Any = None
+    days: int | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+    database: Any = None,
 ) -> dict:
     """Leads stuck before becoming an order. Read-only, Python-parsed.
 
     Same filter as GET /api/leads/stuck and the lead follow-up agent. No
     email or phone numbers are ever returned to the model.
+
+    Paged like the other record tools: this list is exactly the one a
+    follow-up ("show next page") must continue, so it carries the full
+    page block - when it was a head-only _top_n result it recorded no
+    continuation at all, and any other paged call in the same turn
+    silently became the recorded query instead (the Oct 23 failure where
+    "next page" fetched the unfiltered leads list).
     """
-    args = StuckLeadsArgs.model_validate({"days": days, "limit": limit})
+    args = StuckLeadsArgs.model_validate({"days": days, "limit": limit, "offset": offset})
     db = _database(database)
     now = datetime.now(timezone.utc)
     rows = await db.leads.find(processors.LEAD_STATUS_QUERY, processors.LEAD_FIELDS).to_list(50_000)
     stuck = processors.stuck_leads(rows, now, days=args.days)
     artwork_labels = {True: "Provided", False: "Missing", None: "Not stated"}
+    page_limit = args.limit or 10
     items = [
         {
             "lead_id": row["lead_id"],
@@ -635,15 +652,22 @@ async def get_stuck_leads(
             "artwork": artwork_labels[row["artwork_present"]],
             "missing": row["missing"],
         }
-        for row in stuck[: args.limit or 10]
+        for row in stuck[args.offset : args.offset + page_limit]
     ]
-    return _top_n(
-        {
-            "days": args.days or settings.LEAD_ACTIVE_DAYS,
-            "items": items,
-        },
+    result = _paginate(
+        _bounded(
+            {
+                "days": args.days or settings.LEAD_ACTIVE_DAYS,
+                "items": items,
+            }
+        ),
         total=len(stuck),
+        offset=args.offset,
+        limit=page_limit,
     )
+    if args.offset and not result["items"]:
+        result["note"] = "That offset is past the end of this result set; nothing more to fetch."
+    return result
 
 
 async def get_top_open_quotes(limit: int = 5, database: Any = None) -> dict:
@@ -2469,7 +2493,7 @@ CHAT_TOOLS = [
     ChatTool("get_rep_summary", "Get Python-computed quote, order, and payment counts and totals for one rep and date range.", RepSummaryArgs, get_rep_summary),
     ChatTool(
         "get_stuck_leads",
-        "Get leads that are stuck before becoming an order: status New or Attempted to Contact, recent activity, a description present, not flagged by the lead desk. Returns Python-parsed product/quantity/size/material/finish, the missing-field list and artwork state (Provided/Missing/Not stated). No email or phone numbers are returned.",
+        "Get leads that are stuck before becoming an order: status New or Attempted to Contact, recent activity, a description present, not flagged by the lead desk. Returns Python-parsed product/quantity/size/material/finish, the missing-field list and artwork state (Provided/Missing/Not stated). No email or phone numbers are returned." + PAGING_NOTE,
         StuckLeadsArgs,
         get_stuck_leads,
     ),
