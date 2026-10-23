@@ -149,3 +149,13 @@ async def test_sync_all_records_the_run_mode():
     db2 = FakeDb()
     summary2 = await sync.sync_all(db2, StubListClient(), ("leads",))
     assert summary2["mode"] == "manual"
+
+
+@pytest.mark.asyncio
+async def test_sync_all_records_the_scope():
+    db = FakeDb()
+    summary = await sync.sync_all(
+        db, StubListClient(), ("leads",), max_pages=3, mode="auto", scope="recent"
+    )
+    assert summary["scope"] == "recent"
+    assert db["customer360_sync_runs"].inserted[0]["scope"] == "recent"
