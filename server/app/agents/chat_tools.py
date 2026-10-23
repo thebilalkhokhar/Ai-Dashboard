@@ -1784,6 +1784,59 @@ async def get_crm_payments(
         }
 
 
+async def get_customer360_analysis(
+    record_id: str, record_type: str, database: Any = None
+) -> dict:
+    """The CRM's own AI analysis for one record - explicit asks only.
+
+    The user ordered this on Oct 24: name a record in chat, say 'analyze
+    it', and the chat runs the CRM's analysis and shows it. The output is
+    their gpt-4o-mini's words (urgency, reasoning, a drafted email),
+    returned verbatim and labeled - it is NOT verified by this
+    dashboard's tools, and the note makes the model present it that way.
+    apiKeyStatus decides whether it is real AI output at all.
+    """
+    args = Customer360DetailArgs.model_validate(
+        {"record_id": record_id, "record_type": record_type}
+    )
+    try:
+        body = await _c360_client().fetch_analysis(args.record_id, args.record_type)
+    except Customer360Error as exc:
+        return {
+            "source": "customer360",
+            "available": False,
+            "record_id": args.record_id,
+            "record_type": args.record_type,
+            "note": f"Customer 360 analysis could not be reached: {exc}",
+        }
+    status = body.get("apiKeyStatus")
+    verified = status == "Verified"
+    note = (
+        "This is the Zoho CRM's own AI analysis (gpt-4o-mini), not a "
+        "figure verified by this dashboard's tools. Present it under a "
+        "label like 'CRM AI analysis', quoting its reasoning and email "
+        "draft as its words; never restate a number from it as a verified "
+        "fact."
+    )
+    if not verified:
+        note = (
+            f"The CRM's apiKeyStatus is {status!r}, not 'Verified': the "
+            "CRM is running in fallback/simulation mode, so this analysis "
+            "is a generic placeholder, NOT real AI output. Tell the user "
+            "that plainly before showing any of it. " + note
+        )
+    return {
+        "source": "customer360",
+        "available": True,
+        "record_id": args.record_id,
+        "record_type": args.record_type,
+        "ai_status": status,
+        "is_real_ai": verified,
+        "analysis": body.get("analysis") or {},
+        "note": note,
+    }
+
+
 async def get_record(collection: str, id: str, database: Any = None) -> dict:
     """One record by its business id, from a whitelisted read-only view."""
     args = RecordArgs.model_validate({"collection": collection, "id": id})
@@ -2742,6 +2795,12 @@ CHAT_TOOLS = [
         "Payments recorded in the Zoho CRM (Customer 360) for a date range, optionally filtered by a customer/name search. This is a SEPARATE ledger from the ERP payments tool: the CRM mirrors ERP payments (each row carries its erp_id) and also holds CRM-only payments, so for any question about payments received - today, this week, from a customer - call BOTH this and get_payments and report each ledger under its own label with its own total; NEVER add the two totals together and never report 'no payments' from one ledger alone. Receive dates are calendar dates with no clock time recorded; record_created_at is the CRM record's creation/sync time, not the payment time.",
         Customer360PaymentsArgs,
         get_crm_payments,
+    ),
+    ChatTool(
+        "get_customer360_analysis",
+        "Run the Zoho CRM's own AI follow-up analysis for ONE CRM record (record_id + record_type from search_customer360) and show it: urgency, reasoning, the action needed and a drafted email. Call this ONLY when the user names a record and explicitly asks for its analysis ('analyze him', 'is ki analysis karo') - it is slow (up to a minute cold), calls OpenAI on the CRM side every time, and is never a background or speculative call. Its words are the CRM AI's, not verified facts: present them labeled as the CRM AI analysis, and if ai_status is not 'Verified' say plainly that the CRM returned a placeholder analysis.",
+        Customer360DetailArgs,
+        get_customer360_analysis,
     ),
     ChatTool(
         "get_record",

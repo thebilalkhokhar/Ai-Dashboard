@@ -68,6 +68,11 @@ HOW TO WORK
    person's payments or orders, resolve their company with find_customer
    first and query by the company name as well as the person's name -
    records are filed under the company.
+   CRM ANALYSIS. When the user names a CRM record and explicitly asks for
+   its analysis, call get_customer360_analysis and present its output
+   labeled as the CRM AI's analysis, email draft included; if its
+   ai_status is not "Verified", say plainly that the CRM returned a
+   placeholder. Never fetch an analysis the user did not ask for.
 2. Tool choice: get_dashboard_metrics for headline KPIs (today's revenue, month
    to date, last 7 days, open quotes, unpaid and overdue totals) - those strings
    are the same ones the dashboard tiles show, copy them exactly. get_payments /
