@@ -354,6 +354,46 @@ def _harvest(node: Any, facts: set[float], identifiers: set[float], dates: set[s
         facts.add(float(match.group(0).replace(",", "")))
 
 
+def _verbatim_strings(node: Any, out: list[str]) -> None:
+    """Every string value the tools returned, normalized for quote matching.
+
+    Dates and ERP reference tokens are masked out first, exactly as the
+    numeric harvest treats them: a count may not borrow the '27' out of
+    '2026-10-27', so a date cannot mint a quotation either.
+    """
+    if isinstance(node, dict):
+        for value in node.values():
+            _verbatim_strings(value, out)
+    elif isinstance(node, (list, tuple)):
+        for value in node:
+            _verbatim_strings(value, out)
+    elif isinstance(node, str):
+        text = normalize_digits(node)
+        text = _DATE_STRING_RE.sub(" ", text)
+        text = _REFERENCE_TOKEN_RE.sub(" ", text)
+        out.append(re.sub(r"[\s,]+", "", text).lower())
+
+
+def _quoted_verbatim(token: str, verbatim: list[str]) -> bool:
+    """True when a written token is a verbatim quote of a returned string.
+
+    Record fields carry free text the model may legitimately copy word for
+    word - a quantity written '25k', a size written '360gsm'. The numeric
+    harvest reads those strings as component numbers ('25k' becomes the
+    fact 25), so the copied token, evaluated as a computed claim (25,000),
+    failed against data the backend itself returned and correct answers
+    were discarded (Oct 23 live failure, twice on the first question). A
+    token that stands in a returned string - at a left boundary, not the
+    tail of a longer number - is a quotation, not a claim. Money stays
+    strict: this rescue covers bare tokens only.
+    """
+    needle = re.sub(r"[\s,]+", "", normalize_digits(token)).lower().strip("$")
+    if not needle:
+        return False
+    pattern = re.compile(r"(?<![0-9a-z.])" + re.escape(needle) + r"(?![0-9])")
+    return any(pattern.search(haystack) for haystack in verbatim)
+
+
 def allowed_numbers(tool_results: list[dict]) -> tuple[set[float], set[float], set[str]]:
     """(amounts/counts/days, ids, date strings) a chat answer may write.
 
@@ -431,6 +471,11 @@ def validate_numeric_claims(
     identifiers |= prior_ids
     dates |= prior_dates
 
+    verbatim: list[str] = []
+    _verbatim_strings({"tool_results": tool_results}, verbatim)
+    if prior_text:
+        _verbatim_strings({"prior": prior_text}, verbatim)
+
     scanned = text
 
     # 1) dates: only when the very same date exists in this turn's data
@@ -497,6 +542,8 @@ def validate_numeric_claims(
             continue
         if not _matches(value, tolerance, facts):
             if restates:
+                continue
+            if _quoted_verbatim(token, verbatim):
                 continue
             # A large figure that the tools returned as an id may still be
             # listed as one ('unpaid: 33245, 33407') even without the word
