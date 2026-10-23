@@ -5,6 +5,9 @@ tools never hand it to the model directly. `summarize_detail` computes
 every number here (section counts, money totals, the last interaction) -
 the same rule the rest of the dashboard follows: the LLM never does
 arithmetic, and every figure a tool returns can pass the numeric guard.
+It also carries a bounded `conversation` - the newest timeline items
+WITH their message bodies - because a count of messages is not the
+conversation the user asked to read.
 
 The cache exists because their serverless backend is slow when cold
 (~8s warm, over a minute cold). A fetched payload is stored whole in
@@ -14,6 +17,8 @@ is still better than no answer when the backend cannot be reached.
 
 from __future__ import annotations
 
+import ast
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -144,6 +149,54 @@ def _timeline(rows: list[dict]) -> dict:
     if dated:
         out["last_interaction"] = brief(dated[0][1])
     out["recent_interactions"] = [brief(row) for row in ordered[:5]]
+    out["conversation"] = _conversation(ordered)
+    return out
+
+
+def _metadata(row: dict) -> dict:
+    """Timeline metadata: a dict on some rows, a stringified dict on
+    others (both shapes verified live Oct 24)."""
+    meta = row.get("metadata")
+    if isinstance(meta, dict):
+        return meta
+    if isinstance(meta, str) and meta.strip():
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                parsed = parser(meta)
+            except Exception:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+    return {}
+
+
+def _conversation(ordered: list[dict]) -> list[dict]:
+    """The recent messages themselves, newest first: WhatsApp/SMS/email
+    bodies, note text and call outcomes, bounded (12 items, 600 chars a
+    body) so a huge history can never flood a chat answer. `content` is
+    the record's own text - the manager's core ask (Oct 24) is that chat
+    can show what was sent and what the customer replied, and until now
+    the summarizer dropped every body. For calls, the outcome lives in
+    content and the duration/transcript in metadata."""
+    out: list[dict] = []
+    for row in ordered[:12]:
+        content = str(row.get("content") or "").strip()
+        entry: dict[str, Any] = {
+            "type": row.get("type"),
+            "direction": row.get("direction"),
+            "at": row.get("timestamp") or row.get("createdAt"),
+            "title": str(row.get("title"))[:120] if row.get("title") is not None else None,
+            "content": content[:600] if content else None,
+        }
+        if row.get("type") == "Call":
+            meta = _metadata(row)
+            duration = meta.get("durationSeconds")
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+                entry["duration_seconds"] = duration
+            transcript = meta.get("transcript")
+            if isinstance(transcript, str) and transcript.strip():
+                entry["transcript"] = transcript.strip()[:600]
+        out.append(entry)
     return out
 
 
