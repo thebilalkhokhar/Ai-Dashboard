@@ -130,6 +130,12 @@ function CustomerCard({ card }: { card: CrmCustomerCard }) {
               : ""}
         </p>
       )}
+      {card.waiting && (
+        <p className="chat-360-last">
+          Waiting for a reply{card.waiting.channel ? ` on ${card.waiting.channel}` : ""}
+          {typeof card.waiting.days === "number" ? ` · ${card.waiting.days}d` : ""}
+        </p>
+      )}
       {card.last_message && <p className="chat-360-message">“{card.last_message}”</p>}
     </section>
   );
