@@ -132,6 +132,7 @@ const TOOL_PHRASES: Record<string, string> = {
   get_customer360: "Reviewing the CRM 360 view",
   get_crm_payments: "Reviewing CRM payment records",
   get_customer360_analysis: "Running the CRM AI analysis",
+  get_crm_follow_up_queue: "Checking who is waiting for a reply",
 };
 
 export function toolPhrase(toolName: unknown): string {
@@ -171,6 +172,7 @@ const TOOL_DOMAIN_AGENTS: Record<string, string> = {
   search_customer360: "crm_engagement",
   get_customer360: "crm_engagement",
   get_customer360_analysis: "crm_engagement",
+  get_crm_follow_up_queue: "crm_engagement",
   get_crm_payments: "crm_deal_watch",
 };
 
