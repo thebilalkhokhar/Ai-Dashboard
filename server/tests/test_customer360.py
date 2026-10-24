@@ -752,3 +752,89 @@ def test_customer_card_counts_whatsapp_separately():
     }
     card = tool_evidence("get_customer360", result)["customer_card"]
     assert card["counts"]["whatsapp"] == 54
+
+
+def test_detail_args_accept_the_crms_own_vocabulary():
+    """The live analysis calls died at validation (0 ms) because the
+    model passes the CRM's own key names and letter case. Every honest
+    shape must land on the canonical values."""
+    from app.agents.chat_tools import Customer360DetailArgs
+
+    args = Customer360DetailArgs.model_validate(
+        {"id": "665f2ab1c360", "type": "lead"}
+    )
+    assert args.record_id == "665f2ab1c360"
+    assert args.record_type == "Lead"
+    args = Customer360DetailArgs.model_validate(
+        {"record_id": 4902, "record_type": " CONTACT "}
+    )
+    assert args.record_id == "4902"
+    assert args.record_type == "Contact"
+    with pytest.raises(Exception):
+        Customer360DetailArgs.model_validate(
+            {"record_id": "x", "record_type": "Deal"}
+        )
+
+
+class _RunsCollection:
+    def __init__(self, doc):
+        self._doc = doc
+
+    async def find_one(self, query, sort=None):
+        return self._doc
+
+
+class _QueueDb:
+    def __init__(self, doc):
+        self.agent_runs = _RunsCollection(doc)
+
+
+@pytest.mark.asyncio
+async def test_follow_up_queue_reads_the_latest_run_whatsapp_first():
+    from app.agents.chat_tools import get_crm_follow_up_queue
+
+    run = {
+        "started_at": "2026-10-24T03:33:07+00:00",
+        "crm_engagement": [
+            {
+                "contact_name": "SMS Person",
+                "company": "Texts Co",
+                "channel": "SMS",
+                "waiting_days": 9,
+                "last_customer_message": "any update?",
+            },
+            {
+                "contact_name": "WA Person",
+                "company": None,
+                "channel": "WhatsApp",
+                "waiting_days": 2,
+                "last_customer_message": "price please",
+            },
+            {"contact_name": "Broken", "error": "boom", "channel": "WhatsApp"},
+        ],
+    }
+    result = await get_crm_follow_up_queue(database=_QueueDb(run))
+    assert result["waiting_total"] == 2
+    assert result["by_channel"] == {"SMS": 1, "WhatsApp": 1}
+    assert result["as_of"] == "2026-10-24T03:33:07+00:00"
+    # WhatsApp first even though its wait is shorter
+    assert result["queue"][0]["name"] == "WA Person"
+    assert result["queue"][0]["last_customer_message"] == "price please"
+
+
+def test_customer_card_marks_an_inbound_last_touch_as_waiting():
+    from app.agents.chat import tool_evidence
+    from datetime import datetime, timedelta, timezone
+
+    five_days_ago = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+    result = {
+        "source": "customer360",
+        "entity": {"name": "Ismat Khalil", "record_type": "Lead"},
+        "last_interaction": {
+            "type": "WhatsApp",
+            "at": five_days_ago,
+            "direction": "Inbound",
+        },
+    }
+    card = tool_evidence("get_customer360", result)["customer_card"]
+    assert card["waiting"] == {"channel": "WhatsApp", "days": 5}
