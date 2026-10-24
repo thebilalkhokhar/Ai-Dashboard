@@ -133,6 +133,7 @@ const TOOL_PHRASES: Record<string, string> = {
   get_crm_payments: "Reviewing CRM payment records",
   get_customer360_analysis: "Running the CRM AI analysis",
   get_crm_follow_up_queue: "Checking who is waiting for a reply",
+  get_crm_morning_briefing: "Preparing the morning briefing",
 };
 
 export function toolPhrase(toolName: unknown): string {
