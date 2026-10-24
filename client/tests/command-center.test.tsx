@@ -75,6 +75,9 @@ function submit(message: string) {
 beforeEach(() => {
   h.streams.length = 0;
   h.setSendHandler(null);
+  // each test is an independent browser session: a previous test's
+  // in-flight turn must not be there for the next mount to recover
+  window.sessionStorage.clear();
   vi.mocked(fetchAgents).mockResolvedValue(registryAgents());
   vi.mocked(fetchTasks).mockResolvedValue(taskList());
 });

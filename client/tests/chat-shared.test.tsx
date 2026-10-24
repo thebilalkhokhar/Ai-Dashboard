@@ -33,7 +33,7 @@ vi.mock("@/services/api", () => ({
   ),
 }));
 
-import { sendMessage } from "@/services/api";
+import { fetchChatThread, sendMessage } from "@/services/api";
 import { ChatInterface } from "@/components/chat-interface";
 import { ExecutionControllerProvider } from "@/components/command-center/execution-context";
 
@@ -56,6 +56,8 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.clearAllMocks();
+  vi.useRealTimers();
+  window.sessionStorage.clear();
 });
 
 describe("shared chat controller", () => {
@@ -84,6 +86,73 @@ describe("shared chat controller", () => {
     });
 
     expect(screen.getAllByText("Lead L-1 moved from New to Contacted.")).toHaveLength(2);
+  });
+
+  it("persists the in-flight turn so an interrupted view can re-attach", async () => {
+    renderBoth();
+    fireEvent.change(screen.getAllByLabelText("Message Biztek Assistant")[0], {
+      target: { value: "Who is waiting on WhatsApp?" },
+    });
+    fireEvent.click(screen.getAllByLabelText("Send message")[0]);
+
+    await act(async () => {
+      h.getHandler()!({ event: "task", data: { task_id: "task-777" } });
+    });
+
+    const raw = window.sessionStorage.getItem("biztek.active-turn.v1");
+    expect(raw).toBeTruthy();
+    const stored = JSON.parse(raw as string) as { taskId: string; prompt: string };
+    expect(stored.taskId).toBe("task-777");
+    expect(stored.prompt).toBe("Who is waiting on WhatsApp?");
+  });
+
+  it("re-attaches to a stored in-flight turn and fills its answer when it lands", async () => {
+    vi.useFakeTimers();
+    window.sessionStorage.setItem(
+      "biztek.active-turn.v1",
+      JSON.stringify({
+        turnId: "turn-old",
+        taskId: "task-777",
+        prompt: "Who is waiting on WhatsApp?",
+        threadId: "test-thread",
+        startedAt: Date.now(),
+      }),
+    );
+    const threadMock = vi.mocked(fetchChatThread);
+    // seed load + recovery probe: the question exists, its answer not yet
+    threadMock.mockResolvedValue({
+      thread_id: "test-thread",
+      title: "",
+      turns: [{ question: "Who is waiting on WhatsApp?", answer: "" }],
+      updated_at: null,
+    } as never);
+
+    render(
+      <ExecutionControllerProvider>
+        <ChatInterface />
+      </ExecutionControllerProvider>,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // the question is back on screen and the view is live again
+    expect(screen.getByText("Who is waiting on WhatsApp?")).toBeTruthy();
+    expect(screen.getByText("Working on your request")).toBeTruthy();
+
+    // the completed turn lands in storage; the poll fills the answer in
+    threadMock.mockResolvedValue({
+      thread_id: "test-thread",
+      title: "",
+      turns: [{ question: "Who is waiting on WhatsApp?", answer: "Two customers are waiting." }],
+      updated_at: null,
+    } as never);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    expect(screen.getByText("Two customers are waiting.")).toBeTruthy();
+    expect(window.sessionStorage.getItem("biztek.active-turn.v1")).toBeNull();
   });
 
   it("never leaks a raw tool identifier into either conversation", async () => {
