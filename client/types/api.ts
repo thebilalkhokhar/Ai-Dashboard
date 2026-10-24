@@ -519,6 +519,40 @@ export interface AgentRunStarted {
   status: "started";
 }
 
+// The CRM morning digest, computed by the backend over the local CRM
+// mirror + this run's CRM sections (yesterday, business date).
+export interface CrmDigest {
+  source?: string;
+  date: string;
+  payments: {
+    date: string;
+    count: number;
+    total_received: number | null;
+    top: Array<{ customer?: string | null; amount?: number | null }>;
+  };
+  waiting: {
+    total: number;
+    whatsapp_total: number;
+    top: Array<{
+      name?: string | null;
+      company?: string | null;
+      channel?: string | null;
+      waiting_days?: number | null;
+      last_customer_message?: string | null;
+    }>;
+  };
+  stalled_deals: {
+    total: number;
+    top: Array<{
+      name?: string | null;
+      account?: string | null;
+      amount?: number | null;
+      days_idle?: number | null;
+    }>;
+  };
+  as_of_run?: string | null;
+}
+
 export interface AgentRunBriefing {
   run_id: string;
   started_at: string;
@@ -532,6 +566,8 @@ export interface AgentRunBriefing {
   // optional: briefings saved before the CRM agents existed
   crm_engagement?: CrmEngagementOutput[];
   crm_deal_watch?: CrmDealWatchOutput[];
+  // attached by /api/briefing/latest; absent on older responses
+  crm_digest?: CrmDigest | null;
   master: MasterBriefing | null;
   usage: AgentUsage | null;
   errors: string[];
