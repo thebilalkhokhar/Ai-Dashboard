@@ -288,6 +288,8 @@ export interface CrmCustomerCard {
   last_interaction?: { type?: string; at?: string; direction?: string };
   // the record's actual last message body, excerpted by the backend
   last_message?: string;
+  // set when the last interaction was the customer's and is unanswered
+  waiting?: { channel?: string; days?: number };
 }
 
 // The CRM AI's own analysis verdict, projected by the backend from the
