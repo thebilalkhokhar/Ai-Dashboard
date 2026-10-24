@@ -168,6 +168,15 @@ async def latest_briefing() -> dict:
         return {"run_id": None, "message": "no agent run yet - POST /api/agents/run first"}
     doc = docs[0]
     doc.pop("_id", None)
+    # the CRM morning digest rides the briefing: yesterday's CRM
+    # payments + who is waiting + stalled deals, computed locally.
+    # A digest failure must never take the briefing down with it.
+    try:
+        from app.services.crm_digest import build_crm_digest
+
+        doc["crm_digest"] = await build_crm_digest(get_db())
+    except Exception:
+        doc["crm_digest"] = None
     return doc
 
 
