@@ -108,6 +108,52 @@ function createId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+// The in-flight turn is mirrored to session storage as soon as its task
+// id is known. If the view dies mid-run - a page reload, a discarded
+// background tab, a dev-server restart - the next provider mount
+// re-attaches to the same task (its event stream is resumable) and
+// waits for the stored answer, instead of stranding the question with
+// no live view and no animation (the user's Oct 24 report).
+const ACTIVE_TURN_STORAGE_KEY = "biztek.active-turn.v1";
+const RECOVERY_POLL_MS = 3000;
+const RECOVERY_TIMEOUT_MS = 180_000;
+
+interface StoredActiveTurn {
+  turnId: string;
+  taskId: string;
+  prompt: string;
+  threadId: string;
+  startedAt: number;
+}
+
+function readStoredActiveTurn(): StoredActiveTurn | null {
+  try {
+    const raw = window.sessionStorage.getItem(ACTIVE_TURN_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredActiveTurn;
+    if (
+      !parsed ||
+      typeof parsed.turnId !== "string" ||
+      typeof parsed.taskId !== "string" ||
+      typeof parsed.prompt !== "string" ||
+      typeof parsed.threadId !== "string"
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function clearStoredActiveTurn(): void {
+  try {
+    window.sessionStorage.removeItem(ACTIVE_TURN_STORAGE_KEY);
+  } catch {
+    // storage unavailable - recovery simply cannot persist
+  }
+}
+
 export function ExecutionControllerProvider({ children }: { children: ReactNode }) {
   const [turn, setTurn] = useState<ActiveTurn | null>(null);
   const [lastTurn, setLastTurn] = useState<ActiveTurn | null>(null);
@@ -180,6 +226,7 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
 
   const resetConversationView = useCallback(() => {
     if (closeTimer.current) clearTimeout(closeTimer.current);
+    clearStoredActiveTurn();
     turnRef.current = null;
     setTurn(null);
     setLastTurn(null);
@@ -311,6 +358,193 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
     },
     [updatePhase],
   );
+
+  // Mirror the in-flight turn to session storage (see the storage note
+  // above): written while it runs, cleared the moment it settles.
+  useEffect(() => {
+    if (!turn || !threadId) return;
+    if (turn.phase === "completed" || turn.phase === "failed" || !turn.taskId) {
+      if (turn.phase === "completed" || turn.phase === "failed") {
+        clearStoredActiveTurn();
+      }
+      return;
+    }
+    try {
+      window.sessionStorage.setItem(
+        ACTIVE_TURN_STORAGE_KEY,
+        JSON.stringify({
+          turnId: turn.turnId,
+          taskId: turn.taskId,
+          prompt: turn.prompt,
+          threadId,
+          startedAt: turn.startedAt,
+        } satisfies StoredActiveTurn),
+      );
+    } catch {
+      // storage unavailable - the live view still works this session
+    }
+  }, [turn, threadId]);
+
+  // Re-attach to a turn that was in flight when the previous view died.
+  const recoveryRef = useRef<{ turnId: string; assistantId: string }>({
+    turnId: "",
+    assistantId: "",
+  });
+  const recoveryAttemptedRef = useRef(false);
+  const recoveryTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopRecoveryTimer = useCallback(() => {
+    if (recoveryTimerRef.current) {
+      clearInterval(recoveryTimerRef.current);
+      recoveryTimerRef.current = null;
+    }
+  }, []);
+
+  const endRecovery = useCallback(() => {
+    stopRecoveryTimer();
+    recoveryRef.current = { turnId: "", assistantId: "" };
+    sendingRef.current = false;
+    setIsSending(false);
+    clearStoredActiveTurn();
+  }, [stopRecoveryTimer]);
+
+  // The answer itself travelled on the dead request's stream; the
+  // server stores it on the thread when the turn completes, so recovery
+  // polls the thread until it lands (the task's own events drive the
+  // live view meanwhile, through the normal resumable stream).
+  const startRecoveryPoll = useCallback(
+    (stored: StoredActiveTurn, forThreadId: string) => {
+      stopRecoveryTimer();
+      const deadline = Date.now() + RECOVERY_TIMEOUT_MS;
+      recoveryTimerRef.current = setInterval(() => {
+        void (async () => {
+          if (recoveryRef.current.turnId !== stored.turnId) return;
+          if (Date.now() > deadline) {
+            endRecovery();
+            setChatError("The answer did not come back after the view was interrupted.");
+            failTurn(stored.turnId, "The answer did not come back after the view was interrupted.");
+            return;
+          }
+          try {
+            const thread = await fetchChatThread(forThreadId);
+            const turns = thread.turns ?? [];
+            const lastStored = turns[turns.length - 1];
+            if (lastStored && lastStored.question === stored.prompt && lastStored.answer) {
+              const answer = lastStored.answer;
+              // captured now: endRecovery clears the ref before React
+              // runs this updater, and the updater must still find the
+              // bubble it is filling
+              const assistantId = recoveryRef.current.assistantId;
+              setMessages((current) =>
+                current.map((entry) =>
+                  entry.id === assistantId ? { ...entry, content: answer } : entry,
+                ),
+              );
+              endRecovery();
+              finishTurn(stored.turnId);
+            }
+          } catch {
+            // keep waiting; the deadline bounds the wait
+          }
+        })();
+      }, RECOVERY_POLL_MS);
+    },
+    [endRecovery, failTurn, finishTurn, stopRecoveryTimer],
+  );
+
+  useEffect(() => {
+    if (!threadId) return;
+    const stored = readStoredActiveTurn();
+    if (!stored || stored.threadId !== threadId) return;
+    if (recoveryAttemptedRef.current) {
+      // A strict-mode remount can clear the poll timer mid-recovery;
+      // restart it for the recovery already in progress.
+      if (
+        recoveryRef.current.turnId === stored.turnId &&
+        !recoveryTimerRef.current &&
+        turnRef.current?.turnId === stored.turnId
+      ) {
+        startRecoveryPoll(stored, threadId);
+      }
+      return;
+    }
+    recoveryAttemptedRef.current = true;
+    if (turnRef.current !== null || sendingRef.current) return;
+
+    void (async () => {
+      // If the finished turn already reached storage, the seeded
+      // messages show it - there is nothing to recover.
+      try {
+        const thread = await fetchChatThread(threadId);
+        const turns = thread.turns ?? [];
+        const lastStored = turns[turns.length - 1];
+        if (lastStored && lastStored.question === stored.prompt && lastStored.answer) {
+          clearStoredActiveTurn();
+          return;
+        }
+      } catch {
+        // fall through and recover from the task itself
+      }
+      // A second mount racing this one loses here: the winner has
+      // already committed the turn and marked the send in flight.
+      if (turnRef.current !== null || sendingRef.current) return;
+
+      const recovered: ActiveTurn = {
+        turnId: stored.turnId,
+        prompt: stored.prompt,
+        taskId: stored.taskId,
+        phase: "starting",
+        message: "",
+        startedAt: stored.startedAt,
+      };
+      const assistantId = createId();
+      recoveryRef.current = { turnId: stored.turnId, assistantId };
+      commit(recovered);
+      setLastTurn(recovered);
+      sendingRef.current = true;
+      setIsSending(true);
+      // The seeded turns may already end with this very question (the
+      // server stored it before its answer existed): reuse that pair -
+      // and its assistant bubble as the fill target - instead of
+      // appending a duplicate.
+      const existing = messagesRef.current;
+      const lastUserIndex = existing.map((entry) => entry.role).lastIndexOf("user");
+      const lastUser = lastUserIndex >= 0 ? existing[lastUserIndex] : undefined;
+      if (lastUser && lastUser.content === stored.prompt) {
+        const following = existing[lastUserIndex + 1];
+        if (following && following.role === "assistant") {
+          recoveryRef.current = { turnId: stored.turnId, assistantId: following.id };
+        } else {
+          setMessages([
+            ...existing,
+            { id: assistantId, role: "assistant" as const, content: "" },
+          ]);
+        }
+      } else {
+        setMessages([
+          ...existing,
+          { id: createId(), role: "user" as const, content: stored.prompt },
+          { id: assistantId, role: "assistant" as const, content: "" },
+        ]);
+      }
+      startRecoveryPoll(stored, threadId);
+    })();
+  }, [threadId, commit, startRecoveryPoll]);
+
+  // A recovered task that the server marks failed ends the recovery at
+  // once instead of polling until the deadline.
+  useEffect(() => {
+    const turnId = recoveryRef.current.turnId;
+    if (!turnId) return;
+    if (events.taskStatus === "failed" || events.taskStatus === "cancelled") {
+      endRecovery();
+      setChatError("That request did not complete.");
+      failTurn(turnId, "That request did not complete.");
+    }
+  }, [events.taskStatus, endRecovery, failTurn]);
+
+  // A pending recovery poll must not outlive the provider.
+  useEffect(() => stopRecoveryTimer, [stopRecoveryTimer]);
 
   // Hiding the view only. There is no cancel endpoint anywhere in this system,
   // so dismissing must never imply backend work stopped.
