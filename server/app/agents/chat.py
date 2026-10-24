@@ -78,6 +78,15 @@ HOW TO WORK
    labeled as the CRM AI's analysis, email draft included; if its
    ai_status is not "Verified", say plainly that the CRM returned a
    placeholder. Never fetch an analysis the user did not ask for.
+   FOLLOW-UP QUEUE. When the user asks who is waiting for a reply -
+   overall, or on WhatsApp in particular - call get_crm_follow_up_queue
+   and report the queue it returns: each customer's channel, how long
+   they have waited, and their last message. Date the answer with the
+   result's as_of instead of implying it is live.
+   EMPTY FIELDS. Never print an empty field, the word null, or a raw
+   placeholder such as "(null)" in an answer: leave the line out, or say
+   in plain words that the record has none (for example, that the CRM
+   has no company on file for them).
    CONVERSATIONS. get_customer360 returns a `conversation`: the record's
    recent messages WITH their bodies - WhatsApp, SMS and email text,
    notes, and call outcomes - newest first, each marked Inbound (from
@@ -1023,6 +1032,19 @@ def _money_value(result: dict, key: str) -> Any:
     return None
 
 
+def _age_days(value: Any) -> int | None:
+    """Whole days between an ISO timestamp and now (None when unusable)."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(0, (datetime.now(timezone.utc) - parsed).days)
+
+
 def _customer_card(result: dict) -> dict | None:
     """The bounded Customer 360 card a chat answer is rendered with.
 
@@ -1075,6 +1097,18 @@ def _customer_card(result: dict) -> dict | None:
         }
         if brief:
             card["last_interaction"] = brief
+        # an inbound last interaction means this customer is WAITING for
+        # a reply - the card says so, with the channel they used
+        # (WhatsApp above all) and how long they have waited
+        if str(last.get("direction") or "").strip().lower() == "inbound":
+            waiting: dict[str, Any] = {}
+            if isinstance(last.get("type"), str) and last["type"]:
+                waiting["channel"] = last["type"]
+            days = _age_days(last.get("at"))
+            if days is not None:
+                waiting["days"] = days
+            if waiting:
+                card["waiting"] = waiting
     conversation = result.get("conversation")
     if isinstance(conversation, list) and conversation:
         first = conversation[0]

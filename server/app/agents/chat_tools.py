@@ -14,7 +14,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Any, Callable, Type
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app import db as app_db
 from app.config import settings
@@ -897,11 +897,37 @@ class Customer360SearchArgs(ToolArgs):
 
 
 class Customer360DetailArgs(ToolArgs):
-    record_id: str = Field(min_length=1, max_length=40)
-    record_type: str = Field(pattern="^(Lead|Contact|Customer)$")
+    # The CRM's own vocabulary leaks into the model's calls: it passes
+    # `type` for record_type and `id` for record_id, in any letter case -
+    # the live CRM analysis calls died at argument validation (0 ms,
+    # twice, Oct 24). Accept every honest shape; stored values stay
+    # canonical.
+    record_id: str = Field(
+        validation_alias=AliasChoices("record_id", "id"),
+        min_length=1,
+        max_length=40,
+    )
+    record_type: str = Field(
+        validation_alias=AliasChoices("record_type", "type"),
+        pattern="^(Lead|Contact|Customer)$",
+    )
     # the user's Oct 24 pattern: the mirror/cache serves first, but a
     # request for the latest data must be able to force a live fetch
     fresh: bool = False
+
+    @field_validator("record_id", mode="before")
+    @classmethod
+    def _coerce_record_id(cls, value: Any) -> Any:
+        return str(value).strip() if isinstance(value, (int, float)) else value
+
+    @field_validator("record_type", mode="before")
+    @classmethod
+    def _normalize_record_type(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return {"lead": "Lead", "contact": "Contact", "customer": "Customer"}.get(
+                value.strip().lower(), value.strip()
+            )
+        return value
 
 
 class Customer360PaymentsArgs(DateRangeArgs):
@@ -1861,6 +1887,48 @@ async def get_customer360_analysis(
         "is_real_ai": verified,
         "analysis": body.get("analysis") or {},
         "note": note,
+    }
+
+
+async def get_crm_follow_up_queue(database: Any = None) -> dict:
+    """Who is waiting for a reply - the CRM Engagement agent's queue.
+
+    Reads the LATEST agent run's crm_engagement section: the same
+    Python-computed items the review page shows (their last interaction
+    was inbound and unanswered), each with the channel the customer is
+    waiting on and their actual last words. No live CRM call: freshness
+    is the run's own started_at, returned as as_of so the answer can
+    date itself honestly. WhatsApp sorts first - the channel the team
+    answers fastest - then the longest wait."""
+    db = _database(database)
+    run = await db.agent_runs.find_one({}, sort=[("started_at", -1)])
+    items = (run or {}).get("crm_engagement") or []
+    queue: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict) or item.get("error"):
+            continue
+        queue.append(
+            {
+                "name": item.get("contact_name"),
+                "company": item.get("company"),
+                "channel": item.get("channel"),
+                "waiting_days": item.get("waiting_days"),
+                "last_customer_message": item.get("last_customer_message"),
+            }
+        )
+    queue.sort(
+        key=lambda row: (row["channel"] != "WhatsApp", -(row["waiting_days"] or 0))
+    )
+    by_channel: dict[str, int] = {}
+    for row in queue:
+        if row["channel"]:
+            by_channel[row["channel"]] = by_channel.get(row["channel"], 0) + 1
+    return {
+        "source": "crm_follow_up_queue",
+        "as_of": (run or {}).get("started_at"),
+        "waiting_total": len(queue),
+        "by_channel": by_channel,
+        "queue": queue[:10],
     }
 
 
@@ -2828,6 +2896,12 @@ CHAT_TOOLS = [
         "Run the Zoho CRM's own AI follow-up analysis for ONE CRM record (record_id + record_type from search_customer360) and show it: urgency, reasoning, the action needed and a drafted email. Call this ONLY when the user names a record and explicitly asks for its analysis ('analyze him', 'is ki analysis karo') - it is slow (up to a minute cold), calls OpenAI on the CRM side every time, and is never a background or speculative call. Its words are the CRM AI's, not verified facts: present them labeled as the CRM AI analysis, and if ai_status is not 'Verified' say plainly that the CRM returned a placeholder analysis.",
         Customer360DetailArgs,
         get_customer360_analysis,
+    ),
+    ChatTool(
+        "get_crm_follow_up_queue",
+        "List the customers currently waiting for a reply - the CRM Engagement queue from the latest agent run - with the channel each customer is waiting on (WhatsApp first), how many days they have waited, and the customer's own last message. Use for 'who is waiting', 'WhatsApp follow-ups', 'follow-up queue' questions. Costs no CRM call; the result's as_of is when the queue was computed - date the answer with it.",
+        EmptyArgs,
+        get_crm_follow_up_queue,
     ),
     ChatTool(
         "get_record",
