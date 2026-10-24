@@ -244,6 +244,7 @@ export function AgentReview() {
   });
 
   const master = briefing?.master ?? null;
+  const digest = briefing?.crm_digest ?? null;
 
   return (
     <section aria-labelledby="review-title" className="rounded-xl border border-border bg-surface">
@@ -393,6 +394,58 @@ export function AgentReview() {
                 </div>
               </section>
             ) : null}
+
+            {digest && (
+              <section aria-labelledby="crm-digest-title">
+                <h3 id="crm-digest-title" className="text-sm font-semibold">
+                  CRM digest · {digest.date}
+                </h3>
+                <div className="mt-3 grid gap-3 md:grid-cols-3">
+                  <article className="rounded-lg border border-border bg-background p-4">
+                    <p className="text-xs font-medium uppercase tracking-wide text-accent">
+                      Payments in (CRM)
+                    </p>
+                    <p className="mt-1 text-sm font-medium">
+                      {digest.payments.count} payments
+                      {digest.payments.total_received !== null
+                        ? ` · ${formatMoney(digest.payments.total_received)}`
+                        : ""}
+                    </p>
+                    {digest.payments.top.map((row, index) => (
+                      <p key={index} className="mt-1 text-xs text-muted">
+                        {row.customer ?? "Unknown customer"}
+                        {row.amount != null ? ` · ${formatMoney(row.amount)}` : ""}
+                      </p>
+                    ))}
+                  </article>
+                  <article className="rounded-lg border border-border bg-background p-4">
+                    <p className="text-xs font-medium uppercase tracking-wide text-accent">
+                      Waiting for a reply
+                    </p>
+                    <p className="mt-1 text-sm font-medium">
+                      {digest.waiting.total} customers · {digest.waiting.whatsapp_total} on WhatsApp
+                    </p>
+                    {digest.waiting.top.map((row, index) => (
+                      <p key={index} className="mt-1 text-xs text-muted">
+                        {row.name ?? "Unknown"} · {row.channel ?? "—"} · {row.waiting_days ?? "—"}d
+                      </p>
+                    ))}
+                  </article>
+                  <article className="rounded-lg border border-border bg-background p-4">
+                    <p className="text-xs font-medium uppercase tracking-wide text-accent">
+                      Stalled deals
+                    </p>
+                    <p className="mt-1 text-sm font-medium">{digest.stalled_deals.total} deals</p>
+                    {digest.stalled_deals.top.map((row, index) => (
+                      <p key={index} className="mt-1 text-xs text-muted">
+                        {row.name ?? "Unnamed deal"}
+                        {row.amount != null ? ` · ${formatMoney(row.amount)}` : ""} · {row.days_idle ?? "—"}d idle
+                      </p>
+                    ))}
+                  </article>
+                </div>
+              </section>
+            )}
 
             <section aria-labelledby="recommendations-title">
               <div className="flex flex-wrap items-center justify-between gap-3">
