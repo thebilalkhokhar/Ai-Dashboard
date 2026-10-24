@@ -83,6 +83,10 @@ HOW TO WORK
    and report the queue it returns: each customer's channel, how long
    they have waited, and their last message. Date the answer with the
    result's as_of instead of implying it is live.
+   MORNING BRIEFING. When the user asks for the morning briefing or
+   what happened yesterday, call get_crm_morning_briefing and present
+   its three blocks: yesterday's CRM payments with their total, who is
+   waiting for a reply, and the biggest stalled deals.
    EMPTY FIELDS. Never print an empty field, the word null, or a raw
    placeholder such as "(null)" in an answer: leave the line out, or say
    in plain words that the record has none (for example, that the CRM

@@ -1932,6 +1932,18 @@ async def get_crm_follow_up_queue(database: Any = None) -> dict:
     }
 
 
+async def get_crm_morning_briefing(database: Any = None) -> dict:
+    """Yesterday's CRM digest: payments in, who is waiting, stalled deals.
+
+    The user's morning briefing (built Oct 24): one Python-computed
+    digest over data already in this system - the CRM payments mirror
+    for yesterday's business date, and the latest agent run's CRM
+    Engagement / Deal Watch sections. No live CRM calls."""
+    from app.services.crm_digest import build_crm_digest
+
+    return await build_crm_digest(_database(database))
+
+
 async def get_record(collection: str, id: str, database: Any = None) -> dict:
     """One record by its business id, from a whitelisted read-only view."""
     args = RecordArgs.model_validate({"collection": collection, "id": id})
@@ -2902,6 +2914,12 @@ CHAT_TOOLS = [
         "List the customers currently waiting for a reply - the CRM Engagement queue from the latest agent run - with the channel each customer is waiting on (WhatsApp first), how many days they have waited, and the customer's own last message. Use for 'who is waiting', 'WhatsApp follow-ups', 'follow-up queue' questions. Costs no CRM call; the result's as_of is when the queue was computed - date the answer with it.",
         EmptyArgs,
         get_crm_follow_up_queue,
+    ),
+    ChatTool(
+        "get_crm_morning_briefing",
+        "The CRM morning briefing for yesterday (business date): payments that landed in the Zoho CRM with their total, who is waiting for a reply (WhatsApp counted separately), and the biggest stalled deals. Use for 'morning briefing', 'aaj ki briefing', 'kal kya hua' questions. All figures are computed by the backend; the waiting/deals blocks carry as_of_run, the time of the agent run they came from.",
+        EmptyArgs,
+        get_crm_morning_briefing,
     ),
     ChatTool(
         "get_record",
