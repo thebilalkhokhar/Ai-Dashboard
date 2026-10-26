@@ -630,6 +630,36 @@ def missing_lead_fields(parsed: Mapping[str, Any]) -> list[str]:
     return missing
 
 
+_NEXT_ACTION_LABELS = {
+    "quantity": "quantity",
+    "size": "size",
+    "material": "material",
+    "finish": "finish",
+    "artwork": "artwork",
+    "contact_info": "contact details",
+}
+
+
+def lead_next_action(missing: Iterable[str] | None, contact_name: str | None = None) -> str:
+    """The one question to ask about a stuck lead, computed in Python.
+
+    Live Oct 27: the Orthoza advice answers still *recommended* a material
+    ("foil, standard vinyl, ...") while material was the missing field -
+    the ADVICE prompt shape alone did not stop the model inventing a spec.
+    When the tool itself hands the model the exact question, there is
+    nothing left to invent: the model copies the question instead of
+    recommending the very thing that is missing. The first missing field
+    in the tool's own order is the blocker; a lead with nothing missing
+    gets the conversion step, not a question.
+    """
+    who = (contact_name or "").strip() or "the customer"
+    for field in missing or []:
+        label = _NEXT_ACTION_LABELS.get(field)
+        if label:
+            return f"Ask {who} for the missing {label}."
+    return "Confirm the order details and convert the lead to an order."
+
+
 def stuck_leads(
     leads: Iterable[Mapping[str, Any]],
     now: Optional[datetime] = None,
@@ -704,6 +734,7 @@ def stuck_leads(
                 "artwork_present": parsed.get("artwork_present"),
                 "description_shape": parsed.get("shape"),
                 "missing": missing,
+                "next_action": lead_next_action(missing, contact_name),
                 "has_contact_details": bool(email or phone),
                 "description": description,
             }
