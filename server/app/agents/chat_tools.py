@@ -1838,8 +1838,14 @@ async def get_crm_payments(
 
 
 async def get_customer360_analysis(
-    record_id: str, record_type: str, database: Any = None
+    record_id: str, record_type: str, fresh: bool = False, database: Any = None
 ) -> dict:
+    # `fresh` is accepted (and ignored) only because invoke_tool splats the
+    # shared Customer360DetailArgs dump straight into this function: without
+    # this parameter every chat call died instantly with TypeError
+    # ("unexpected keyword argument 'fresh'"), which the chat loop reports
+    # as a 0 ms invalid-arguments failure. Analysis is always live and
+    # uncached on the CRM side, so there is nothing fresh to force here.
     """The CRM's own AI analysis for one record - explicit asks only.
 
     The user ordered this on Oct 24: name a record in chat, say 'analyze
