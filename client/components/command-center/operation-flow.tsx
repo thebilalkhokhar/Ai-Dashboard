@@ -340,11 +340,29 @@ export function OperationFlow({
   });
 
   const selectedDetail = selected ? details.get(selected) : undefined;
+  const hasProcessing = allTools.some((tool) => tool.filter || tool.aggregation);
 
   // ------------------------------------------------------------- nodes
   return (
-    <div className="jtree" data-execution={execution} role="group" aria-label="Assistant operation tree">
+    <div className="jtree" data-execution={execution} data-live={isLivePhase(execution) ? "true" : "false"} role="group" aria-label="Assistant operation tree">
+      <div className="jtree-columns" aria-hidden="true">
+        <span className="jtree-column-label" style={{ left: `${ROOT_X}%` }}>Assistant</span>
+        {hasBranches && (
+          <span className="jtree-column-label" style={{ left: `${BRANCH_X}%` }}>Specialist</span>
+        )}
+        <span className="jtree-column-label" style={{ left: `${leafX}%` }}>Lookups</span>
+        {hasProcessing && (
+          <span className="jtree-column-label" style={{ left: `${PROC_X}%` }}>Processing</span>
+        )}
+        {tree.validation && (
+          <span className="jtree-column-label" style={{ left: `${VALID_X}%` }}>Validation</span>
+        )}
+        <span className="jtree-column-label" style={{ left: `${OUT_X}%` }}>Response</span>
+      </div>
       <div className="jtree-stage">
+        <div className="jtree-grid" aria-hidden="true" />
+        <div className="jtree-glow" aria-hidden="true" />
+        <div className="jtree-sweep" aria-hidden="true" />
         <svg viewBox="0 0 100 100" className="jtree-svg" aria-hidden="true" preserveAspectRatio="none">
           <defs>
             <linearGradient id={`${uid}-flow`} x1="0" y1="0" x2="1" y2="0">
@@ -446,6 +464,9 @@ export function OperationFlow({
                 <span className="jtree-label">{branch.label}</span>
                 <span className="jtree-state">{stateWord(branch.state)}</span>
                 <span className="jtree-sub">routed by Chat Assistant</span>
+                <span className="jtree-sub">
+                  {branch.tools.length} {branch.tools.length === 1 ? "lookup" : "lookups"}
+                </span>
               </span>
             </button>
           );

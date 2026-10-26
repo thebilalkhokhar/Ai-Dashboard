@@ -86,7 +86,12 @@ interface ExecutionController {
   workspaceOwnsActiveView: boolean;
   /** Claim/release the inline active view so the flow renders exactly once. */
   setWorkspaceOwnsActiveView(claimed: boolean): void;
-  /** Returns false when a turn is already in flight. */
+  /** Messages typed while a turn runs, sent in order once it settles. */
+  queue: string[];
+  /** Drop one queued message before it is sent. */
+  removeQueued(index: number): void;
+  /** Returns false only when the text is empty or no turn can start.
+      While a turn runs, the message is queued instead of refused. */
   send(prompt: string): boolean;
   /** Stop the in-flight turn, on the backend as well as in this view. */
   stop(): void;
@@ -164,6 +169,22 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
   const [isSending, setIsSending] = useState(false);
   const [activeTool, setActiveTool] = useState("");
   const [chatError, setChatError] = useState("");
+  // Messages typed while a turn runs. They wait here - in order - until
+  // the turn settles, instead of the composer going dead mid-request.
+  // The ref mirrors the state so the send loop and the drain effect never
+  // act on a stale list.
+  const [queue, setQueue] = useState<string[]>([]);
+  const queueRef = useRef<string[]>([]);
+  const setQueueBoth = useCallback((next: string[]) => {
+    queueRef.current = next;
+    setQueue(next);
+  }, []);
+  const removeQueued = useCallback(
+    (index: number) => {
+      setQueueBoth(queueRef.current.filter((_, i) => i !== index));
+    },
+    [setQueueBoth],
+  );
   // The Command Center tab renders the active operation view inline; while it
   // does, the full-screen overlay must not render a second copy of it.
   const [workspaceOwnsActiveView, setWorkspaceOwnsActiveView] = useState(false);
@@ -237,7 +258,10 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
     setFacts({ turnId: "", frames: [] });
     setChatError("");
     setActiveTool("");
-  }, []);
+    // A fresh conversation (or another thread) never inherits messages
+    // queued for the old one.
+    setQueueBoth([]);
+  }, [setQueueBoth]);
 
   const openThread = useCallback(
     (id: string) => {
@@ -592,16 +616,34 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
     if (taskId) {
       void cancelChatTurn(taskId).catch(() => {});
     }
+    // Stop means stop everything: queued follow-ups are dropped with the
+    // turn, never sent behind the user's back after they hit Stop.
+    setQueueBoth([]);
     endRecovery();
     updatePhase(current.turnId, "cancelled", "Stopped.");
     setChatError("");
     setActiveTool("");
-  }, [endRecovery, updatePhase]);
+  }, [endRecovery, setQueueBoth, updatePhase]);
 
   const send = useCallback(
     (prompt: string) => {
       const text = prompt.trim();
-      if (!text || sendingRef.current) return false;
+      if (!text) return false;
+      // A stream is in flight: the message waits its turn instead of
+      // being refused, and the drain effect below sends it in order.
+      // Only a live stream guarantees a drain, so a refused beginTurn
+      // with no stream running still returns false and keeps the text.
+      // A literal repeat of the in-flight question - or of the message
+      // already last in line - is a double-submit, not a follow-up, so
+      // it is swallowed instead of queued and sent twice.
+      if (sendingRef.current) {
+        const inFlight = turnRef.current?.prompt;
+        const lastQueued = queueRef.current[queueRef.current.length - 1];
+        if (inFlight !== text && lastQueued !== text) {
+          setQueueBoth([...queueRef.current, text]);
+        }
+        return true;
+      }
 
       const turnId = beginTurn(text);
       if (!turnId) return false;
@@ -699,8 +741,35 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
 
       return true;
     },
-    [attachTask, beginTurn, failTurn, finishTurn, markSynthesizing, markWorking],
+    [attachTask, beginTurn, failTurn, finishTurn, markSynthesizing, markWorking, setQueueBoth],
   );
+
+  // The queue drains the moment no stream runs and the last turn settled:
+  // the next message goes out on its own, in the order it was typed.
+  // A refused send never consumes its message, so a stuck queue simply
+  // waits for the next settling turn instead of losing the text.
+  const turnPhase = turn?.phase ?? null;
+  useEffect(() => {
+    if (isSending || sendingRef.current || queue.length === 0) return;
+    if (
+      turnPhase !== null &&
+      turnPhase !== "completed" &&
+      turnPhase !== "failed" &&
+      turnPhase !== "cancelled"
+    ) {
+      return;
+    }
+    const next = queue[0];
+    // The send itself sets state, so it runs off the effect's synchronous
+    // path (the repo's set-state-in-effect rule). The ref check keeps a
+    // removed or replaced head from going out after the defer.
+    queueMicrotask(() => {
+      if (queueRef.current[0] !== next) return;
+      if (send(next)) {
+        setQueueBoth(queueRef.current.slice(1));
+      }
+    });
+  }, [isSending, queue, send, setQueueBoth, turnPhase]);
 
   const retry = useCallback(() => {
     if (sendingRef.current) return;
@@ -747,6 +816,8 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
       isLive: live,
       messages,
       isSending,
+      queue,
+      removeQueued,
       activeTool,
       chatError,
       resultFrames,
@@ -770,6 +841,8 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
       execution,
       messages,
       isSending,
+      queue,
+      removeQueued,
       activeTool,
       chatError,
       resultFrames,
