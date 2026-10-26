@@ -691,8 +691,83 @@ button {
   position: absolute;
   inset: 0;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   pointer-events: auto;
+}
+
+/* Pipeline column labels: the tree reads as one system, not a scatter -
+   each label sits over the column its nodes already use. */
+.jtree-columns {
+  position: relative;
+  height: 1.15rem;
+  flex-shrink: 0;
+}
+
+.jtree-column-label {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(147, 165, 204, 0.75);
+  white-space: nowrap;
+}
+
+/* Live backdrop: a dot grid and two soft glows make the stage feel deep,
+   and a light sweep crosses it only while the turn is actually live.
+   Nothing here invents work - it frames the real nodes and edges. */
+.jtree-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: radial-gradient(rgba(125, 190, 255, 0.14) 1px, transparent 1px);
+  background-size: 26px 26px;
+  mask-image: radial-gradient(90% 90% at 50% 50%, black 30%, transparent 100%);
+  -webkit-mask-image: radial-gradient(90% 90% at 50% 50%, black 30%, transparent 100%);
+}
+
+.jtree-glow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(38% 55% at 8% 50%, rgba(56, 189, 248, 0.13), transparent 70%),
+    radial-gradient(30% 45% at 92% 50%, rgba(167, 139, 250, 0.12), transparent 70%);
+}
+
+.jtree-sweep {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0;
+}
+
+.jtree[data-live="true"] .jtree-sweep {
+  opacity: 1;
+}
+
+.jtree-sweep::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 22%;
+  background: linear-gradient(90deg, transparent, rgba(125, 240, 255, 0.07), transparent);
+  animation: jtree-sweep 3.2s ease-in-out infinite;
+}
+
+@keyframes jtree-sweep {
+  from { left: -25%; }
+  to { left: 105%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jtree-sweep {
+    display: none;
+  }
 }
 
 .jtree-stage {
@@ -1824,8 +1899,127 @@ button {
 }
 
 .chat-row {
+  position: relative;
   display: flex;
   width: 100%;
+}
+
+/* Reply action: parked in the row's free corner, revealed on hover or
+   focus so the conversation stays clean until it is wanted. */
+.chat-reply-btn {
+  position: absolute;
+  top: 0.35rem;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(4, 8, 20, 0.85);
+  font-size: 0.68rem;
+  color: var(--muted);
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.chat-row--assistant .chat-reply-btn {
+  right: 0.25rem;
+}
+
+.chat-row--user .chat-reply-btn {
+  left: 0.25rem;
+}
+
+.chat-row:hover .chat-reply-btn,
+.chat-row:focus-within .chat-reply-btn {
+  opacity: 1;
+}
+
+.chat-reply-btn:hover {
+  color: var(--foreground);
+  border-color: rgba(125, 240, 255, 0.5);
+}
+
+/* A quoted message inside the sender's own bubble, WhatsApp-style. */
+.chat-quote {
+  display: block;
+  margin-bottom: 0.4rem;
+  padding: 0.35rem 0.6rem;
+  border-left: 2px solid rgba(125, 240, 255, 0.6);
+  border-radius: 0.4rem;
+  background: rgba(125, 240, 255, 0.07);
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: rgba(226, 240, 255, 0.85);
+}
+
+/* The reply target bar and the queued-message chips above the composer. */
+.chat-reply-bar,
+.chat-queue {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.chat-reply-bar {
+  padding: 0.4rem 0.6rem;
+  border-radius: 0.6rem;
+  border: 1px solid rgba(125, 240, 255, 0.25);
+  background: rgba(125, 240, 255, 0.06);
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.chat-reply-bar-text {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-queue-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 100%;
+  padding: 0.25rem 0.4rem 0.25rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  background: rgba(167, 139, 250, 0.1);
+  font-size: 0.72rem;
+  color: rgba(233, 226, 255, 0.9);
+}
+
+.chat-queue-chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-queue-chip button {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 1.1rem;
+  height: 1.1rem;
+  border-radius: 999px;
+  color: var(--muted);
+}
+
+.chat-queue-chip button:hover {
+  color: var(--foreground);
+}
+
+/* Multiline composer: Enter sends, Shift+Enter adds a line. */
+.chat-composer-input {
+  resize: none;
+  max-height: 7.5rem;
+  overflow-y: auto;
+  line-height: 1.5;
 }
 
 .chat-row--user {
