@@ -299,17 +299,21 @@ async def test_both_stuck_lead_views_page_the_same_sequence():
 
 
 @pytest.mark.asyncio
-async def test_a_nameless_lead_ships_no_null_fields_to_the_model():
+async def test_a_nameless_lead_ships_not_stated_instead_of_null():
     """Live 2026-10-26: a lead with no name on file was answered as
     'Contact: (null)' - the model renders a null it receives literally,
-    which the empty-fields rule forbids. Missing fields are absent."""
+    which the empty-fields rule forbids. Dropping the keys outright was
+    tried next, but the Oct 26 retest showed the model then fills the
+    slot by copying a neighbour row's company (Canyon Plastics on 7
+    rows). Identity fields therefore always carry the explicit label
+    'Not stated', which the model reproduces faithfully (as artwork)."""
     nameless = lead(firstName="", lastName="", company="")
     db = business_db(leads=Collection([nameless]), chat_logs=FakeCollection([]))
     result = await invoke_tool("get_stuck_leads", {}, database=db)
     assert result["total_count"] == 1
     item = result["items"][0]
-    assert "contact_name" not in item
-    assert "company" not in item
+    assert item["contact_name"] == "Not stated"
+    assert item["company"] == "Not stated"
     assert None not in item.values()
 
 
