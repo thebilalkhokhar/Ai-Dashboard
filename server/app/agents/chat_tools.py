@@ -646,15 +646,19 @@ async def get_stuck_leads(
     page_limit = args.limit or 10
     # A missing field is absent, never null: the model renders a null it
     # receives as the literal "(null)" (live Oct 26: "Contact: (null)"),
-    # which the empty-fields rule forbids. The model already writes
-    # "Unnamed" for a lead with no name on file.
+    # which the empty-fields rule forbids. Identity fields are the one
+    # exception: a dropped company/contact invites the model to fill the
+    # slot by copying a neighbour row's value (live Oct 26 retest: "Canyon
+    # Plastics" on 7 rows, and a product as Thomas Wall Sr.'s company).
+    # Like artwork, they always carry an explicit label - "Not stated" -
+    # which the model reproduces faithfully instead of inventing one.
     items = [
         {
             key: value
             for key, value in {
                 "lead_id": row["lead_id"],
-                "contact_name": row["contact_name"],
-                "company": row["company"],
+                "contact_name": row["contact_name"] or "Not stated",
+                "company": row["company"] or "Not stated",
                 "status": row["status"],
                 "days_since_activity": row["days_since_activity"],
                 "product": row.get("product") or row.get("type"),
