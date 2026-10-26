@@ -173,6 +173,7 @@ def test_null_placeholders_are_scrubbed_from_model_prose():
         _scrub_null_placeholders("(Unnamed) — Contact: (null) — Product: mylar bags")
         == "(Unnamed) — Product: mylar bags"
     )
+    assert _scrub_null_placeholders("null (unnamed)") == "Unnamed"
     assert _scrub_null_placeholders("Contact: nullable, keep this") == "Contact: nullable, keep this"
 
 
