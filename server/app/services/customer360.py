@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.config import settings
+from app.services import processors
 
 log = logging.getLogger("customer360")
 
@@ -331,7 +332,9 @@ def _payment_row(row: dict) -> dict:
         "invoice_status": row.get("invoiceStatus"),
         "owner": row.get("ownerName"),
         "receive_date": received[:10] if received else None,
-        "record_created_at": row.get("createdAt"),
+        # Creation/sync time, rendered in the system timezone in
+        # 24-hour format - the raw UTC string never reaches an answer.
+        "record_created_at": processors.format_system_time(row.get("createdAt")),
     }
 
 
@@ -415,6 +418,7 @@ async def collect_crm_payments(
             "under separate labels and never add their totals together. "
             "receive_date is the calendar date the CRM records; no clock "
             "time is stored for a payment. record_created_at is when the "
-            "CRM record was created/synced, not when the money arrived."
+            "CRM record was created/synced, shown in the system's "
+            "timezone in 24-hour format - not when the money arrived."
         ),
     }

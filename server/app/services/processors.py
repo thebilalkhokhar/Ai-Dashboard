@@ -35,6 +35,46 @@ ERP_TZ = timezone(timedelta(hours=-5))
 # so a fixed +05:00 is exact, not an approximation.
 USER_TZ = timezone(timedelta(hours=5))
 
+
+def system_timezone():
+    """The timezone of the machine the system runs on, read fresh.
+
+    Display times are rendered in this timezone, never as raw UTC: the
+    operator reads the clock of the machine in front of them. (On the
+    operator's own machine this agrees with USER_TZ; the calendar that
+    decides which day a payment belongs to stays USER_TZ.)
+    """
+    try:
+        return datetime.now().astimezone().tzinfo or timezone.utc
+    except Exception:
+        return timezone.utc
+
+
+def system_tz_label() -> str:
+    """Short label for the system timezone, e.g. 'PKT' or 'UTC+05:00'."""
+    name = datetime.now(system_timezone()).tzname()
+    if name:
+        return name
+    offset = datetime.now(system_timezone()).utcoffset() or timedelta(0)
+    total = int(offset.total_seconds() // 60)
+    sign = "+" if total >= 0 else "-"
+    return f"UTC{sign}{abs(total) // 60:02d}:{abs(total) % 60:02d}"
+
+
+def format_system_time(value: Any) -> Optional[str]:
+    """A timestamp as the operator sees it: '2026-10-26 19:45 PKT'.
+
+    System timezone, 24-hour clock, or None when the value carries no
+    usable time. Used for every clock time shown to the user, so raw
+    UTC strings never reach an answer.
+    """
+    moment = parse_date(value)
+    if moment is None:
+        return None
+    return moment.astimezone(system_timezone()).strftime(
+        f"%Y-%m-%d %H:%M {system_tz_label()}"
+    )
+
 # --------------------------------------------------------------------------
 # Quote statuses that mean the opportunity is over. Anything else counts as
 # "open". Only closed values are listed, so a future new open status is
