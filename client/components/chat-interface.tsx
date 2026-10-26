@@ -8,7 +8,7 @@
 // exactly one in-flight request. No raw tool identifiers are shown.
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Bot, Plus, RotateCcw, Send, Sparkles } from "lucide-react";
+import { Plus, RotateCcw, Send, Sparkles } from "lucide-react";
 import { useExecutionController } from "@/components/command-center/execution-context";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { AnswerProvenance } from "@/components/chat-provenance";
@@ -156,7 +156,17 @@ export function ChatInterface() {
           ) : (
             <div key={entry.id} className="chat-row chat-row--assistant">
               <span className="chat-avatar" aria-hidden="true">
-                <Bot size={15} />
+                <video
+                  className="chat-avatar-clip"
+                  src="/chat.mp4"
+                  aria-hidden="true"
+                  muted
+                  loop
+                  playsInline
+                  autoPlay
+                  preload="metadata"
+                  tabIndex={-1}
+                />
               </span>
               <div className="chat-body">
                 {entry.content ? (
