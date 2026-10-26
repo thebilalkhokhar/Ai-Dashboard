@@ -299,6 +299,71 @@ async def test_sse_streams_tokens_before_the_model_finishes():
 
 
 @pytest.mark.asyncio
+async def test_cancelling_a_stream_records_task_cancelled():
+    import asyncio
+
+    from app.agents.chat import cancel_chat_turn
+    from app.services.events import set_event_service
+
+    class RecordingEventService:
+        def __init__(self):
+            self.emitted = []
+
+        async def emit(self, **kwargs):
+            self.emitted.append(kwargs)
+            return None
+
+        async def last_status_by_agent(self, *_a, **_k):
+            return {}
+
+        async def get_events(self, *_a, **_k):
+            return []
+
+        async def recent_tasks(self, *_a, **_k):
+            return []
+
+        async def task_exists(self, *_a, **_k):
+            return False
+
+        async def ensure_indexes(self):
+            return None
+
+    service = RecordingEventService()
+    set_event_service(service)
+    try:
+        db = FakeDatabase(
+            chat_threads=FakeCollection(),
+            chat_logs=FakeCollection(),
+        )
+        gate = asyncio.Event()
+        model = FakeStreamingModel(["The dashboard ", "is ready."], gate)
+        stream = stream_chat("thread-cancel", "status?", db, model=model, tools=[])
+
+        first = await asyncio.wait_for(anext(stream), timeout=2)
+        assert first["event"] == "task"
+        task_id = first["data"]["task_id"]
+
+        # The turn is stuck behind the model's gate; stopping it must end
+        # the stream promptly instead of hanging, and must leave a terminal
+        # task.cancelled event behind - never a silent disappearance.
+        assert await cancel_chat_turn(task_id) is True
+
+        async def drain():
+            return [event async for event in stream]
+
+        rest = await asyncio.wait_for(drain(), timeout=2)
+        assert all(event["event"] != "done" for event in rest)
+        assert any(
+            item.get("type") == "task.cancelled" and item.get("task_id") == task_id
+            for item in service.emitted
+        )
+        assert await cancel_chat_turn(task_id) is False
+        assert await cancel_chat_turn("no-such-task") is False
+    finally:
+        set_event_service(None)
+
+
+@pytest.mark.asyncio
 async def test_sse_events_order_tool_then_tokens_then_done():
     async def read_tool(database=None):
         return {"count": 4}
