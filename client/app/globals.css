@@ -905,17 +905,44 @@ button {
   background: radial-gradient(circle at 40% 32%, #67e8f9, #2563eb 55%, #0b1226 100%);
   box-shadow: 0 0 26px rgba(56, 189, 248, 0.5);
 }
-.jtree-dot-icon,
-.jtree-orb-icon {
+.jtree-dot-img,
+.jtree-orb-img {
   position: absolute;
   inset: 0;
-  display: grid;
-  place-items: center;
-  color: rgba(255, 255, 255, 0.92);
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 999px;
   pointer-events: none;
 }
-.jtree-dot-icon svg {
-  filter: drop-shadow(0 1px 3px rgba(2, 4, 12, 0.6));
+.jtree-dot-badge {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  border: 2px solid #060a18;
+  pointer-events: none;
+}
+.jtree-dot-badge--done {
+  background: #059669;
+}
+.jtree-dot-badge--failed {
+  background: #b91c1c;
+}
+.jtree-pill-img {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  object-fit: cover;
+  vertical-align: middle;
+  margin-right: 6px;
 }
 
 .jtree-node[data-state="done"] .jtree-dot {
@@ -1820,6 +1847,13 @@ button {
   border-radius: 0.55rem;
   background: rgba(125, 240, 255, 0.1);
   color: #a5f3fc;
+  overflow: hidden;
+}
+.chat-avatar-clip {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 0.55rem;
 }
 
 .chat-body {
