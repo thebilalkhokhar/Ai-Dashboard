@@ -12,7 +12,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useExecutionController } from "@/components/command-center/execution-context";
-import { isLivePhase, mergeAgentNodes } from "@/lib/task-events";
+import { isLivePhase, mergeAgentNodes, type ExecutionPhase } from "@/lib/task-events";
 import {
   deriveExecutionTree,
   deriveOperation,
@@ -31,7 +31,21 @@ import { HistoryButton, HistoryDrawer } from "@/components/command-center/histor
 export function CommandCenter() {
   const execution = useExecutionController();
   const [historyOpen, setHistoryOpen] = useState(false);
-  const { turn, execution: phase, isLive, events, agents, agentsError, setWorkspaceOwnsActiveView } = execution;
+  const { turn, lastTurn, execution: phase, isLive, events, agents, agentsError, setWorkspaceOwnsActiveView } = execution;
+
+  // A finished turn used to vanish 650 ms after completion, so returning
+  // to this tab after a run showed the idle orb instead of the work that
+  // just ran. The last turn stays on screen until a new chat or thread
+  // replaces it; a live turn still wins while it runs, and a finished one
+  // is never shown as in flight - its nodes are all settled.
+  const displayTurn = turn ?? lastTurn;
+  const displayExecution: ExecutionPhase = turn
+    ? phase
+    : lastTurn?.phase === "completed"
+      ? "completed"
+      : lastTurn?.phase === "failed"
+        ? "failed"
+        : phase;
 
   // This workspace is the active execution view while the tab is open, so the
   // full-screen overlay stands down instead of drawing a second copy.
@@ -51,17 +65,17 @@ export function CommandCenter() {
   const tree = useMemo(
     () =>
       deriveExecutionTree({
-        execution: phase,
+        execution: displayExecution,
         timeline: events.timeline,
         agents: events.agents,
         details: events.details,
       }),
-    [phase, events.timeline, events.agents, events.details],
+    [displayExecution, events.timeline, events.agents, events.details],
   );
 
   const orbState = deriveOrbState({
-    execution: phase,
-    hasTask: Boolean(turn?.taskId),
+    execution: displayExecution,
+    hasTask: Boolean(displayTurn?.taskId),
     hasAgentActivity,
     hasToolActivity,
   });
@@ -70,15 +84,15 @@ export function CommandCenter() {
   // returns to "Ready": a previous turn belongs to the conversation and the
   // history drawer, never to "Working on".
   const operation = deriveOperation({
-    turn,
-    execution: phase,
+    turn: displayTurn,
+    execution: displayExecution,
     timeline: events.timeline,
     agents: events.agents,
   });
 
-  // The flow is shown for as long as a turn is on screen, including its brief
-  // completed state; the large idle orb comes back once nothing is running.
-  const showFlow = Boolean(turn);
+  // The flow stays for the last turn, live or just finished; the large
+  // idle orb comes back only when a new chat or thread clears it.
+  const showFlow = Boolean(displayTurn);
 
   return (
     <section aria-labelledby="command-center-title" className="cc-workspace">
@@ -86,7 +100,7 @@ export function CommandCenter() {
         <div>
           <p className="cc-workspace-eyebrow">JARVIS</p>
           <h2 id="command-center-title" className="cc-workspace-title">
-            {turn ? taskTitle(turn.prompt) : "Executive assistant"}
+            {displayTurn ? taskTitle(displayTurn.prompt) : "Executive assistant"}
           </h2>
         </div>
         <div className="cc-workspace-actions">
@@ -104,7 +118,9 @@ export function CommandCenter() {
                   ? "Executing"
                   : phase === "failed" || phase === "cancelled"
                     ? "Needs attention"
-                    : "Standing by"}
+                    : displayTurn
+                      ? operation.phase
+                      : "Standing by"}
           </span>
           <HistoryButton onClick={() => setHistoryOpen(true)} />
         </div>
@@ -116,7 +132,7 @@ export function CommandCenter() {
             <div className="jstage jstage--flow cc-stage" data-testid="cc-operation-flow">
               <OperationFlow
                 tree={tree}
-                execution={phase}
+                execution={displayExecution}
                 core={<JarvisOrb state={orbState} label={ORB_CAPTION[orbState]} className="jo--core" />}
               />
             </div>
@@ -130,20 +146,20 @@ export function CommandCenter() {
           <div className="cc-visual-foot">
             <div className="cc-request">
               <p className="cc-request-label">
-                {turn ? "Your request" : "Ready for a request"}
+                {displayTurn ? "Your request" : "Ready for a request"}
               </p>
               {/* the headline carries the clipped version; the card carries the
                   whole thing, so the two say different amounts, not the same */}
               <p className="cc-request-text">
-                {turn ? turn.prompt : "Ask about payments, invoices, quotes, orders or leads."}
+                {displayTurn ? displayTurn.prompt : "Ask about payments, invoices, quotes, orders or leads."}
               </p>
             </div>
             <div className="cc-visual-meta">
               <span className="cc-phase" data-tone={operation.tone}>
                 <span className="cc-phase-dot" data-tone={operation.tone} aria-hidden="true" />
-                {turn ? operation.phase : PHASE_CAPTION.idle.phase}
+                {displayTurn ? operation.phase : PHASE_CAPTION.idle.phase}
               </span>
-              {!turn && (
+              {!displayTurn && (
                 <span className="cc-agent">{agents.length} assistants registered</span>
               )}
             </div>
@@ -152,8 +168,8 @@ export function CommandCenter() {
 
         <div className="cc-side">
           <OperationPanel
-            turn={turn}
-            execution={phase}
+            turn={displayTurn}
+            execution={displayExecution}
             timeline={events.timeline}
             agents={events.agents}
             streamStatus={events.status}

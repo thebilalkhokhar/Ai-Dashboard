@@ -19,7 +19,7 @@
 // are buttons: selecting one shows its recorded detail under the stage.
 
 import { useId, useState, type ReactNode } from "react";
-import { ShieldCheck } from "lucide-react";
+import { Activity, Cpu, Eye, MessageCircle, Search, ShieldCheck } from "lucide-react";
 import { useReducedMotion } from "@/hooks/use-reduced-motion";
 import { isLivePhase, type ExecutionPhase } from "@/lib/task-events";
 import type {
@@ -52,6 +52,17 @@ const PROC_X = 66;
 const VALID_X = 83;
 const OUT_X = 93;
 const CENTER_Y = 50;
+
+// Every stage dot carries its own mark, so no circle ever reads empty:
+// the agent branches already have portraits, and these are the tool-type
+// stages (search / review / running work). Done and failed keep their
+// check and cross - the icon only fills the waiting and active states.
+function stageIcon(label: string) {
+  if (/search/i.test(label)) return Search;
+  if (/review/i.test(label)) return Eye;
+  if (/running|analysis/i.test(label)) return Cpu;
+  return Activity;
+}
 
 function stateWord(state: StageState): string {
   switch (state) {
@@ -428,6 +439,7 @@ export function OperationFlow({
         {/* agent stages (pipeline) and the earlier-lookups stage */}
         {tree.agentStages.map((stage) => {
           const pos = stagePos.get(stage.id)!;
+          const StageIcon = stageIcon(stage.label);
           return (
             <button
               key={stage.id}
@@ -442,6 +454,9 @@ export function OperationFlow({
               <span className="jtree-dot">
                 {stage.state === "done" && <span className="jtree-check" aria-hidden="true" />}
                 {stage.state === "failed" && <span className="jtree-cross" aria-hidden="true" />}
+                {stage.state !== "done" && stage.state !== "failed" && (
+                  <span className="jtree-dot-icon" aria-hidden="true"><StageIcon size={20} /></span>
+                )}
                 {stage.state === "active" && !reducedMotion && (<><span className="jtree-pulse" aria-hidden="true" /><span className="jtree-ring" aria-hidden="true" /></>)}
               </span>
               <span className="jtree-text">
@@ -461,7 +476,9 @@ export function OperationFlow({
             onClick={() => setSelected(tree.moreStage!.id)}
             aria-label={`${tree.moreStage.label}: ${stateWord(tree.moreStage.state)}`}
           >
-            <span className="jtree-dot" />
+            <span className="jtree-dot">
+              <span className="jtree-dot-icon" aria-hidden="true"><Search size={20} /></span>
+            </span>
             <span className="jtree-text">
               <span className="jtree-label">{tree.moreStage.label}</span>
               <span className="jtree-state">{stateWord(tree.moreStage.state)}</span>
@@ -472,6 +489,7 @@ export function OperationFlow({
         {/* tool leaves */}
         {allTools.map((tool, index) => {
           const pos = toolPos.get(tool.stage.id)!;
+          const ToolIcon = stageIcon(tool.stage.label);
           const duration = formatDuration(tool.durationMs);
           return (
             <button
@@ -487,6 +505,9 @@ export function OperationFlow({
               <span className="jtree-dot">
                 {tool.stage.state === "done" && <span className="jtree-check" aria-hidden="true" />}
                 {tool.stage.state === "failed" && <span className="jtree-cross" aria-hidden="true" />}
+                {tool.stage.state !== "done" && tool.stage.state !== "failed" && (
+                  <span className="jtree-dot-icon" aria-hidden="true"><ToolIcon size={20} /></span>
+                )}
                 {tool.stage.state === "active" && !reducedMotion && (<><span className="jtree-pulse" aria-hidden="true" /><span className="jtree-ring" aria-hidden="true" /></>)}
               </span>
               <span className="jtree-text">
@@ -584,6 +605,7 @@ export function OperationFlow({
           aria-label={`${tree.response.label}: ${stateWord(tree.response.state)}`}
         >
           <span className="jtree-orb-mini" data-state={tree.response.state}>
+            <span className="jtree-orb-icon" aria-hidden="true"><MessageCircle size={24} /></span>
             {tree.response.state === "active" && !reducedMotion && <span className="jtree-ring" aria-hidden="true" />}
           </span>
           <span className="jtree-text">
