@@ -450,5 +450,96 @@ describe("execution lifecycle", () => {
     // the earlier fallback is still shown exactly once; the two turns coexist
     expect(screen.getAllByText(fallback)).toHaveLength(1);
   });
+
+  it("queues a message typed while a turn runs and sends it once the turn settles", async () => {
+    renderApp();
+    await startTurn("Show overdue accounts");
+
+    // the composer stays alive mid-turn: the follow-up queues, it is not refused
+    await act(async () => submit("and the stuck leads?"));
+    expect(vi.mocked(sendMessage)).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/Queued: and the stuck leads\?/)).toBeInTheDocument();
+
+    await act(async () => {
+      h.getSendHandler()!({
+        event: "done",
+        data: { text: "There are 42 overdue invoices.", thread_id: "thread-1", task_id: "task-live" },
+      });
+      h.resolveSend();
+    });
+    // the drain sends the queued message on its own, in order
+    await waitFor(() => expect(vi.mocked(sendMessage)).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(sendMessage).mock.calls[1][0]).toBe("and the stuck leads?");
+    expect(screen.queryByText(/Queued:/)).not.toBeInTheDocument();
+  });
+
+  it("lets a queued message be removed before it is sent", async () => {
+    renderApp();
+    await startTurn("Show overdue accounts");
+    await act(async () => submit("and the stuck leads?"));
+    expect(screen.getByText(/Queued: and the stuck leads\?/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove queued message" }));
+    expect(screen.queryByText(/Queued:/)).not.toBeInTheDocument();
+
+    await act(async () => {
+      h.getSendHandler()!({
+        event: "done",
+        data: { text: "There are 42 overdue invoices.", thread_id: "thread-1", task_id: "task-live" },
+      });
+      h.resolveSend();
+    });
+    // nothing left to drain: the removed message never goes out
+    await waitFor(() => expect(screen.getByText("There are 42 overdue invoices.")).toBeInTheDocument());
+    expect(vi.mocked(sendMessage)).toHaveBeenCalledTimes(1);
+  });
+
+  it("replying to an answer quotes it in the next request", async () => {
+    renderSidebarOnly();
+    await startTurn("Show overdue accounts");
+    await act(async () => {
+      h.getSendHandler()!({
+        event: "done",
+        data: { text: "There are 42 overdue invoices.", thread_id: "thread-1", task_id: "task-live" },
+      });
+      h.resolveSend();
+    });
+    expect(await screen.findByText("There are 42 overdue invoices.")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reply to this answer" }));
+    expect(screen.getByText(/Replying to this answer/)).toBeInTheDocument();
+
+    await act(async () => submit("what about the quotes?"));
+    await waitFor(() => expect(vi.mocked(sendMessage)).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(sendMessage).mock.calls[1][0]).toBe(
+      "> There are 42 overdue invoices.\n\nwhat about the quotes?",
+    );
+    // the sender's own bubble shows the quote as a block above the new text
+    expect(screen.getByText("what about the quotes?")).toBeInTheDocument();
+    expect(screen.getAllByText("There are 42 overdue invoices.").length).toBeGreaterThan(1);
+  });
+
+  it("shift+enter adds a line instead of sending, plain enter sends", async () => {
+    renderSidebarOnly();
+    const composer = screen.getByLabelText("Message Biztek Assistant");
+    fireEvent.change(composer, { target: { value: "line one" } });
+    fireEvent.keyDown(composer, { key: "Enter", shiftKey: true });
+    expect(vi.mocked(sendMessage)).not.toHaveBeenCalled();
+    expect(composer).toHaveValue("line one");
+
+    fireEvent.keyDown(composer, { key: "Enter" });
+    await waitFor(() => expect(vi.mocked(sendMessage)).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(sendMessage).mock.calls[0][0]).toBe("line one");
+  });
+
+  it("operation tree names its pipeline columns and sweeps while live", async () => {
+    renderApp();
+    await startTurn();
+    const flow = screen.getByTestId("cc-operation-flow");
+    expect(within(flow).getByText("Lookups")).toBeInTheDocument();
+    expect(within(flow).getByText("Assistant")).toBeInTheDocument();
+    const tree = flow.querySelector(".jtree");
+    expect(tree?.getAttribute("data-live")).toBe("true");
+  });
 });
 

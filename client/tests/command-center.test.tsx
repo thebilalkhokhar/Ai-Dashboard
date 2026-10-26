@@ -145,9 +145,9 @@ describe("CommandCenter workspace", () => {
     expect(screen.getAllByText("Show overdue accounts").length).toBeGreaterThan(0);
     expect(document.body.textContent).not.toContain("task-live");
 
-    // while the turn is in flight the input is disabled, so a second submit
-    // cannot create a duplicate request
-    await act(async () => submit("A second question"));
+    // a literal repeat of the in-flight question mid-turn is a
+    // double-submit, not a follow-up, so it is swallowed, never queued
+    await act(async () => submit("Show overdue accounts"));
     expect(sendMessage).toHaveBeenCalledTimes(1);
 
     await act(async () => {

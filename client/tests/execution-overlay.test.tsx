@@ -192,10 +192,12 @@ describe("chat -> execution overlay", () => {
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
     expect(sendMessage).toHaveBeenCalledTimes(1);
 
-    // the input is disabled mid-turn, so a second submit is a no-op
+    // a second submit mid-turn queues behind the first instead of
+    // opening a second overlay or a second request
     await act(async () => submit("Second question"));
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(screen.getByText(/Queued: Second question/)).toBeInTheDocument();
   });
 
   it("Escape hides the overlay without cancelling the chat", async () => {

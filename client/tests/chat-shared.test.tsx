@@ -73,10 +73,13 @@ describe("shared chat controller", () => {
     // the same message is visible in both views
     expect(screen.getAllByText("Compare the last two lead pulls")).toHaveLength(2);
 
-    // the sidebar input is disabled and cannot create a second request
+    // the sidebar composer cannot create a second request mid-turn: its
+    // message queues in the one shared conversation instead, visible in
+    // both views
     fireEvent.change(inputs[1], { target: { value: "A second request" } });
     fireEvent.click(screen.getAllByLabelText("Send message")[1]);
     expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByText(/Queued: A second request/)).toHaveLength(2);
 
     await act(async () => {
       h.getHandler()!({
