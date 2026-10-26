@@ -310,7 +310,7 @@ describe("execution lifecycle", () => {
     expect(await screen.findByText("There are 42 overdue invoices.")).toBeInTheDocument();
   });
 
-  it("does not present a finished turn as the current operation after it closes", async () => {
+  it("keeps a finished turn on screen as the settled last operation after it closes", async () => {
     renderApp();
     const stream = await startTurn();
     await emit(
@@ -332,19 +332,23 @@ describe("execution lifecycle", () => {
       h.resolveSend();
     });
 
-    // the workspace is idle again after its exit transition: the old prompt is
-    // not left standing there as "Working on"
+    // Oct 26, user's call: the run used to vanish 650 ms after completion,
+    // so returning to this tab showed the idle orb instead of the work that
+    // just ran. The flow stays - but settled, never as in flight.
     await waitFor(
       () => {
-        expect(screen.queryByTestId("cc-operation-flow")).not.toBeInTheDocument();
+        expect(screen.getByTestId("cc-operation-flow")).toBeInTheDocument();
       },
       { timeout: EXIT_TRANSITION_MS + 1_500 },
     );
-    expect(screen.getByTestId("cc-idle-stage")).toBeInTheDocument();
-    expect(screen.getByText("Ready for a request")).toBeInTheDocument();
+    expect(screen.queryByTestId("cc-idle-stage")).not.toBeInTheDocument();
+    const flow = screen.getByTestId("cc-operation-flow");
+    expect(
+      within(flow).getByRole("group", { name: "Assistant operation tree" }),
+    ).toHaveAttribute("data-execution", "completed");
+    expect(screen.queryByText("Executing")).not.toBeInTheDocument();
     const operation = screen.getByRole("region", { name: "Current operation" });
-    expect(within(operation).getAllByText("Ready").length).toBeGreaterThan(0);
-    expect(within(operation).queryByText("Show overdue accounts")).not.toBeInTheDocument();
+    expect(within(operation).getByText("Last operation")).toBeInTheDocument();
     // the answer itself stays in the conversation
     expect(screen.getByText("There are 42 overdue invoices.")).toBeInTheDocument();
   });
