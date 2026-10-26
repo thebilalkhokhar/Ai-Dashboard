@@ -642,6 +642,21 @@ def validate_numeric_claims(
         (match.start(), match.end())
         for match in re.finditer(r"(?m)^[ \t]*(?:\d{1,3}[.)]|[-*]\s*\d{1,3}[.)])[ \t]+", scanned)
     ]
+    # The same list written inline - "Action needed: 1) revise the quote.
+    # 2) confirm the quantity. 3) send it" - is the same formatting: the
+    # CRM's own analysis for Frank Jr died live (Oct 26) on the 3) alone,
+    # and the fallback then blamed a timeout the CRM never had. Only a
+    # consecutive run starting at 1) qualifies, so a lone "(Oct 26)" date
+    # or a "Page 3 of 9" position is still checked as a claim.
+    expected = 1
+    for match in re.finditer(r"\b(\d{1,3})\)", scanned):
+        value = int(match.group(1))
+        if value == expected:
+            ordinal_spans.append((match.start(), match.end()))
+            expected += 1
+        elif value == 1:
+            ordinal_spans.append((match.start(), match.end()))
+            expected = 2
     scanned = _mask(scanned, ordinal_spans)
 
     # 4) every remaining number: a value the tools computed, a count their own

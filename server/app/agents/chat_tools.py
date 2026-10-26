@@ -644,20 +644,28 @@ async def get_stuck_leads(
     stuck = processors.stuck_leads(rows, now, days=args.days)
     artwork_labels = {True: "Provided", False: "Missing", None: "Not stated"}
     page_limit = args.limit or 10
+    # A missing field is absent, never null: the model renders a null it
+    # receives as the literal "(null)" (live Oct 26: "Contact: (null)"),
+    # which the empty-fields rule forbids. The model already writes
+    # "Unnamed" for a lead with no name on file.
     items = [
         {
-            "lead_id": row["lead_id"],
-            "contact_name": row["contact_name"],
-            "company": row["company"],
-            "status": row["status"],
-            "days_since_activity": row["days_since_activity"],
-            "product": row.get("product") or row.get("type"),
-            "quantity": row.get("quantity"),
-            "size": row.get("size"),
-            "material": row.get("material"),
-            "finish": row.get("finish"),
-            "artwork": artwork_labels[row["artwork_present"]],
-            "missing": row["missing"],
+            key: value
+            for key, value in {
+                "lead_id": row["lead_id"],
+                "contact_name": row["contact_name"],
+                "company": row["company"],
+                "status": row["status"],
+                "days_since_activity": row["days_since_activity"],
+                "product": row.get("product") or row.get("type"),
+                "quantity": row.get("quantity"),
+                "size": row.get("size"),
+                "material": row.get("material"),
+                "finish": row.get("finish"),
+                "artwork": artwork_labels[row["artwork_present"]],
+                "missing": row["missing"],
+            }.items()
+            if value is not None
         }
         for row in stuck[args.offset : args.offset + page_limit]
     ]
@@ -1821,6 +1829,15 @@ async def get_crm_payments(
     answered 0 from the ERP alone while the CRM held four receipts that
     day. The two ledgers are reported side by side, never merged.
     """
+    # A customer with no period ("sari payments") is an all-time query, not
+    # a missing argument: TREATDAY LLC died live (Oct 26) at 0 ms because
+    # the date-range validator refuses a dateless call, leaving the ERP leg
+    # alone and the model to invent CRM ids. A wide range is safe here:
+    # the CRM list is newest-first and the customer search narrows the
+    # pages, so the scan ends at the search set's last page and the
+    # coverage block still says how far it got.
+    if date_from is None and date_to is None:
+        date_from, date_to = date(2000, 1, 1), date.today()
     args = Customer360PaymentsArgs.model_validate(
         {"date_from": date_from, "date_to": date_to, "customer": customer}
     )
@@ -2912,7 +2929,7 @@ CHAT_TOOLS = [
     ),
     ChatTool(
         "get_crm_payments",
-        "Payments recorded in the Zoho CRM (Customer 360) for a date range, optionally filtered by a customer/name search. This is a SEPARATE ledger from the ERP payments tool: the CRM mirrors ERP payments (each row carries its erp_id) and also holds CRM-only payments, so for any question about payments received - today, this week, from a customer - call BOTH this and get_payments and report each ledger under its own label with its own total; NEVER add the two totals together and never report 'no payments' from one ledger alone. Receive dates are calendar dates with no clock time recorded; record_created_at is the CRM record's creation/sync time, already rendered in the system's timezone in 24-hour format - show it exactly as given, never as a raw UTC string - and it is not the payment time.",
+        "Payments recorded in the Zoho CRM (Customer 360) for a date range, optionally filtered by a customer/name search. With a customer and no date range it scans all time for that customer - use that for 'all payments from X' questions, never a guessed range. This is a SEPARATE ledger from the ERP payments tool: the CRM mirrors ERP payments (each row carries its erp_id) and also holds CRM-only payments, so for any question about payments received - today, this week, from a customer - call BOTH this and get_payments and report each ledger under its own label with its own total; NEVER add the two totals together and never report 'no payments' from one ledger alone. Receive dates are calendar dates with no clock time recorded; record_created_at is the CRM record's creation/sync time, already rendered in the system's timezone in 24-hour format - show it exactly as given, never as a raw UTC string - and it is not the payment time.",
         Customer360PaymentsArgs,
         get_crm_payments,
     ),
