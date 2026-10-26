@@ -10,7 +10,8 @@ the source, and no layer may manufacture one.
 
 These tests pin the honest contract:
   * date-only values surface as dates, with the limitation stated;
-  * genuine instants are converted to PKT by the backend, not the model;
+  * genuine instants are converted to the system timezone, 24-hour,
+    by the backend, not the model;
   * payment date filtering follows the user's calendar (Asia/Karachi),
     so a late-evening ERP instant belongs to the PKT day it lands in;
   * October 23 returns October 23 records only - never October 22
@@ -27,6 +28,7 @@ from langchain_core.messages import AIMessage
 
 from app.agents import chat, chat_tools
 from app.agents.chat import _answer_consistency_errors, run_chat
+from app.services import processors
 from app.agents.chat_tools import get_payments, get_revenue
 from test_chat import FakeCollection, FakeModel
 from test_chat_data_tools import business_db, payment, tool_call
@@ -66,7 +68,7 @@ async def test_date_only_payments_report_dates_not_times():
         assert item["timestamp_precision"] == "date"
         assert item["received_date"] == "2026-10-22"
         # no exact time is exposed for the model to narrate
-        assert "received_time_pkt" not in item
+        assert "received_time" not in item
         assert item.get("received_at") is None
 
 
@@ -96,7 +98,14 @@ async def test_genuine_instant_is_converted_to_pkt_by_the_backend():
     assert result["total_count"] == 1
     item = result["items"][0]
     assert item["timestamp_precision"] == "instant"
-    assert item["received_time_pkt"] == "Oct 23, 2026, 12:24 AM PKT"
+    # Clock time: system timezone, 24-hour, never 12-hour AM/PM, never raw UTC.
+    shown = processors.parse_date("2026-10-22T14:24:32-05:00").astimezone(
+        processors.system_timezone()
+    )
+    assert item["received_time"] == shown.strftime(
+        f"%b %d, %Y, %H:%M {processors.system_tz_label()}"
+    )
+    assert "AM" not in item["received_time"] and "PM" not in item["received_time"]
     assert item["received_date"] == "2026-10-23"
     on_erp_day = await get_payments(date_from=date(2026, 10, 22), date_to=date(2026, 10, 22),
                                     database=database)
@@ -116,7 +125,12 @@ async def test_missing_and_naive_timestamps_are_classified_honestly():
     assert by_id[8002]["timestamp_precision"] == "missing"
     # a naive source value is read on the ERP's wall clock and converted
     assert by_id[8003]["timestamp_precision"] == "instant"
-    assert by_id[8003]["received_time_pkt"] == "Oct 22, 2026, 07:15 PM PKT"
+    shown = processors.parse_date("2026-10-22 09:15:00").astimezone(
+        processors.system_timezone()
+    )
+    assert by_id[8003]["received_time"] == shown.strftime(
+        f"%b %d, %Y, %H:%M {processors.system_tz_label()}"
+    )
 
 
 # ------------------------------------------------------------- guard clause

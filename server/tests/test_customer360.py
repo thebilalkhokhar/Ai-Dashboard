@@ -25,6 +25,7 @@ from app.agents.chat_tools import (
     search_customer360,
 )
 from app.services import customer360 as c360_service
+from app.services import processors
 from app.services.customer360_client import (
     Customer360Client,
     Customer360Error,
@@ -489,6 +490,26 @@ async def test_collect_crm_payments_filters_by_receive_date_and_totals():
     assert result["coverage"]["pages_read"] == 2
     assert result["coverage"]["complete_for_range"] is True
     assert result["coverage"]["module_total"] == 7847
+
+
+@pytest.mark.asyncio
+async def test_crm_payment_row_shows_record_created_in_system_time_24h():
+    """No raw UTC in answers: the CRM record's creation time arrives
+    rendered in the system's timezone, 24-hour clock."""
+    client = StubClient()
+    result = await c360_service.collect_crm_payments(
+        client, date_from="2026-10-23", date_to="2026-10-23"
+    )
+    row = result["results"][0]
+    assert row["erp_id"] == "9958"
+    shown = processors.parse_date("2026-10-23T18:03:44.519Z").astimezone(
+        processors.system_timezone()
+    )
+    assert row["record_created_at"] == shown.strftime(
+        f"%Y-%m-%d %H:%M {processors.system_tz_label()}"
+    )
+    assert row["record_created_at"].endswith(processors.system_tz_label())
+    assert "18:03:44" not in row["record_created_at"]  # raw UTC value gone
 
 
 @pytest.mark.asyncio
