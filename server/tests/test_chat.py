@@ -13,6 +13,7 @@ from app.agents.chat import (
     CHAT_SYSTEM,
     _all_tools_failed,
     _lookup_failed_text,
+    _scrub_null_placeholders,
     execute_chat,
     run_chat,
     stream_chat,
@@ -159,6 +160,20 @@ async def test_invoke_tool_forgives_argument_trivia_instead_of_failing():
     assert result["limit"] == 10
     with pytest.raises(ValidationError):
         await invoke_tool("bounded_read", {"limit": 5}, registry={"bounded_read": tool})
+
+
+def test_null_placeholders_are_scrubbed_from_model_prose():
+    # Live Oct 26 retest: the tool drops None keys, but the model still
+    # filled its row template with the word itself.
+    assert (
+        _scrub_null_placeholders("(Unnamed) — Contact: null — Product: mylar bags")
+        == "(Unnamed) — Product: mylar bags"
+    )
+    assert (
+        _scrub_null_placeholders("(Unnamed) — Contact: (null) — Product: mylar bags")
+        == "(Unnamed) — Product: mylar bags"
+    )
+    assert _scrub_null_placeholders("Contact: nullable, keep this") == "Contact: nullable, keep this"
 
 
 def test_lookup_failed_fallback_fires_only_when_every_tool_errored():
