@@ -782,6 +782,18 @@ def test_receivables_prompt_has_follow_up_and_number_rules():
     assert "Do not invent a cause" not in CHAT_SYSTEM
 
 
+def test_advice_prompt_has_blocker_first_shape_rules():
+    prompt = " ".join(CHAT_SYSTEM.split())
+    assert "Lead with the single blocker" in prompt
+    assert "at most three actions" in prompt
+    assert "never repeat the same ask in two places" in prompt
+    assert "never recommend the very thing that is missing" in prompt
+    assert 'quoted as "per the record"' in prompt
+    assert "Do not print the lead's email or phone inside advice prose" in prompt
+    assert "End with ONE draft" in prompt
+    assert "Close with one question" in prompt
+
+
 @pytest.mark.asyncio
 async def test_prompt_requires_wholly_roman_urdu_replies():
     model = FakeModel([plain_answer("The answer is available.")])
