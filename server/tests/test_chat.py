@@ -9,11 +9,20 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk
 from pydantic import ValidationError
 
-from app.agents.chat import CHAT_SYSTEM, execute_chat, run_chat, stream_chat, trim_turns
+from app.agents.chat import (
+    CHAT_SYSTEM,
+    _all_tools_failed,
+    _lookup_failed_text,
+    execute_chat,
+    run_chat,
+    stream_chat,
+    trim_turns,
+)
 from app.agents.chat_tools import (
     CHAT_TOOL_MAP,
     EmptyArgs,
     RevenueArgs,
+    ToolArgs,
     TopItemsArgs,
     ChatTool,
     get_dashboard_metrics,
@@ -110,12 +119,63 @@ def plain_answer(text):
 
 @pytest.mark.asyncio
 async def test_tool_arguments_are_pydantic_validated_and_bounded():
+    # Schema-level bounds are unchanged; invoke_tool itself now clamps
+    # (see test_invoke_tool_forgives_argument_trivia_instead_of_failing)
+    # instead of failing a whole lookup on an out-of-range limit.
     with pytest.raises(ValidationError):
         TopItemsArgs.model_validate({"limit": 11})
     with pytest.raises(ValidationError):
         RevenueArgs.model_validate({"date_from": "2026-10-21", "date_to": "2026-10-20"})
+
+
+@pytest.mark.asyncio
+async def test_invoke_tool_forgives_argument_trivia_instead_of_failing():
+    """Live Oct 26: a basic leads question died twice at 0 ms because the
+    model passed an invented extra argument / out-of-range limit and the
+    generic error gave it nothing to fix. invoke_tool now drops unknown
+    keys and clamps numeric bounds, so the lookup is served; a missing
+    required field still fails loudly."""
+    from pydantic import Field
+
+    class BoundedArgs(ToolArgs):
+        limit: int | None = Field(default=None, ge=1, le=10)
+        name: str = Field(min_length=1)
+
+    seen = {}
+
+    async def read_tool(limit=None, name=None, database=None):
+        seen["limit"] = limit
+        seen["name"] = name
+        return {"limit": limit, "name": name}
+
+    tool = ChatTool("bounded_read", "Bounded test tool", BoundedArgs, read_tool)
+    result = await invoke_tool(
+        "bounded_read",
+        {"limit": 99, "window": "last 7 days", "name": "Acme"},
+        registry={"bounded_read": tool},
+    )
+    assert seen["limit"] == 10  # clamped into le=10, not a validation failure
+    assert seen["name"] == "Acme"
+    assert result["limit"] == 10
     with pytest.raises(ValidationError):
-        await invoke_tool("get_top_unpaid", {"limit": 11}, registry=CHAT_TOOL_MAP)
+        await invoke_tool("bounded_read", {"limit": 5}, registry={"bounded_read": tool})
+
+
+def test_lookup_failed_fallback_fires_only_when_every_tool_errored():
+    assert _all_tools_failed([]) is False
+    assert _all_tools_failed([{"tool": "get_stuck_leads", "result": {"error": "boom"}}]) is True
+    assert (
+        _all_tools_failed(
+            [
+                {"tool": "get_stuck_leads", "result": {"error": "boom"}},
+                {"tool": "get_leads", "result": {"total_count": 3}},
+            ]
+        )
+        is False
+    )
+    assert _lookup_failed_text("Show me the leads that need follow-up.") == (
+        "I couldn't load that data just now — the lookup failed. Please try again."
+    )
 
 
 @pytest.mark.asyncio
