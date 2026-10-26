@@ -51,9 +51,10 @@ vi.mock("@/services/api", () => ({
         h.setSendHandler((event) => onEvent(event));
       }),
   ),
+  cancelChatTurn: vi.fn(async () => true),
 }));
 
-import { fetchAgents, fetchTasks, sendMessage } from "@/services/api";
+import { cancelChatTurn, fetchAgents, fetchTasks, sendMessage } from "@/services/api";
 import { ChatInterface } from "@/components/chat-interface";
 import { CommandCenter } from "@/components/command-center/command-center";
 import { ExecutionOverlay } from "@/components/command-center/execution-overlay";
@@ -167,6 +168,22 @@ describe("execution lifecycle", () => {
     // completed: the response is readable and the view is not "working"
     expect(await screen.findByText("There are 42 overdue invoices.")).toBeInTheDocument();
     expect(screen.getByTestId("flow-node-synthesize")).toHaveTextContent("done");
+  });
+
+  it("stop settles a live turn as cancelled and frees the input at once", async () => {
+    renderApp();
+    await startTurn();
+
+    // the turn is live, so Stop is offered next to New chat
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    await waitFor(() =>
+      expect(vi.mocked(cancelChatTurn)).toHaveBeenCalledWith("task-live"),
+    );
+    expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
+
+    // a cancelled turn does not block the next request
+    await act(async () => submit("Show overdue accounts"));
+    await waitFor(() => expect(vi.mocked(sendMessage)).toHaveBeenCalledTimes(2));
   });
 
   it("grows a routing tree: lookups appear under the specialist whose territory they belong to", async () => {
