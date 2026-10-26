@@ -44,6 +44,23 @@ const AGENT_IMAGES: Record<string, string> = {
   crm_deal_watch: "/crm-deal-watch.webp",
 };
 
+// The neural mesh behind the tree: fixed geometry, so it never jumps
+// between renders. It is backdrop ambience, not work: pulses drift along
+// it slowly once the turn settles and fast while it runs.
+const MESH_POINTS: Array<[number, number]> = [
+  [6, 18], [14, 78], [22, 30], [30, 88], [38, 14], [44, 64], [52, 26],
+  [58, 84], [66, 12], [72, 48], [80, 74], [88, 22], [92, 60], [10, 50],
+  [96, 88], [26, 58], [48, 92], [62, 38],
+];
+const MESH_EDGES: Array<[number, number]> = [
+  [0, 2], [0, 13], [13, 1], [13, 15], [15, 2], [2, 4], [4, 6], [6, 8],
+  [8, 11], [11, 12], [12, 10], [10, 7], [7, 3], [3, 16], [16, 1], [15, 5],
+  [5, 6], [5, 17], [17, 9], [9, 12], [9, 6], [14, 12],
+];
+const MESH_HUBS = new Set([2, 6, 9, 12]);
+const MESH_CALM = [0, 5, 10, 15, 20, 7];
+const MESH_FAST = [2, 12, 17, 21];
+
 // Tree columns, in percent of the stage.
 const ROOT_X = 7;
 const BRANCH_X = 26;
@@ -362,6 +379,47 @@ export function OperationFlow({
       <div className="jtree-stage">
         <div className="jtree-grid" aria-hidden="true" />
         <div className="jtree-glow" aria-hidden="true" />
+        <svg viewBox="0 0 100 100" className="jtree-mesh" aria-hidden="true" preserveAspectRatio="none">
+          {MESH_EDGES.map(([a, b], index) => {
+            const [x1, y1] = MESH_POINTS[a];
+            const [x2, y2] = MESH_POINTS[b];
+            return (
+              <path
+                key={index}
+                id={`${uid}-mesh-${index}`}
+                d={`M ${x1} ${y1} L ${x2} ${y2}`}
+                className="jtree-mesh-line"
+                vectorEffect="non-scaling-stroke"
+              />
+            );
+          })}
+          {MESH_POINTS.map(([x, y], index) => (
+            <circle
+              key={index}
+              cx={x}
+              cy={y}
+              r={MESH_HUBS.has(index) ? 1.1 : 0.7}
+              className={MESH_HUBS.has(index) ? "jtree-mesh-node jtree-mesh-node--hub" : "jtree-mesh-node"}
+            />
+          ))}
+          {!reducedMotion &&
+            MESH_CALM.map((edge, index) => (
+              <circle key={`calm-${edge}`} className="jtree-mesh-pulse" r="0.6">
+                <animateMotion dur={`${5.5 + index * 0.4}s`} repeatCount="indefinite" begin={`${index * 0.9}s`}>
+                  <mpath href={`#${uid}-mesh-${edge}`} />
+                </animateMotion>
+              </circle>
+            ))}
+          {!reducedMotion &&
+            isLivePhase(execution) &&
+            MESH_FAST.map((edge, index) => (
+              <circle key={`fast-${edge}`} className="jtree-mesh-pulse jtree-mesh-pulse--fast" r="0.7">
+                <animateMotion dur="2.2s" repeatCount="indefinite" begin={`${index * 0.55}s`}>
+                  <mpath href={`#${uid}-mesh-${edge}`} />
+                </animateMotion>
+              </circle>
+            ))}
+        </svg>
         <div className="jtree-sweep" aria-hidden="true" />
         <svg viewBox="0 0 100 100" className="jtree-svg" aria-hidden="true" preserveAspectRatio="none">
           <defs>
@@ -391,11 +449,13 @@ export function OperationFlow({
                 {edge.flowing && !reducedMotion && (
                   <>
                     <path d={link(edge.from, edge.to)} className="jtree-line jtree-line-flow" stroke={`url(#${uid}-flow)`} pathLength={1} vectorEffect="non-scaling-stroke" />
-                    <circle className="jtree-particle" r="0.65">
-                      <animateMotion dur={`${1.7 + (index % 3) * 0.35}s`} repeatCount="indefinite" begin={`${(index % 4) * 0.3}s`}>
-                        <mpath href={`#${pathId}`} />
-                      </animateMotion>
-                    </circle>
+                    {[0, 1].map((dot) => (
+                      <circle key={dot} className="jtree-particle" r="0.65">
+                        <animateMotion dur={`${1.7 + (index % 3) * 0.35 + dot * 0.5}s`} repeatCount="indefinite" begin={`${(index % 4) * 0.3 + dot * 0.8}s`}>
+                          <mpath href={`#${pathId}`} />
+                        </animateMotion>
+                      </circle>
+                    ))}
                   </>
                 )}
               </g>
