@@ -8,7 +8,7 @@
 // exactly one in-flight request. No raw tool identifiers are shown.
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Plus, RotateCcw, Send, Sparkles } from "lucide-react";
+import { Plus, RotateCcw, Send, Sparkles, Square } from "lucide-react";
 import { useExecutionController } from "@/components/command-center/execution-context";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { AnswerProvenance } from "@/components/chat-provenance";
@@ -33,6 +33,7 @@ export function ChatInterface() {
     activeTool,
     chatError,
     send,
+    stop,
     retry,
     newChat,
     lastTurn,
@@ -96,16 +97,29 @@ export function ChatInterface() {
         {activeTool && (
           <span className="truncate text-[11px] text-cyan-200/80">{toolPhrase(activeTool)}</span>
         )}
-        <button
-          type="button"
-          onClick={newChat}
-          disabled={isSending}
-          className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-muted transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-50"
-          title="Start a new conversation - this one stays stored under Chats"
-        >
-          <Plus size={12} aria-hidden="true" />
-          New chat
-        </button>
+        <span className="ml-auto inline-flex shrink-0 items-center gap-1.5">
+          {(isSending || isLive) && (
+            <button
+              type="button"
+              onClick={stop}
+              className="inline-flex shrink-0 items-center gap-1 rounded-md border border-red-400/40 px-2 py-1 text-[11px] text-red-300 transition-colors hover:border-red-400/70 hover:text-red-200"
+              title="Stop this request, on the backend as well"
+            >
+              <Square size={11} aria-hidden="true" />
+              Stop
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={newChat}
+            disabled={isSending}
+            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-muted transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-50"
+            title="Start a new conversation - this one stays stored under Chats"
+          >
+            <Plus size={12} aria-hidden="true" />
+            New chat
+          </button>
+        </span>
       </div>
 
       <div
