@@ -170,14 +170,20 @@ export function ChatInterface() {
           ) : (
             <div key={entry.id} className="chat-row chat-row--assistant">
               <span className="chat-avatar" aria-hidden="true">
+                {/* The clip loops only while this message is the live one:
+                a finished answer keeps a still frame instead of looping
+                forever next to a completed reply. The key remounts the
+                video when liveness flips, because flipping autoPlay alone
+                never pauses a video that is already playing. */}
                 <video
+                  key={isLive && entry.id === lastMessageId ? "live" : "still"}
                   className="chat-avatar-clip"
                   src="/chat.mp4"
                   aria-hidden="true"
                   muted
-                  loop
+                  loop={isLive && entry.id === lastMessageId}
                   playsInline
-                  autoPlay
+                  autoPlay={isLive && entry.id === lastMessageId}
                   preload="metadata"
                   tabIndex={-1}
                 />
