@@ -541,5 +541,14 @@ describe("execution lifecycle", () => {
     const tree = flow.querySelector(".jtree");
     expect(tree?.getAttribute("data-live")).toBe("true");
   });
+
+  it("operation tree draws a neural mesh across the whole stage", async () => {
+    renderApp();
+    await startTurn();
+    const flow = screen.getByTestId("cc-operation-flow");
+    expect(flow.querySelector(".jtree-mesh")).toBeInTheDocument();
+    expect(flow.querySelectorAll(".jtree-mesh-line").length).toBeGreaterThan(10);
+    expect(flow.querySelectorAll(".jtree-mesh-node").length).toBeGreaterThan(10);
+  });
 });
 
