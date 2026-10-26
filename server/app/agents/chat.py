@@ -838,6 +838,7 @@ _PERIOD_PHRASES = {
     "this_quarter": "this quarter", "last_quarter": "last quarter",
     "this_year": "this year", "last_year": "last year",
     "last_7_days": "the last 7 days", "last_30_days": "the last 30 days", "last_90_days": "the last 90 days",
+    "all_time": "all time", "all": "all time",
 }
 
 # A period code the model may echo verbatim from the tool ("(last_week)").

@@ -619,6 +619,12 @@ async def get_top_unpaid(limit: int = 5, database: Any = None) -> dict:
     )
 
 
+# One label map for artwork state, shared by get_stuck_leads and
+# get_leads: the model renders a null it receives as the literal
+# "(null)", so artwork always carries an explicit label instead.
+_ARTWORK_LABELS = {True: "Provided", False: "Missing", None: "Not stated"}
+
+
 async def get_stuck_leads(
     days: int | None = None,
     limit: int | None = None,
@@ -642,7 +648,6 @@ async def get_stuck_leads(
     now = datetime.now(timezone.utc)
     rows = await db.leads.find(processors.LEAD_STATUS_QUERY, processors.LEAD_FIELDS).to_list(50_000)
     stuck = processors.stuck_leads(rows, now, days=args.days)
-    artwork_labels = {True: "Provided", False: "Missing", None: "Not stated"}
     page_limit = args.limit or 10
     # A missing field is absent, never null: the model renders a null it
     # receives as the literal "(null)" (live Oct 26: "Contact: (null)"),
@@ -668,10 +673,16 @@ async def get_stuck_leads(
                 "size": row.get("size"),
                 "material": row.get("material"),
                 "finish": row.get("finish"),
-                "artwork": artwork_labels[row["artwork_present"]],
+                "artwork": _ARTWORK_LABELS[row["artwork_present"]],
                 "missing": row["missing"],
                 "next_action": row.get("next_action")
                 or processors.lead_next_action(row["missing"], row["contact_name"]),
+                "conversion_reason": row.get("conversion_reason")
+                or processors.conversion_reason(
+                    row["missing"],
+                    row["status"],
+                    row["days_since_activity"],
+                ),
             }.items()
             if value is not None
         }
@@ -963,11 +974,23 @@ class CombinedPaymentsArgs(ToolArgs):
         default=None,
         max_length=32,
         exclude=True,
-        description=periods.PERIOD_HINT + " Prefer this over guessing dates.",
+        description=periods.PERIOD_HINT
+        + " Prefer this over guessing dates. 'All time' is accepted and means"
+        + " the full window (2000-01-01 to today). If the question names a"
+        + " customer and gives no period, omit period: the customer window"
+        + " is all time by default.",
     )
     date_from: date | None = None
     date_to: date | None = None
-    customer: str | None = Field(default=None, max_length=120)
+    customer: str | None = Field(
+        default=None,
+        max_length=120,
+        description="Customer name exactly as the question names it (for example"
+        " TREATDAY LLC or Canyon Plastics). When the question names a customer,"
+        " always pass it here - never answer a named-customer question with"
+        " unfiltered totals. With a customer and no period, the window is"
+        " all time.",
+    )
     limit: int = Field(default=DEFAULT_TOOL_ROWS, ge=1)
     offset: int = Field(default=0, ge=0)
 
@@ -1587,6 +1610,11 @@ async def get_leads(
             part for part in (str(row.get("firstName") or ""), str(row.get("lastName") or "")) if part
         ) or None
         missing_fields = processors.missing_lead_fields(parsed)
+        idle_days = processors.age_days(
+            processors.parse_date(row.get("lastActivityAt"))
+            or processors.parse_date(row.get("createdAt")),
+            now,
+        )
         item = {
             "lead_id": lead_id,
             "contact_name": contact_name,
@@ -1595,18 +1623,27 @@ async def get_leads(
             "source": str(row.get("source") or "") or None,
             "created_at": processors.iso_or_none(row.get("createdAt")),
             "last_activity_at": processors.iso_or_none(row.get("lastActivityAt")),
-            "days_since_activity": processors.age_days(
-                processors.parse_date(row.get("lastActivityAt"))
-                or processors.parse_date(row.get("createdAt")),
-                now,
-            ),
+            "days_since_activity": idle_days,
             "product": parsed.get("product") or parsed.get("type"),
             "quantity": parsed.get("quantity"),
             "size": parsed.get("size"),
             "material": parsed.get("material"),
             "finish": parsed.get("finish"),
             "missing": missing_fields,
-            "next_action": processors.lead_next_action(missing_fields, contact_name),
+            "artwork": _ARTWORK_LABELS[parsed.get("artwork_present")],
+            "next_action": processors.lead_next_action(
+                missing_fields,
+                contact_name,
+                artwork_present=parsed.get("artwork_present"),
+                description_shape=parsed.get("shape"),
+            ),
+            # No conversion_reason here, deliberately: get_leads pages
+            # must match get_stuck_leads row-for-row (the continuation
+            # anchor cannot tell the views apart by count), and the tool
+            # response is hard-capped at ~10,500 chars - one more
+            # sentence per row trims rows off the page. The reason lives
+            # on get_stuck_leads, the stuck-lead view; get_leads still
+            # carries the artwork state and the corrected next_action.
             "stuck": lead_id in stuck_ids if args.stuck_only else None,
         }
         if item["days_since_activity"] is not None:
@@ -3166,7 +3203,7 @@ CHAT_TOOLS = [
     ChatTool("get_rep_summary", "Get Python-computed quote, order, and payment counts and totals for one rep and date range.", RepSummaryArgs, get_rep_summary),
     ChatTool(
         "get_stuck_leads",
-        "Get leads that are stuck before becoming an order: status New or Attempted to Contact, recent activity, a description present, not flagged by the lead desk. Returns Python-parsed product/quantity/size/material/finish, the missing-field list, artwork state (Provided/Missing/Not stated), and next_action - the one Python-computed question to ask that lead (for example 'Ask Orthoza for the missing material.'). For advice questions, quote next_action as the question: never recommend the very thing it says is missing. No email or phone numbers are returned." + PAGING_NOTE,
+        "Get leads that are stuck before becoming an order: status New or Attempted to Contact, recent activity, a description present, not flagged by the lead desk. Returns Python-parsed product/quantity/size/material/finish, the missing-field list, artwork state (Provided/Missing/Not stated), next_action - the one Python-computed question to ask that lead (for example 'Ask Orthoza for the missing material.') - and conversion_reason, the one Python-computed reason the lead has not converted. For advice questions, quote next_action as the question and conversion_reason as the reason: never recommend the very thing next_action says is missing, never invent typical blockers (pricing approval, proofs, payment terms) the record does not state, and never offer to draft, email, or contact the customer. Rows are newest-activity first, so row 1 is the most recently active stuck lead, not the biggest; to find one named lead, use get_leads with search instead of taking row 1. No email or phone numbers are returned." + PAGING_NOTE,
         StuckLeadsArgs,
         get_stuck_leads,
     ),
@@ -3202,7 +3239,7 @@ CHAT_TOOLS = [
     ),
     ChatTool(
         "get_leads",
-        "List lead records with parsed product/quantity/size/material/finish, the missing-field list and next_action - the one Python-computed question to ask that lead. For advice questions, quote next_action as the question: never recommend the very thing it says is missing. Filters: status text, stuck_only, search text. No contact details are returned." + PAGING_NOTE,
+        "List lead records with parsed product/quantity/size/material/finish, the missing-field list, artwork state, and next_action - the one Python-computed question to ask that lead. For advice questions, quote next_action as the question: never recommend the very thing it says is missing, never invent typical blockers the record does not state, and never offer to draft, email, or contact the customer. (The full conversion_reason lives on get_stuck_leads, not here: this view must page identically to it.) Filters: status text, stuck_only, search text. No contact details are returned." + PAGING_NOTE,
         LeadArgs,
         get_leads,
     ),
