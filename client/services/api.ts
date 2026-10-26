@@ -399,6 +399,14 @@ export async function deleteChatThread(threadId: string): Promise<void> {
   });
 }
 
+export async function cancelChatTurn(taskId: string): Promise<boolean> {
+  const data = await apiFetch<{ cancelled: boolean }>(
+    `/api/tasks/${encodeURIComponent(taskId)}/cancel`,
+    { method: "POST" },
+  );
+  return data.cancelled === true;
+}
+
 function parseChatEvent(block: string): ChatStreamEvent | null {
   let eventName = "";
   const dataLines: string[] = [];
