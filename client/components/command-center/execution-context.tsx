@@ -537,9 +537,11 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
     const turnId = recoveryRef.current.turnId;
     if (!turnId) return;
     if (events.taskStatus === "failed" || events.taskStatus === "cancelled") {
-      endRecovery();
-      setChatError("That request did not complete.");
-      failTurn(turnId, "That request did not complete.");
+      queueMicrotask(() => {
+        endRecovery();
+        setChatError("That request did not complete.");
+        failTurn(turnId, "That request did not complete.");
+      });
     }
   }, [events.taskStatus, endRecovery, failTurn]);
 
