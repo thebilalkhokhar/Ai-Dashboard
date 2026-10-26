@@ -905,6 +905,18 @@ button {
   background: radial-gradient(circle at 40% 32%, #67e8f9, #2563eb 55%, #0b1226 100%);
   box-shadow: 0 0 26px rgba(56, 189, 248, 0.5);
 }
+.jtree-dot-icon,
+.jtree-orb-icon {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.92);
+  pointer-events: none;
+}
+.jtree-dot-icon svg {
+  filter: drop-shadow(0 1px 3px rgba(2, 4, 12, 0.6));
+}
 
 .jtree-node[data-state="done"] .jtree-dot {
   border-color: rgba(52, 211, 153, 0.8);
