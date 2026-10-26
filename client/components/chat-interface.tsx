@@ -285,21 +285,25 @@ export function ChatInterface() {
                   )
                 )}
               </div>
-              <button
-                type="button"
-                className="chat-reply-btn"
-                onClick={() =>
-                  setReplyTo({
-                    id: entry.id,
-                    role: "assistant",
-                    excerpt: excerptOf(entry.content),
-                  })
-                }
-                aria-label="Reply to this answer"
-              >
-                <Reply size={11} aria-hidden="true" />
-                Reply
-              </button>
+              {/* A live typing row has no text yet: quoting an empty
+                  answer would produce a reply bar with an empty excerpt. */}
+              {entry.content.trim().length > 0 && (
+                <button
+                  type="button"
+                  className="chat-reply-btn"
+                  onClick={() =>
+                    setReplyTo({
+                      id: entry.id,
+                      role: "assistant",
+                      excerpt: excerptOf(entry.content),
+                    })
+                  }
+                  aria-label="Reply to this answer"
+                >
+                  <Reply size={11} aria-hidden="true" />
+                  Reply
+                </button>
+              )}
             </div>
           );
         })}
@@ -349,7 +353,7 @@ export function ChatInterface() {
             onKeyDown={handleComposerKey}
             placeholder={
               isSending
-                ? "Type a follow-up - it will queue behind this request..."
+                ? "Type a follow-up - it will queue"
                 : "Ask JARVIS about the business..."
             }
             aria-label="Message Biztek Assistant"

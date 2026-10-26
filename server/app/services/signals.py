@@ -160,7 +160,8 @@ def _window_strings(now: datetime, days_low: int, days_high: int, slack_days: in
 
 
 # ---------------------------------------------------------------------------
-# the three signals, built with bounded work
+# the three signals, built with bounded work 
+# 
 # ---------------------------------------------------------------------------
 
 

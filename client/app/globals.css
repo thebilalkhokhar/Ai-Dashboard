@@ -693,6 +693,7 @@ button {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   pointer-events: auto;
+  container-type: inline-size;
 }
 
 /* Pipeline column labels: the tree reads as one system, not a scatter -
@@ -707,12 +708,28 @@ button {
   position: absolute;
   top: 0;
   transform: translateX(-50%);
-  font-size: 0.58rem;
+  font-size: clamp(7.5px, 1.05cqw, 9.3px);
   font-weight: 700;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: rgba(147, 165, 204, 0.75);
   white-space: nowrap;
+}
+
+/* When the stage is too narrow for six labels, the two right-most columns
+   lose their caption before they can collide; the nodes still name
+   themselves in full. */
+@container (max-width: 700px) {
+  .jtree-column-label--validation,
+  .jtree-column-label--response {
+    display: none;
+  }
+
+  /* A narrow stage has less vertical room between rows; the branch cards
+     drop their secondary line so two stacked specialists cannot touch. */
+  .jtree-sub {
+    display: none;
+  }
 }
 
 /* Live backdrop: a dot grid and two soft glows make the stage feel deep,
@@ -770,9 +787,40 @@ button {
   }
 }
 
-/* The neural mesh: faint neurons and links across the whole stage, with
-   pulses drifting along them. Dimmer once the turn settles, brighter
-   while it runs - the backdrop breathes, the tree itself stays honest. */
+/* The neural formation: a layered web of somas, dendrites and synapse fibres
+   covering the whole stage, with signals drifting along selected fibres. It
+   is backdrop ambience - dim while a turn settles, brighter and busier while
+   one runs - and it never claims work the tree has not recorded. */
+.jtree-neural {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0.46;
+  transition: opacity 900ms ease;
+}
+
+.jtree[data-live="true"] .jtree-neural {
+  opacity: 0.7;
+}
+
+.jtree-neural::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(46% 58% at 46% 50%, rgba(3, 6, 18, 0.5), transparent 74%),
+    linear-gradient(90deg, rgba(3, 6, 18, 0.55), transparent 16%, transparent 84%, rgba(3, 6, 18, 0.55));
+  pointer-events: none;
+}
+
+.jtree-neural-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
 .jtree-mesh {
   position: absolute;
   inset: 0;
@@ -784,29 +832,57 @@ button {
 
 .jtree-mesh-line {
   fill: none;
-  stroke: rgba(125, 190, 255, 0.16);
+  stroke: rgba(110, 170, 245, 0.2);
   stroke-width: 1;
+  stroke-linecap: round;
+  transition: stroke 600ms ease, opacity 600ms ease;
 }
 
-.jtree[data-live="false"] .jtree-mesh-line {
-  stroke: rgba(125, 190, 255, 0.1);
+.jtree-mesh-line.jtree-neural-fibre--cool { stroke: rgba(125, 200, 255, 0.32); }
+.jtree-mesh-line.jtree-neural-fibre--violet { stroke: rgba(167, 139, 250, 0.28); }
+.jtree-mesh-line.jtree-neural-fibre--warm { stroke: rgba(251, 191, 36, 0.2); }
+
+.jtree[data-live="true"] .jtree-mesh-line.jtree-neural-fibre--cool {
+  stroke: rgba(147, 215, 255, 0.38);
+}
+
+.jtree[data-live="true"] .jtree-mesh-line.jtree-neural-fibre--violet {
+  stroke: rgba(179, 155, 255, 0.3);
 }
 
 .jtree-mesh-node {
-  fill: rgba(147, 197, 253, 0.45);
+  fill: rgba(186, 226, 255, 0.62);
 }
 
-.jtree-mesh-node--hub {
-  fill: rgba(125, 240, 255, 0.7);
+.jtree-neural-core {
+  filter: drop-shadow(0 0 3px rgba(125, 211, 252, 0.55));
+}
+
+.jtree-neural-soma.is-hub .jtree-neural-core {
+  fill: rgba(224, 248, 255, 0.92);
+}
+
+.jtree-neural-dendrites {
+  opacity: 0.7;
 }
 
 .jtree-mesh-pulse {
   fill: #a5f3fc;
-  filter: drop-shadow(0 0 3px rgba(125, 240, 255, 0.9));
+  filter: drop-shadow(0 0 4px rgba(125, 240, 255, 0.9));
 }
 
-.jtree-mesh-pulse--fast {
-  fill: #e0f2fe;
+.jtree-mesh-pulse.is-amber {
+  fill: #ffc46b;
+  filter: drop-shadow(0 0 5px rgba(251, 146, 60, 0.95));
+}
+
+.jtree-mesh-pulse.is-live {
+  fill: #eafcff;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jtree-neural { opacity: 0.48; }
+  .jtree-neural-signals { display: none; }
 }
 
 /* Settled dots keep a slow orbit: the tree stays alive after the run
@@ -830,6 +906,7 @@ button {
 .jtree-stage {
   position: relative;
   min-height: 0;
+  container-type: inline-size;
 }
 
 .jtree-svg {
@@ -842,9 +919,10 @@ button {
 
 .jtree-line {
   fill: none;
-  stroke: rgba(150, 185, 235, 0.52);
-  stroke-width: 1.7;
-  stroke-dasharray: 1;
+  stroke: rgba(150, 185, 235, 0.48);
+  stroke-width: 1.4;
+  /* one full-length dash, no implicit 50% gap: links read as solid connections */
+  stroke-dasharray: 1 0.0001;
   stroke-dashoffset: 0;
   animation: jtree-draw 0.9s ease-out both;
   transition: opacity 0.45s ease, stroke 0.45s ease;
@@ -892,14 +970,27 @@ button {
   transform: translate(-50%, -50%);
   display: grid;
   justify-items: center;
-  gap: 0.4rem;
-  max-width: 132px;
+  gap: 0.22rem;
+  width: min(132px, 17.5cqw);
   padding: 0;
   background: none;
   border: 0;
   cursor: pointer;
   text-align: center;
   animation: jtree-grow 0.55s cubic-bezier(0.2, 0.9, 0.3, 1.35) both;
+}
+
+.jtree-node--root { width: min(112px, 15cqw); }
+.jtree-node--validation { width: min(96px, 12cqw); }
+.jtree-node--out { width: min(84px, 9.5cqw); }
+
+.jtree-node--out .jtree-label {
+  font-size: clamp(7.2px, 0.9cqw, 10.5px);
+  white-space: nowrap;
+}
+
+.jtree-node--validation .jtree-label {
+  font-size: clamp(7.2px, 0.95cqw, 11.5px);
 }
 
 /* The orb carries its own caption for the hero stage; inside the tree the
@@ -921,28 +1012,40 @@ button {
 
 .jtree-text {
   display: grid;
-  gap: 0.14rem;
+  gap: 0.08rem;
   justify-items: center;
-  padding: 0.28rem 0.55rem;
-  border-radius: 10px;
-  background: radial-gradient(120% 160% at 50% 0%, rgba(4, 8, 20, 0.82), rgba(4, 8, 20, 0.55) 78%);
+  width: 100%;
+  padding: 0.22rem 0.34rem;
+  border-radius: 9px;
+  border: 1px solid rgba(120, 165, 235, 0.14);
+  background:
+    linear-gradient(180deg, rgba(7, 13, 30, 0.94), rgba(5, 9, 22, 0.88)) padding-box;
+  box-shadow: 0 6px 18px rgba(2, 4, 12, 0.32);
+  transition: border-color 200ms ease, background 200ms ease;
+}
+
+.jtree-node:hover .jtree-text {
+  border-color: rgba(125, 211, 252, 0.34);
+  background:
+    linear-gradient(180deg, rgba(10, 18, 38, 0.97), rgba(6, 12, 26, 0.92)) padding-box;
 }
 
 .jtree-label {
-  font-size: 0.76rem;
+  font-size: clamp(9.5px, 1.08cqw, 11.5px);
   font-weight: 600;
   letter-spacing: 0.01em;
   color: #f2f7ff;
-  line-height: 1.25;
+  line-height: 1.18;
+  overflow-wrap: anywhere;
 }
 
 .jtree-state {
-  font-size: 0.6rem;
+  font-size: clamp(7.5px, 0.8cqw, 9px);
   font-weight: 700;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: #93a5cc;
-  line-height: 1.2;
+  line-height: 1.15;
 }
 
 .jtree-node[data-state="active"] .jtree-state { color: #7dd3fc; }
@@ -950,17 +1053,23 @@ button {
 .jtree-node[data-state="failed"] .jtree-state { color: #fca5a5; }
 
 .jtree-sub {
-  font-size: 0.64rem;
+  font-size: clamp(7.5px, 0.82cqw, 9.5px);
   color: rgba(170, 190, 225, 0.85);
-  line-height: 1.3;
+  line-height: 1.2;
 }
 
 .jtree-counts {
-  font-size: 0.64rem;
+  font-size: clamp(7.5px, 0.82cqw, 9.5px);
   font-weight: 600;
   color: #a5f3fc;
-  line-height: 1.35;
+  line-height: 1.2;
   white-space: normal;
+}
+
+/* Five or more rows get a tighter card so the tree never folds onto itself. */
+.jtree[data-density="dense"] .jtree-sub,
+.jtree[data-density="dense"] .jtree-counts {
+  display: none;
 }
 
 /* avatars (root + branch specialists) */
@@ -974,8 +1083,13 @@ button {
   box-shadow: 0 0 0 5px rgba(56, 130, 246, 0.10), 0 10px 30px rgba(2, 4, 12, 0.55);
 }
 
-.jtree-avatar--lg { width: 92px; height: 92px; }
-.jtree-avatar--md { width: 68px; height: 68px; }
+.jtree-avatar--lg { width: min(88px, 13.5cqw); height: min(88px, 13.5cqw); }
+.jtree-avatar--md { width: min(52px, 8cqw); height: min(52px, 8cqw); }
+
+.jtree[data-density="dense"] .jtree-avatar--md {
+  width: min(44px, 7cqw);
+  height: min(44px, 7cqw);
+}
 
 .jtree-node[data-state="active"] .jtree-avatar {
   border-color: rgba(125, 240, 255, 0.85);
@@ -1024,12 +1138,17 @@ button {
 .jtree-dot {
   position: relative;
   display: block;
-  width: 42px;
-  height: 42px;
+  width: clamp(30px, 4.2cqw, 40px);
+  height: clamp(30px, 4.2cqw, 40px);
   border-radius: 999px;
   background: radial-gradient(circle at 35% 30%, #2b3f6e, #0b1226 72%);
   border: 2px solid rgba(148, 184, 255, 0.4);
   box-shadow: 0 8px 22px rgba(2, 4, 12, 0.5);
+}
+
+.jtree[data-density="dense"] .jtree-dot {
+  width: 28px;
+  height: 28px;
 }
 
 .jtree-node[data-state="active"] .jtree-dot {
@@ -1069,12 +1188,12 @@ button {
   background: #b91c1c;
 }
 .jtree-pill-img {
-  width: 18px;
-  height: 18px;
+  width: clamp(12px, 1.5cqw, 16px);
+  height: clamp(12px, 1.5cqw, 16px);
   border-radius: 999px;
   object-fit: cover;
   vertical-align: middle;
-  margin-right: 6px;
+  margin-right: 5px;
 }
 
 .jtree-node[data-state="done"] .jtree-dot {
@@ -1127,23 +1246,47 @@ button {
   to { rotate: 360deg; }
 }
 
-/* data-stage pills: what the lookup actually did to the records */
-.jtree-pill {
+/* data-stage pills: what the lookup actually did to the records. Both stages
+   of one lookup share a cell, so a filter result and its total always read as
+   two steps of the same lookup instead of two stray badges. */
+.jtree-proc {
   position: absolute;
   z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
   transform: translate(-50%, -50%);
-  padding: 0.34rem 0.6rem;
+}
+
+.jtree-pill {
+  position: relative;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.24rem 0.55rem;
   border-radius: 999px;
-  font-size: 0.66rem;
+  font-size: clamp(8px, 0.92cqw, 10.5px);
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.03em;
   white-space: nowrap;
   color: #d1fae5;
-  background: rgba(6, 40, 28, 0.85);
-  border: 1px solid rgba(52, 211, 153, 0.55);
+  background: rgba(6, 40, 28, 0.9);
+  border: 1px solid rgba(52, 211, 153, 0.5);
   box-shadow: 0 6px 18px rgba(2, 4, 12, 0.45);
   cursor: pointer;
+  transition: border-color 200ms ease, background 200ms ease;
   animation: jtree-pill-in 0.6s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+
+.jtree-pill:hover {
+  border-color: rgba(110, 231, 183, 0.85);
+  background: rgba(6, 54, 38, 0.95);
+}
+
+.jtree-pill--filter {
+  color: #bbf7d0;
+  background: rgba(6, 34, 24, 0.9);
 }
 
 /* A filter pill lands contracted: wide as the fetched set, squeezed down
@@ -1169,8 +1312,8 @@ button {
   position: relative;
   display: grid;
   place-items: center;
-  width: 50px;
-  height: 50px;
+  width: clamp(38px, 5.2cqw, 48px);
+  height: clamp(38px, 5.2cqw, 48px);
   border-radius: 999px;
   color: #a5f3fc;
   background: radial-gradient(circle at 38% 30%, #164e63, #0b1226 75%);
@@ -1198,8 +1341,8 @@ button {
 .jtree-orb-mini {
   position: relative;
   display: block;
-  width: 54px;
-  height: 54px;
+  width: clamp(40px, 5.8cqw, 52px);
+  height: clamp(40px, 5.8cqw, 52px);
   border-radius: 999px;
   background:
     radial-gradient(circle at 36% 30%, rgba(186, 240, 255, 0.95), rgba(56, 189, 248, 0.55) 34%, rgba(37, 99, 235, 0.35) 58%, rgba(11, 18, 38, 0.9) 82%);
@@ -1616,7 +1759,7 @@ button {
 }
 
 .cc-stage {
-  width: min(100%, 1080px);
+  width: 100%;
   height: 100%;
   min-height: 0;
   aspect-ratio: auto;
@@ -1624,11 +1767,21 @@ button {
   justify-self: center;
 }
 
+/* In the workspace the stage is sized by its container, not by the
+   illustration's aspect ratio. Without this the flow can grow wider than
+   its glass panel on narrow screens and push the response node off-edge. */
+.cc-stage.jstage--flow {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  aspect-ratio: auto;
+}
+
 .cc-stage.jstage--hero {
   aspect-ratio: 1 / 1;
   height: auto;
   max-height: 100%;
-  width: min(100%, 740px);
+  width: 100%;
   align-self: center;
 }
 
@@ -1701,6 +1854,7 @@ button {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 0.9rem;
+  min-width: 0;
   min-height: 0;
 }
 
@@ -1878,12 +2032,14 @@ button {
 
 .cc-chat {
   display: flex;
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
 }
 
 .cc-chat > section {
   flex: 1;
+  min-width: 0;
   min-height: 0;
 }
 
@@ -1895,6 +2051,7 @@ button {
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-width: 0;
   min-height: 0;
 }
 
@@ -1904,6 +2061,7 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
+  min-width: 0;
   padding: 0.6rem 1rem;
   font-size: 0.72rem;
   color: var(--muted);
@@ -1918,7 +2076,9 @@ button {
 
 .chat-scroll {
   flex: 1;
+  min-width: 0;
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -1950,6 +2110,7 @@ button {
 
 .chat-foot {
   flex-shrink: 0;
+  min-width: 0;
   border-top: 1px solid color-mix(in oklab, var(--border) 55%, transparent);
   padding: 0.75rem;
   background: color-mix(in oklab, var(--surface) 70%, transparent);
@@ -1959,6 +2120,7 @@ button {
   position: relative;
   display: flex;
   width: 100%;
+  min-width: 0;
 }
 
 /* Reply action: parked in the row's free corner, revealed on hover or
@@ -2011,7 +2173,10 @@ button {
   color: rgba(226, 240, 255, 0.85);
 }
 
-/* The reply target bar and the queued-message chips above the composer. */
+/* The reply target bar and the queued-message chips above the composer.
+   The queue is one ordered column: chips stay full-width and ellipsised, so
+   five queued follow-ups never fan out into ragged columns that run under
+   the composer or outside the panel. */
 .chat-reply-bar,
 .chat-queue {
   display: flex;
@@ -2019,9 +2184,11 @@ button {
   align-items: center;
   gap: 0.4rem;
   margin-bottom: 0.5rem;
+  min-width: 0;
 }
 
 .chat-reply-bar {
+  width: 100%;
   padding: 0.4rem 0.6rem;
   border-radius: 0.6rem;
   border: 1px solid rgba(125, 240, 255, 0.25);
@@ -2038,10 +2205,25 @@ button {
   white-space: nowrap;
 }
 
+.chat-queue {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  max-height: 8.4rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(167, 139, 250, 0.35) transparent;
+}
+
 .chat-queue-chip {
-  display: inline-flex;
+  display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 0.35rem;
+  width: 100%;
+  min-width: 0;
   max-width: 100%;
   padding: 0.25rem 0.4rem 0.25rem 0.6rem;
   border-radius: 999px;
@@ -2052,6 +2234,8 @@ button {
 }
 
 .chat-queue-chip-text {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2623,12 +2807,12 @@ button {
   }
 
   .cc-visual {
-    min-height: 460px;
+    min-height: 600px;
   }
 
   .jstage--flow {
-    width: min(100%, 620px);
-    aspect-ratio: 5 / 4;
+    width: min(100%, 760px);
+    aspect-ratio: 16 / 10;
   }
 
   /* Stacked, the workspace is no longer viewport-bounded; give the
@@ -2669,13 +2853,15 @@ button {
   }
 
   .cc-visual {
-    min-height: 420px;
+    /* The flow can carry two stacked lookups per branch; give the stage
+       enough height that those cards never compress into each other. */
+    min-height: 560px;
     padding: 1rem 1rem 0.9rem;
   }
 
   .jstage--flow {
-    width: min(100%, 520px);
-    aspect-ratio: 1 / 1;
+    width: min(100%, 640px);
+    aspect-ratio: 4 / 3;
   }
 
   .jtree-label {
@@ -2738,7 +2924,7 @@ button {
   }
 
   .cc-visual {
-    min-height: 380px;
+    min-height: 540px;
   }
 
   .jn-name {

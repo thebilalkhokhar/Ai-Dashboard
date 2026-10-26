@@ -21,6 +21,7 @@
 import { useId, useState, type ReactNode } from "react";
 import { ShieldCheck } from "lucide-react";
 import { useReducedMotion } from "@/hooks/use-reduced-motion";
+import { NeuralBackdrop } from "@/components/command-center/neural-backdrop";
 import { isLivePhase, type ExecutionPhase } from "@/lib/task-events";
 import type {
   ExecutionTree,
@@ -44,31 +45,20 @@ const AGENT_IMAGES: Record<string, string> = {
   crm_deal_watch: "/crm-deal-watch.webp",
 };
 
-// The neural mesh behind the tree: fixed geometry, so it never jumps
-// between renders. It is backdrop ambience, not work: pulses drift along
-// it slowly once the turn settles and fast while it runs.
-const MESH_POINTS: Array<[number, number]> = [
-  [6, 18], [14, 78], [22, 30], [30, 88], [38, 14], [44, 64], [52, 26],
-  [58, 84], [66, 12], [72, 48], [80, 74], [88, 22], [92, 60], [10, 50],
-  [96, 88], [26, 58], [48, 92], [62, 38],
-];
-const MESH_EDGES: Array<[number, number]> = [
-  [0, 2], [0, 13], [13, 1], [13, 15], [15, 2], [2, 4], [4, 6], [6, 8],
-  [8, 11], [11, 12], [12, 10], [10, 7], [7, 3], [3, 16], [16, 1], [15, 5],
-  [5, 6], [5, 17], [17, 9], [9, 12], [9, 6], [14, 12],
-];
-const MESH_HUBS = new Set([2, 6, 9, 12]);
-const MESH_CALM = [0, 5, 10, 15, 20, 7];
-const MESH_FAST = [2, 12, 17, 21];
-
-// Tree columns, in percent of the stage.
-const ROOT_X = 7;
-const BRANCH_X = 26;
+// Tree columns, in percent of the stage. The gaps are wide enough for the
+// widest card in each column at every stage size (the cards themselves scale
+// with the stage via container query units) and the two right-most columns
+// keep the response inside the stage instead of clipping it.
+const ROOT_X = 8;
+const BRANCH_X = 27;
 const LEAF_X = 46;
-const PROC_X = 66;
+const PROC_X = 65;
 const VALID_X = 83;
-const OUT_X = 93;
+const OUT_X = 95;
 const CENTER_Y = 50;
+// Minimum vertical distance between two specialist cards, in percent of the
+// stage. Below this the name card of one would sit on the other's avatar.
+const BRANCH_GAP = 30;
 
 // Every stage circle carries a real picture, so no circle ever reads
 // empty: the agent branches already have portraits, and the tool-type
@@ -166,7 +156,9 @@ export function OperationFlow({
   for (const stage of tree.agentStages) slots.push({ kind: "agent", ref: stage });
   if (tree.moreStage) slots.push({ kind: "more", ref: tree.moreStage });
 
-  const span = Math.min(88, Math.max(0, (slots.length - 1) * 30));
+  // Rows stay inside 13%..87% of the stage so the first and last card never
+  // collide with the column labels above or the detail strip below.
+  const span = slots.length <= 1 ? 0 : Math.min(74, (slots.length - 1) * 30);
   const slotY = (index: number) =>
     slots.length <= 1 ? CENTER_Y : CENTER_Y - span / 2 + (span / (slots.length - 1)) * index;
 
@@ -187,23 +179,46 @@ export function OperationFlow({
       stagePos.set(stage.id, { id: stage.id, x: leafX, y });
     }
   });
-  for (const branch of tree.branches) {
-    const ys = branch.tools.map((tool) => toolPos.get(tool.stage.id)!.y);
-    const y = ys.reduce((a, b) => a + b, 0) / Math.max(1, ys.length);
-    branchPos.set(branch.agentId, { id: `branch-${branch.agentId}`, x: BRANCH_X, y });
+  // Branch cards are taller than lookup cards, and two branches can easily
+  // share a row when their lookups interleave. Place them at the middle of
+  // their lookups, then push them apart in work order so no two cards touch;
+  // the whole stack is shifted back inside the stage if it runs past the base.
+  const branchLanes = tree.branches
+    .map((branch) => {
+      const ys = branch.tools.map((tool) => toolPos.get(tool.stage.id)!.y);
+      return {
+        branch,
+        y: ys.reduce((a, b) => a + b, 0) / Math.max(1, ys.length),
+      };
+    })
+    .sort((a, b) => a.y - b.y);
+  let cursor = 13;
+  for (const lane of branchLanes) {
+    lane.y = Math.max(lane.y, cursor);
+    cursor = lane.y + BRANCH_GAP;
+  }
+  const stackBottom = cursor - BRANCH_GAP;
+  const bottomRoom = 87;
+  if (stackBottom > bottomRoom) {
+    const shift = stackBottom - bottomRoom;
+    for (const lane of branchLanes) lane.y -= shift;
+  }
+  for (const lane of branchLanes) {
+    lane.y = Math.max(13, Math.min(bottomRoom, lane.y));
+    branchPos.set(lane.branch.agentId, {
+      id: `branch-${lane.branch.agentId}`,
+      x: BRANCH_X,
+      y: lane.y,
+    });
   }
 
+  // Both data stages of one lookup read as one processing cell on the same
+  // row, not as two unrelated pills floating around it.
   const procPos = new Map<string, Placed>();
   for (const tool of allTools) {
+    if (!tool.filter && !tool.aggregation) continue;
     const base = toolPos.get(tool.stage.id)!;
-    const kinds = [
-      tool.filter ? "filter" : null,
-      tool.aggregation ? "aggregation" : null,
-    ].filter(Boolean) as string[];
-    kinds.forEach((kind, index) => {
-      const offset = kinds.length === 1 ? 0 : index === 0 ? -7 : 7;
-      procPos.set(`${kind}-${tool.tool}`, { id: `${kind}-${tool.tool}`, x: PROC_X, y: base.y + offset });
-    });
+    procPos.set(tool.tool, { id: `proc-${tool.tool}`, x: PROC_X, y: base.y });
   }
 
   // ------------------------------------------------------------- edges
@@ -238,15 +253,13 @@ export function OperationFlow({
   }
   for (const tool of allTools) {
     const tp = toolPos.get(tool.stage.id)!;
-    let last = tp;
-    for (const kind of ["filter", "aggregation"] as const) {
-      const present = kind === "filter" ? tool.filter : tool.aggregation;
-      if (!present) continue;
-      const pp = procPos.get(`${kind}-${tool.tool}`)!;
-      pushEdge(`${tool.stage.id}-${kind}`, tp, pp, "done", tool.stage.state, kind === "filter");
-      last = pp;
+    const pp = procPos.get(tool.tool);
+    if (!pp) {
+      terminal.push(tp);
+      continue;
     }
-    terminal.push(last);
+    pushEdge(`${tool.stage.id}-processing`, tp, pp, "done", tool.stage.state, Boolean(tool.filter));
+    terminal.push(pp);
   }
   for (const stage of tree.agentStages) terminal.push(stagePos.get(stage.id)!);
   if (tree.moreStage) terminal.push(stagePos.get(tree.moreStage.id)!);
@@ -361,7 +374,14 @@ export function OperationFlow({
 
   // ------------------------------------------------------------- nodes
   return (
-    <div className="jtree" data-execution={execution} data-live={isLivePhase(execution) ? "true" : "false"} role="group" aria-label="Assistant operation tree">
+    <div
+      className="jtree"
+      data-execution={execution}
+      data-live={isLivePhase(execution) ? "true" : "false"}
+      data-density={slots.length > 3 ? "dense" : "normal"}
+      role="group"
+      aria-label="Assistant operation tree"
+    >
       <div className="jtree-columns" aria-hidden="true">
         <span className="jtree-column-label" style={{ left: `${ROOT_X}%` }}>Assistant</span>
         {hasBranches && (
@@ -372,54 +392,24 @@ export function OperationFlow({
           <span className="jtree-column-label" style={{ left: `${PROC_X}%` }}>Processing</span>
         )}
         {tree.validation && (
-          <span className="jtree-column-label" style={{ left: `${VALID_X}%` }}>Validation</span>
+          <span
+            className="jtree-column-label jtree-column-label--validation"
+            style={{ left: `${VALID_X}%` }}
+          >
+            Validation
+          </span>
         )}
-        <span className="jtree-column-label" style={{ left: `${OUT_X}%` }}>Response</span>
+        <span
+          className="jtree-column-label jtree-column-label--response"
+          style={{ left: `${OUT_X}%` }}
+        >
+          Response
+        </span>
       </div>
       <div className="jtree-stage">
         <div className="jtree-grid" aria-hidden="true" />
         <div className="jtree-glow" aria-hidden="true" />
-        <svg viewBox="0 0 100 100" className="jtree-mesh" aria-hidden="true" preserveAspectRatio="none">
-          {MESH_EDGES.map(([a, b], index) => {
-            const [x1, y1] = MESH_POINTS[a];
-            const [x2, y2] = MESH_POINTS[b];
-            return (
-              <path
-                key={index}
-                id={`${uid}-mesh-${index}`}
-                d={`M ${x1} ${y1} L ${x2} ${y2}`}
-                className="jtree-mesh-line"
-                vectorEffect="non-scaling-stroke"
-              />
-            );
-          })}
-          {MESH_POINTS.map(([x, y], index) => (
-            <circle
-              key={index}
-              cx={x}
-              cy={y}
-              r={MESH_HUBS.has(index) ? 1.1 : 0.7}
-              className={MESH_HUBS.has(index) ? "jtree-mesh-node jtree-mesh-node--hub" : "jtree-mesh-node"}
-            />
-          ))}
-          {!reducedMotion &&
-            MESH_CALM.map((edge, index) => (
-              <circle key={`calm-${edge}`} className="jtree-mesh-pulse" r="0.6">
-                <animateMotion dur={`${5.5 + index * 0.4}s`} repeatCount="indefinite" begin={`${index * 0.9}s`}>
-                  <mpath href={`#${uid}-mesh-${edge}`} />
-                </animateMotion>
-              </circle>
-            ))}
-          {!reducedMotion &&
-            isLivePhase(execution) &&
-            MESH_FAST.map((edge, index) => (
-              <circle key={`fast-${edge}`} className="jtree-mesh-pulse jtree-mesh-pulse--fast" r="0.7">
-                <animateMotion dur="2.2s" repeatCount="indefinite" begin={`${index * 0.55}s`}>
-                  <mpath href={`#${uid}-mesh-${edge}`} />
-                </animateMotion>
-              </circle>
-            ))}
-        </svg>
+        <NeuralBackdrop active={isLivePhase(execution)} />
         <div className="jtree-sweep" aria-hidden="true" />
         <svg viewBox="0 0 100 100" className="jtree-svg" aria-hidden="true" preserveAspectRatio="none">
           <defs>
@@ -524,9 +514,6 @@ export function OperationFlow({
                 <span className="jtree-label">{branch.label}</span>
                 <span className="jtree-state">{stateWord(branch.state)}</span>
                 <span className="jtree-sub">routed by Chat Assistant</span>
-                <span className="jtree-sub">
-                  {branch.tools.length} {branch.tools.length === 1 ? "lookup" : "lookups"}
-                </span>
               </span>
             </button>
           );
@@ -625,43 +612,43 @@ export function OperationFlow({
           );
         })}
 
-        {/* processing pills */}
+        {/* processing: both data stages of one lookup form a single cell */}
         {allTools.flatMap((tool) => {
-          const pills = [];
-          if (tool.filter) {
-            const pos = procPos.get(`filter-${tool.tool}`)!;
-            pills.push(
-              <button
-                key={`filter-${tool.tool}`}
-                type="button"
-                className="jtree-pill"
-                data-state="done"
-                data-testid={`flow-stage-filter-${tool.tool}`}
-                style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
-                onClick={() => setSelected(`filter-${tool.tool}`)}
-              >
-                Filtered · {tool.filter.matched} → {tool.filter.returned}
-              </button>,
-            );
-          }
-          if (tool.aggregation) {
-            const pos = procPos.get(`aggregation-${tool.tool}`)!;
-            pills.push(
-              <button
-                key={`aggregation-${tool.tool}`}
-                type="button"
-                className="jtree-pill jtree-pill--agg"
-                data-state="done"
-                data-testid={`flow-stage-aggregation-${tool.tool}`}
-                style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
-                onClick={() => setSelected(`aggregation-${tool.tool}`)}
-              >
-                <img className="jtree-pill-img" src={STAGE_IMAGES.totals} alt="" aria-hidden="true" />
-                Totals calculated
-              </button>,
-            );
-          }
-          return pills;
+          const pos = procPos.get(tool.tool);
+          if (!pos) return [];
+          return [
+            <div
+              key={`proc-${tool.tool}`}
+              className="jtree-proc"
+              style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
+            >
+              {tool.filter && (
+                <button
+                  type="button"
+                  className="jtree-pill jtree-pill--filter"
+                  data-state="done"
+                  data-testid={`flow-stage-filter-${tool.tool}`}
+                  onClick={() => setSelected(`filter-${tool.tool}`)}
+                  aria-label={`Filtered ${tool.filter.matched} to ${tool.filter.returned} records`}
+                >
+                  Filtered · {tool.filter.matched} → {tool.filter.returned}
+                </button>
+              )}
+              {tool.aggregation && (
+                <button
+                  type="button"
+                  className="jtree-pill jtree-pill--agg"
+                  data-state="done"
+                  data-testid={`flow-stage-aggregation-${tool.tool}`}
+                  onClick={() => setSelected(`aggregation-${tool.tool}`)}
+                  aria-label="Totals calculated by the backend"
+                >
+                  <img className="jtree-pill-img" src={STAGE_IMAGES.totals} alt="" aria-hidden="true" />
+                  Totals calculated
+                </button>
+              )}
+            </div>,
+          ];
         })}
 
         {/* validation */}
