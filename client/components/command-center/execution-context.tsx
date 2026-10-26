@@ -25,6 +25,7 @@ import {
   type ReactNode,
 } from "react";
 import {
+  cancelChatTurn,
   fetchChatThread,
   getChatThreadId,
   sendMessage,
@@ -44,9 +45,9 @@ export const EXIT_TRANSITION_MS = 650;
 // What the chat stream itself can attest to. The full execution state machine
 // (idle -> starting -> running -> synthesizing -> completed/failed/cancelled)
 // is derived from this plus the task's persisted events by `deriveExecution`.
-// A turn never holds a "cancelled" phase of its own: closing this view does not
-// stop backend work, and no cancel endpoint exists, so cancellation can only
-// ever come from a real task.cancelled event.
+// Closing this view does not stop backend work on its own; only an explicit
+// stop (or the stream dying, which the backend records as task.cancelled)
+// settles a turn as cancelled.
 export type TurnPhase = "starting" | "synthesizing" | "completed" | "failed" | "cancelled";
 
 export interface ActiveTurn {
@@ -87,6 +88,8 @@ interface ExecutionController {
   setWorkspaceOwnsActiveView(claimed: boolean): void;
   /** Returns false when a turn is already in flight. */
   send(prompt: string): boolean;
+  /** Stop the in-flight turn, on the backend as well as in this view. */
+  stop(): void;
   /** Re-submit the last request after a failure. */
   retry(): void;
   /** The stored conversation this panel is showing. */
@@ -277,9 +280,14 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
   const beginTurn = useCallback(
     (prompt: string) => {
       const current = turnRef.current;
-      // Only a finished or failed turn may be replaced; an in-flight one is
-      // refused, so a request can never be submitted twice.
-      if (current && current.phase !== "completed" && current.phase !== "failed") {
+      // Only a settled turn may be replaced; an in-flight one is refused,
+      // so a request can never be submitted twice.
+      if (
+        current &&
+        current.phase !== "completed" &&
+        current.phase !== "failed" &&
+        current.phase !== "cancelled"
+      ) {
         return null;
       }
       clearCloseTimer();
@@ -363,8 +371,17 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
   // above): written while it runs, cleared the moment it settles.
   useEffect(() => {
     if (!turn || !threadId) return;
-    if (turn.phase === "completed" || turn.phase === "failed" || !turn.taskId) {
-      if (turn.phase === "completed" || turn.phase === "failed") {
+    if (
+      turn.phase === "completed" ||
+      turn.phase === "failed" ||
+      turn.phase === "cancelled" ||
+      !turn.taskId
+    ) {
+      if (
+        turn.phase === "completed" ||
+        turn.phase === "failed" ||
+        turn.phase === "cancelled"
+      ) {
         clearStoredActiveTurn();
       }
       return;
@@ -548,12 +565,38 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
   // A pending recovery poll must not outlive the provider.
   useEffect(() => stopRecoveryTimer, [stopRecoveryTimer]);
 
-  // Hiding the view only. There is no cancel endpoint anywhere in this system,
-  // so dismissing must never imply backend work stopped.
+  // Hiding the view only. Stopping is the separate `stop` action below;
+  // dismissing must never imply backend work stopped.
   const dismiss = useCallback(() => {
     clearCloseTimer();
     commit(null);
   }, [clearCloseTimer, commit]);
+
+  // Stop the in-flight turn for real: cancel it on the backend (the worker
+  // records task.cancelled), end any recovery polling, and settle this view
+  // as cancelled so a new request can be sent at once. The send loop's own
+  // failure path is suppressed for this turn - stop already settled it.
+  const stopRequestedRef = useRef(false);
+  const stop = useCallback(() => {
+    const current = turnRef.current;
+    if (
+      !current ||
+      current.phase === "completed" ||
+      current.phase === "failed" ||
+      current.phase === "cancelled"
+    ) {
+      return;
+    }
+    stopRequestedRef.current = true;
+    const taskId = current.taskId;
+    if (taskId) {
+      void cancelChatTurn(taskId).catch(() => {});
+    }
+    endRecovery();
+    updatePhase(current.turnId, "cancelled", "Stopped.");
+    setChatError("");
+    setActiveTool("");
+  }, [endRecovery, updatePhase]);
 
   const send = useCallback(
     (prompt: string) => {
@@ -581,6 +624,7 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
         );
 
       lastPromptRef.current = text;
+      stopRequestedRef.current = false;
       sendingRef.current = true;
       setIsSending(true);
       setChatError("");
@@ -634,16 +678,22 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
           await sendMessage(text, handleStreamEvent);
         } catch (error) {
           console.error("Chat interaction failed.", error);
-          const reason =
-            error instanceof Error
-              ? error.message
-              : "Message could not be sent. Please try again.";
-          setChatError(reason);
-          failTurn(turnId, reason);
+          // A stopped turn already settled itself, and a superseded turn
+          // must never fail the request that replaced it.
+          if (turnRef.current?.turnId === turnId && !stopRequestedRef.current) {
+            const reason =
+              error instanceof Error
+                ? error.message
+                : "Message could not be sent. Please try again.";
+            setChatError(reason);
+            failTurn(turnId, reason);
+          }
         } finally {
-          sendingRef.current = false;
-          setIsSending(false);
-          setActiveTool("");
+          if (turnRef.current?.turnId === turnId) {
+            sendingRef.current = false;
+            setIsSending(false);
+            setActiveTool("");
+          }
         }
       })();
 
@@ -707,6 +757,7 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
       setWorkspaceOwnsActiveView,
       dismiss,
       send,
+      stop,
       retry,
       threadId,
       openThread,
@@ -728,6 +779,7 @@ export function ExecutionControllerProvider({ children }: { children: ReactNode 
       workspaceOwnsActiveView,
       dismiss,
       send,
+      stop,
       retry,
       threadId,
       openThread,
