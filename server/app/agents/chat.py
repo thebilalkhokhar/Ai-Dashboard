@@ -732,6 +732,33 @@ def _fallback_text(user_message: str) -> str:
     return "I couldn't verify that figure from the available data."
 
 
+def _all_tools_failed(tool_results: list[dict]) -> bool:
+    """True when the turn called tools and every one of them errored.
+
+    That is a failed lookup, not an unverified figure: answering it with
+    "couldn't verify that figure" (live Oct 26, on a leads question whose
+    two tool calls both died at 0 ms) tells the user a number was checked
+    when nothing was ever fetched.
+    """
+    if not tool_results:
+        return False
+    return all(
+        isinstance(entry, dict)
+        and isinstance(entry.get("result"), dict)
+        and "error" in entry["result"]
+        for entry in tool_results
+    )
+
+
+def _lookup_failed_text(user_message: str) -> str:
+    if re.search(r"[\u0600-\u06ff]", user_message):
+        return "ڈیٹا لوڈ نہیں ہو سکا۔ دوبارہ کوشش کریں۔"
+    roman_markers = re.search(r"\b(kya|ka|ki|hai|hain|kitna|kitni|batao|status)\b", user_message, re.I)
+    if roman_markers:
+        return "Data load nahi ho saka — dobara try karo."
+    return "I couldn't load that data just now — the lookup failed. Please try again."
+
+
 _EVIDENCE_NOUNS = {
     "get_payments": "payments", "get_revenue": "payments", "get_customer_profile": "payments",
     "get_invoices": "invoices", "get_top_unpaid": "invoices", "get_customer_context": "invoices",
@@ -1862,7 +1889,30 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
                                     database=state.get("database"),
                                     registry=registry,
                                 )
-                            except (ValidationError, KeyError, TypeError):
+                            except ValidationError as exc:
+                                # The generic message used to leave the model
+                                # guessing what was wrong, so it retried the
+                                # same bad call and then invented a story
+                                # about a "temporary tool issue". Field names
+                                # and constraint wording only - pydantic
+                                # messages never carry the input value, and
+                                # this error goes to the model alone, never to
+                                # task events, so no customer value can leak.
+                                ok = False
+                                detail = "; ".join(
+                                    f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
+                                    for err in exc.errors()
+                                )
+                                # Field names only, so the server log stays
+                                # safe to paste and shows the next failure's
+                                # exact cause instead of another generic line.
+                                log.warning("chat tool %s arguments invalid: %s", name, detail)
+                                result = {
+                                    "error": f"Tool arguments were invalid: {detail}"
+                                    if detail
+                                    else "Tool arguments were invalid."
+                                }
+                            except (KeyError, TypeError):
                                 ok = False
                                 result = {"error": "Tool arguments were invalid or the requested tool is unavailable."}
                             except Exception:
@@ -1974,8 +2024,14 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
             consistency_errors = _answer_consistency_errors(final_text, results, named_period) if final_text else []
             if not final_text:
                 # the model produced no prose: answer from what the tools actually
-                # proved, or the honest fallback when they proved no figure.
-                final_text = _evidence_summary(results, period_phrase) or _fallback_text(_last_user_text(messages))
+                # proved, or the honest fallback when they proved no figure -
+                # and when every tool errored, say the lookup failed, not that
+                # a figure could not be verified.
+                final_text = _evidence_summary(results, period_phrase) or (
+                    _lookup_failed_text(_last_user_text(messages))
+                    if _all_tools_failed(results)
+                    else _fallback_text(_last_user_text(messages))
+                )
             errors = validate_numeric_claims(
                 final_text, results, prior_text, _last_user_text(messages)
             ) + consistency_errors
@@ -2018,7 +2074,11 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
                     payload={"outcome": "replaced"},
                 )
             validation_replaced = True
-            final_text = _evidence_summary(results, period_phrase) or _fallback_text(_last_user_text(messages))
+            final_text = _evidence_summary(results, period_phrase) or (
+                _lookup_failed_text(_last_user_text(messages))
+                if _all_tools_failed(results)
+                else _fallback_text(_last_user_text(messages))
+            )
             break
 
         return {

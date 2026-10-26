@@ -3010,10 +3010,41 @@ CHAT_TOOLS = [
 CHAT_TOOL_MAP = {tool.name: tool for tool in CHAT_TOOLS}
 
 
+def _tolerate_args(model: Type[BaseModel], raw_args: dict) -> tuple[dict, list[str]]:
+    """Forgive argument trivia before validation, so a basic lookup never
+    dies on it. Live Oct 26: get_stuck_leads failed twice at 0 ms because
+    the model passed an invented extra argument (or an out-of-range limit),
+    and the generic error gave it nothing to fix, so a simple leads question
+    came back as "couldn't verify that figure". Unknown keys are dropped
+    (logged, never shown to the model or the client) and numeric values are
+    clamped into the field's own ge/le bounds; everything else - missing
+    required fields, wrong types, bad dates - still fails validation loudly.
+    """
+    fields = model.model_fields
+    dropped = [key for key in (raw_args or {}) if key not in fields]
+    cleaned = {key: value for key, value in (raw_args or {}).items() if key in fields}
+    for name, field in fields.items():
+        value = cleaned.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        for meta in field.metadata:
+            ge = getattr(meta, "ge", None)
+            le = getattr(meta, "le", None)
+            if ge is not None and value < ge:
+                value = ge
+            if le is not None and value > le:
+                value = le
+        cleaned[name] = value
+    return cleaned, dropped
+
+
 async def invoke_tool(name: str, raw_args: dict, database: Any = None, registry: dict | None = None) -> dict:
     tools = registry or CHAT_TOOL_MAP
     tool = tools[name]
-    validated = tool.args_model.model_validate(raw_args or {})
+    cleaned, dropped = _tolerate_args(tool.args_model, raw_args or {})
+    if dropped:
+        log.info("chat tool %s: ignoring unknown arguments %s", name, sorted(dropped))
+    validated = tool.args_model.model_validate(cleaned)
     result = await tool.function(**validated.model_dump(), database=database)
     if not isinstance(result, dict):
         result = {"result": result}
