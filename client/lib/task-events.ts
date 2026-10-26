@@ -73,8 +73,9 @@ export type TaskViewStatus =
   // old to be live: genuinely unknown, never silently treated as running
   | "unknown";
 
-// Reached only from a persisted task.cancelled event. The backend has no cancel
-// endpoint for a chat turn, so nothing here may present dismissal as cancelling.
+// Reached from a persisted task.cancelled event, which the backend emits
+// when a turn is stopped (Stop button, or its stream dying). Dismissal is
+// still hide-only and must never be presented as cancelling.
 const TERMINAL_TASK_STATUSES: TaskViewStatus[] = ["completed", "failed", "cancelled"];
 
 export function isTerminalTaskStatus(status: TaskViewStatus): boolean {
