@@ -311,3 +311,11 @@ async def get_tasks(
     service = get_event_service()
     return {"tasks": await service.recent_tasks(limit or 20)}
 
+
+@router.post("/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str) -> dict:
+    """Stop a running chat turn. The worker records task.cancelled."""
+    from app.agents.chat import cancel_chat_turn
+
+    return {"cancelled": await cancel_chat_turn(task_id)}
+
