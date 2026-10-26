@@ -19,7 +19,7 @@
 // are buttons: selecting one shows its recorded detail under the stage.
 
 import { useId, useState, type ReactNode } from "react";
-import { Activity, Cpu, Eye, MessageCircle, Search, ShieldCheck } from "lucide-react";
+import { ShieldCheck } from "lucide-react";
 import { useReducedMotion } from "@/hooks/use-reduced-motion";
 import { isLivePhase, type ExecutionPhase } from "@/lib/task-events";
 import type {
@@ -53,15 +53,26 @@ const VALID_X = 83;
 const OUT_X = 93;
 const CENTER_Y = 50;
 
-// Every stage dot carries its own mark, so no circle ever reads empty:
-// the agent branches already have portraits, and these are the tool-type
-// stages (search / review / running work). Done and failed keep their
-// check and cross - the icon only fills the waiting and active states.
-function stageIcon(label: string) {
-  if (/search/i.test(label)) return Search;
-  if (/review/i.test(label)) return Eye;
-  if (/running|analysis/i.test(label)) return Cpu;
-  return Activity;
+// Every stage circle carries a real picture, so no circle ever reads
+// empty: the agent branches already have portraits, and the tool-type
+// stages get their own emblem per kind (search / review / running work /
+// totals). Done and failed keep their state as a corner badge on top of
+// the picture - the picture itself never disappears.
+const STAGE_IMAGES = {
+  search: "/stage-search.webp",
+  review: "/stage-review.webp",
+  analysis: "/stage-analysis.webp",
+  totals: "/stage-totals.webp",
+  generic: "/stage-generic.webp",
+} as const;
+const STAGE_RESPONSE_IMAGE = "/stage-response.webp";
+
+function stageImage(label: string): string {
+  if (/search/i.test(label)) return STAGE_IMAGES.search;
+  if (/review/i.test(label)) return STAGE_IMAGES.review;
+  if (/running|analysis/i.test(label)) return STAGE_IMAGES.analysis;
+  if (/total|aggregation/i.test(label)) return STAGE_IMAGES.totals;
+  return STAGE_IMAGES.generic;
 }
 
 function stateWord(state: StageState): string {
@@ -439,7 +450,6 @@ export function OperationFlow({
         {/* agent stages (pipeline) and the earlier-lookups stage */}
         {tree.agentStages.map((stage) => {
           const pos = stagePos.get(stage.id)!;
-          const StageIcon = stageIcon(stage.label);
           return (
             <button
               key={stage.id}
@@ -452,11 +462,9 @@ export function OperationFlow({
               aria-label={`${stage.label}: ${stateWord(stage.state)}`}
             >
               <span className="jtree-dot">
-                {stage.state === "done" && <span className="jtree-check" aria-hidden="true" />}
-                {stage.state === "failed" && <span className="jtree-cross" aria-hidden="true" />}
-                {stage.state !== "done" && stage.state !== "failed" && (
-                  <span className="jtree-dot-icon" aria-hidden="true"><StageIcon size={20} /></span>
-                )}
+                <img className="jtree-dot-img" src={stageImage(stage.label)} alt="" aria-hidden="true" />
+                {stage.state === "done" && <span className="jtree-dot-badge jtree-dot-badge--done" aria-hidden="true">✓</span>}
+                {stage.state === "failed" && <span className="jtree-dot-badge jtree-dot-badge--failed" aria-hidden="true">✕</span>}
                 {stage.state === "active" && !reducedMotion && (<><span className="jtree-pulse" aria-hidden="true" /><span className="jtree-ring" aria-hidden="true" /></>)}
               </span>
               <span className="jtree-text">
@@ -477,7 +485,9 @@ export function OperationFlow({
             aria-label={`${tree.moreStage.label}: ${stateWord(tree.moreStage.state)}`}
           >
             <span className="jtree-dot">
-              <span className="jtree-dot-icon" aria-hidden="true"><Search size={20} /></span>
+              <img className="jtree-dot-img" src={STAGE_IMAGES.search} alt="" aria-hidden="true" />
+              {tree.moreStage.state === "done" && <span className="jtree-dot-badge jtree-dot-badge--done" aria-hidden="true">✓</span>}
+              {tree.moreStage.state === "failed" && <span className="jtree-dot-badge jtree-dot-badge--failed" aria-hidden="true">✕</span>}
             </span>
             <span className="jtree-text">
               <span className="jtree-label">{tree.moreStage.label}</span>
@@ -489,7 +499,6 @@ export function OperationFlow({
         {/* tool leaves */}
         {allTools.map((tool, index) => {
           const pos = toolPos.get(tool.stage.id)!;
-          const ToolIcon = stageIcon(tool.stage.label);
           const duration = formatDuration(tool.durationMs);
           return (
             <button
@@ -503,11 +512,9 @@ export function OperationFlow({
               aria-label={`${tool.stage.label}: ${stateWord(tool.stage.state)}`}
             >
               <span className="jtree-dot">
-                {tool.stage.state === "done" && <span className="jtree-check" aria-hidden="true" />}
-                {tool.stage.state === "failed" && <span className="jtree-cross" aria-hidden="true" />}
-                {tool.stage.state !== "done" && tool.stage.state !== "failed" && (
-                  <span className="jtree-dot-icon" aria-hidden="true"><ToolIcon size={20} /></span>
-                )}
+                <img className="jtree-dot-img" src={stageImage(tool.stage.label)} alt="" aria-hidden="true" />
+                {tool.stage.state === "done" && <span className="jtree-dot-badge jtree-dot-badge--done" aria-hidden="true">✓</span>}
+                {tool.stage.state === "failed" && <span className="jtree-dot-badge jtree-dot-badge--failed" aria-hidden="true">✕</span>}
                 {tool.stage.state === "active" && !reducedMotion && (<><span className="jtree-pulse" aria-hidden="true" /><span className="jtree-ring" aria-hidden="true" /></>)}
               </span>
               <span className="jtree-text">
@@ -564,6 +571,7 @@ export function OperationFlow({
                 style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
                 onClick={() => setSelected(`aggregation-${tool.tool}`)}
               >
+                <img className="jtree-pill-img" src={STAGE_IMAGES.totals} alt="" aria-hidden="true" />
                 Totals calculated
               </button>,
             );
@@ -605,7 +613,7 @@ export function OperationFlow({
           aria-label={`${tree.response.label}: ${stateWord(tree.response.state)}`}
         >
           <span className="jtree-orb-mini" data-state={tree.response.state}>
-            <span className="jtree-orb-icon" aria-hidden="true"><MessageCircle size={24} /></span>
+            <img className="jtree-orb-img" src={STAGE_RESPONSE_IMAGE} alt="" aria-hidden="true" />
             {tree.response.state === "active" && !reducedMotion && <span className="jtree-ring" aria-hidden="true" />}
           </span>
           <span className="jtree-text">
