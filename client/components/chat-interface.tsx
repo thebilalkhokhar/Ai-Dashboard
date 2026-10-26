@@ -7,8 +7,8 @@
 // and submit through the same `send`, so there is exactly one conversation and
 // exactly one in-flight request. No raw tool identifiers are shown.
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Plus, RotateCcw, Send, Sparkles, Square } from "lucide-react";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { Plus, Reply, RotateCcw, Send, Sparkles, Square, X } from "lucide-react";
 import { useExecutionController } from "@/components/command-center/execution-context";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { AnswerProvenance } from "@/components/chat-provenance";
@@ -24,12 +24,35 @@ const SUGGESTIONS = [
 // the reader has scrolled up on purpose and must not be yanked back down.
 const STICK_TO_BOTTOM_PX = 90;
 
+// A reply travels as a quote line ahead of the new text, so the backend sees
+// the context with no new field - and the sender's own bubble renders the
+// quote as a block instead of raw "> " text.
+function splitQuote(content: string): { quote: string; body: string } | null {
+  if (!content.startsWith("> ")) return null;
+  const split = content.indexOf("\n\n");
+  if (split === -1) return null;
+  const body = content.slice(split + 2).trim();
+  if (!body) return null;
+  return { quote: content.slice(2, split).trim(), body };
+}
+
+function excerptOf(content: string): string {
+  return content.replace(/\s+/g, " ").trim().slice(0, 140);
+}
+
 export function ChatInterface() {
   const [message, setMessage] = useState("");
+  const [replyTo, setReplyTo] = useState<{
+    id: string;
+    role: "user" | "assistant";
+    excerpt: string;
+  } | null>(null);
   const {
     messages,
     isSending,
     isLive,
+    queue,
+    removeQueued,
     activeTool,
     chatError,
     send,
@@ -58,11 +81,32 @@ export function ChatInterface() {
     if (element && stickRef.current) element.scrollTop = element.scrollHeight;
   }, [messages, isSending]);
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function submitCurrent() {
     // A new question is an explicit wish to see the answer, so re-attach.
     stickRef.current = true;
-    if (send(message)) setMessage("");
+    const text = message.trim();
+    if (!text) return;
+    // The quote rides inside the sent text (see splitQuote), so a reply
+    // works whether it goes out now or waits in the queue.
+    const quoted = replyTo ? `> ${replyTo.excerpt}\n\n${text}` : text;
+    if (send(quoted)) {
+      setMessage("");
+      setReplyTo(null);
+    }
+  }
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    submitCurrent();
+  }
+
+  function handleComposerKey(event: KeyboardEvent<HTMLTextAreaElement>) {
+    // Enter sends (or queues while a turn runs); Shift+Enter is a newline,
+    // left to the textarea's own behaviour.
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      submitCurrent();
+    }
   }
 
   const status =
@@ -111,7 +155,10 @@ export function ChatInterface() {
           )}
           <button
             type="button"
-            onClick={newChat}
+            onClick={() => {
+              setReplyTo(null);
+              newChat();
+            }}
             disabled={isSending}
             className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-muted transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-50"
             title="Start a new conversation - this one stays stored under Chats"
@@ -148,9 +195,9 @@ export function ChatInterface() {
                 <button
                   key={suggestion}
                   type="button"
-                  disabled={isSending}
                   onClick={() => {
                     stickRef.current = true;
+                    setReplyTo(null);
                     send(suggestion);
                   }}
                   className="rounded-full border border-border bg-surface-raised/60 px-3 py-1.5 text-left text-[11px] text-muted transition-colors hover:border-cyan-300/40 hover:text-foreground disabled:opacity-50"
@@ -162,12 +209,34 @@ export function ChatInterface() {
           </div>
         )}
 
-        {messages.map((entry) =>
-          entry.role === "user" ? (
-            <div key={entry.id} className="chat-row chat-row--user">
-              <div className="chat-bubble chat-bubble--user">{entry.content}</div>
-            </div>
-          ) : (
+        {messages.map((entry) => {
+          if (entry.role === "user") {
+            const quoted = splitQuote(entry.content);
+            return (
+              <div key={entry.id} className="chat-row chat-row--user">
+                <div className="chat-bubble chat-bubble--user">
+                  {quoted && <span className="chat-quote">{quoted.quote}</span>}
+                  {quoted ? quoted.body : entry.content}
+                </div>
+                <button
+                  type="button"
+                  className="chat-reply-btn"
+                  onClick={() =>
+                    setReplyTo({
+                      id: entry.id,
+                      role: "user",
+                      excerpt: excerptOf(quoted ? quoted.body : entry.content),
+                    })
+                  }
+                  aria-label="Reply to this message"
+                >
+                  <Reply size={11} aria-hidden="true" />
+                  Reply
+                </button>
+              </div>
+            );
+          }
+          return (
             <div key={entry.id} className="chat-row chat-row--assistant">
               <span className="chat-avatar" aria-hidden="true">
                 {/* The clip loops only while this message is the live one:
@@ -216,29 +285,83 @@ export function ChatInterface() {
                   )
                 )}
               </div>
+              <button
+                type="button"
+                className="chat-reply-btn"
+                onClick={() =>
+                  setReplyTo({
+                    id: entry.id,
+                    role: "assistant",
+                    excerpt: excerptOf(entry.content),
+                  })
+                }
+                aria-label="Reply to this answer"
+              >
+                <Reply size={11} aria-hidden="true" />
+                Reply
+              </button>
             </div>
-          ),
-        )}
+          );
+        })}
       </div>
 
       <div className="chat-foot shrink-0">
+        {replyTo && (
+          <div className="chat-reply-bar">
+            <span className="chat-reply-bar-text">
+              Replying to {replyTo.role === "assistant" ? "this answer" : "your message"}: “{replyTo.excerpt}”
+            </span>
+            <button
+              type="button"
+              onClick={() => setReplyTo(null)}
+              aria-label="Cancel reply"
+              className="shrink-0 text-muted hover:text-foreground"
+            >
+              <X size={12} aria-hidden="true" />
+            </button>
+          </div>
+        )}
+        {queue.length > 0 && (
+          <div className="chat-queue" role="status" aria-label="Queued messages">
+            {queue.map((queued, index) => (
+              <span key={`${index}-${queued}`} className="chat-queue-chip">
+                <span className="chat-queue-chip-text">
+                  Queued: {queued.length > 60 ? `${queued.slice(0, 60)}…` : queued}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => removeQueued(index)}
+                  aria-label="Remove queued message"
+                >
+                  <X size={11} aria-hidden="true" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         <form
           onSubmit={handleSubmit}
           className="flex items-center gap-2 rounded-xl border border-border bg-surface-raised/60 px-2.5 py-1.5 focus-within:border-cyan-300/40"
         >
-          <input
+          <textarea
             value={message}
             onChange={(event) => setMessage(event.target.value)}
-            placeholder="Ask JARVIS about the business..."
+            onKeyDown={handleComposerKey}
+            placeholder={
+              isSending
+                ? "Type a follow-up - it will queue behind this request..."
+                : "Ask JARVIS about the business..."
+            }
             aria-label="Message Biztek Assistant"
-            disabled={isSending}
-            className="min-w-0 flex-1 bg-transparent px-1 text-[0.95rem] text-foreground outline-none placeholder:text-muted disabled:opacity-60"
+            rows={1}
+            className="chat-composer-input min-w-0 flex-1 bg-transparent px-1 text-[0.95rem] text-foreground outline-none placeholder:text-muted"
           />
           <button
             type="submit"
             aria-label="Send message"
-            disabled={isSending || message.trim().length === 0}
-            className="grid h-8 w-8 place-items-center rounded-lg bg-gradient-to-br from-cyan-300 to-violet-400 text-[#081016] disabled:cursor-not-allowed disabled:opacity-40"
+            title={isSending ? "Queue message" : "Send message"}
+            disabled={message.trim().length === 0}
+            className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-cyan-300 to-violet-400 text-[#081016] disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Send size={15} aria-hidden="true" />
           </button>
