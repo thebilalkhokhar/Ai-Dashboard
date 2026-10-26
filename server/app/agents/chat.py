@@ -64,10 +64,14 @@ HOW TO WORK
    PAYMENTS LIVE IN TWO LEDGERS. get_payments reads the ERP; get_crm_payments
    reads the Zoho CRM, which mirrors ERP payments (its rows carry the ERP id)
    and also holds payments the ERP list does not show. For any question about
-   payments received - today, this week, from a customer - call BOTH tools and
-   report each ledger under its own label with its own total: never merge
+   payments received - today, this week, from a customer - call
+   get_payments_both_ledgers FIRST: one call returns both ledgers with
+   Python totals kept separate, so a ledger can never be skipped (live
+   Oct 27: Canyon Plastics answered from the ERP alone twice). Report
+   each ledger under its own label with its own total: never merge
    them into one figure, and never answer "no payments" from one ledger
-   alone. A CRM receive date is a calendar date with no clock time - if the
+   alone. Use the single-ledger tools only when the user names one
+   ledger explicitly. A CRM receive date is a calendar date with no clock time - if the
    user asks for an exact time, say the CRM records the date only (its
    record_created_at is the sync time, shown in the system timezone in
    24-hour format, not when the money arrived). For a
@@ -121,7 +125,10 @@ HOW TO WORK
    draft plus touchpoints plus options, and sign it with the record's
    owner name when the tool result names one, else sign it "Print247
    Team"; never invent a personal name. Close with one question: the
-   single next step you need the user to confirm.
+   single next step you need the user to confirm. When the lead tool
+   gives a next_action, that IS the question - copy it word for word;
+   never offer to contact the customer yourself, because drafts are
+   for a human only and nothing is ever sent to a customer.
 2. Tool choice: get_dashboard_metrics for headline KPIs (today's revenue, month
    to date, last 7 days, open quotes, unpaid and overdue totals) - those strings
    are the same ones the dashboard tiles show, copy them exactly. get_payments /
@@ -694,6 +701,17 @@ def validate_numeric_claims(
             if not restates and not _matches(value, tolerance, facts | identifiers):
                 errors.append(f"unsupported id {token.strip()}")
             continue
+        # A record id leading a list item ("- 20550: Jasper United LLC")
+        # is an identifier presentation, not a count: live Oct 27, the
+        # stale-quotes list died on every quote id this way. Allowed only
+        # when the number is a tool-returned identifier AND the line up
+        # to it is just a bullet (or nothing) AND a colon follows - a
+        # fabricated id still fails, and a bare count never looks like this.
+        if _matches(value, tolerance, identifiers):
+            line_prefix = scanned[scanned.rfind("\n", 0, match.start()) + 1 : match.start()]
+            after = scanned[match.end():].lstrip()
+            if re.match(r"\s*[-*•]?\s*$", line_prefix) and after[:1] == ":":
+                continue
         if not _matches(value, tolerance, facts):
             if restates:
                 continue
@@ -1824,6 +1842,16 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
         # A confirmed pending retrieval may have pre-fetched results for this
         # turn; they are real tool results, so they seed the evidence set.
         results: list[dict] = list(state.get("tool_results") or [])
+        # Recall results are kept OUT of `results` on purpose (their
+        # excerpts hold old figures that must never legitimize themselves),
+        # but that exclusion broke history questions outright: live Oct 27,
+        # "what did we discuss last time" listed real conversation titles
+        # and updated_at timestamps, the guard found no evidence for those
+        # dates, and the answer collapsed to "couldn't verify". So recall
+        # contributes a STRIPPED evidence entry - titles, timestamps and
+        # turn counts only, excerpts and thread ids removed - to the guard
+        # alone, never to the evidence summary or the event stream.
+        recall_validation: list[dict] = []
         used: list[str] = list(state.get("tools_used") or [])
         seen_calls: dict[str, dict] = {}
         for entry in results:
@@ -2024,6 +2052,21 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
                             # them in the tool message and can cite the
                             # conversation - figures still need a data tool.
                             results.append({"tool": name, "result": result})
+                        if not duplicate and name == "recall_conversations" and ok:
+                            # Stripped recall evidence for the guard only:
+                            # titles, timestamps, turn counts - no excerpts.
+                            stripped = [
+                                {
+                                    "title": conv.get("title"),
+                                    "updated_at": conv.get("updated_at"),
+                                    "turn_count": conv.get("turn_count"),
+                                }
+                                for conv in (result.get("conversations") or [])
+                                if isinstance(conv, dict)
+                            ]
+                            recall_validation.append(
+                                {"tool": name, "result": {"conversations": stripped}}
+                            )
                         page = _page_block(result)
                         if ok and page is not None and not duplicate:
                             contexts.append(
@@ -2077,7 +2120,7 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
                     else _fallback_text(_last_user_text(messages))
                 )
             errors = validate_numeric_claims(
-                final_text, results, prior_text, _last_user_text(messages)
+                final_text, results + recall_validation, prior_text, _last_user_text(messages)
             ) + consistency_errors
             if errors:
                 log.warning("numeric validation failed: %s | text=%s", errors, final_text[:600])

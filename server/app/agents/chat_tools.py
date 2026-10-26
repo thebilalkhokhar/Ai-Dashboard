@@ -670,6 +670,8 @@ async def get_stuck_leads(
                 "finish": row.get("finish"),
                 "artwork": artwork_labels[row["artwork_present"]],
                 "missing": row["missing"],
+                "next_action": row.get("next_action")
+                or processors.lead_next_action(row["missing"], row["contact_name"]),
             }.items()
             if value is not None
         }
@@ -944,8 +946,111 @@ class Customer360DetailArgs(ToolArgs):
         return value
 
 
-class Customer360PaymentsArgs(DateRangeArgs):
+class CombinedPaymentsArgs(ToolArgs):
+    """One payments question, both ledgers, one Python result.
+
+    The period is resolved on the ERP business calendar (periods module),
+    not the reader's, so "today" here is the same day the revenue tile
+    reports - the Oct 27 contradiction (payments today $0 vs revenue
+    payments today 12) was two tools defining "today" differently.
+    """
+
+    # exclude=True, exactly like PeriodMixin: invoke_tool splats the
+    # validated dump into the function, which re-validates - if the dump
+    # carried both the period AND the dates it resolved to, the function
+    # would reject its own input ("period and dates cannot be combined").
+    period: str | None = Field(
+        default=None,
+        max_length=32,
+        exclude=True,
+        description=periods.PERIOD_HINT + " Prefer this over guessing dates.",
+    )
+    date_from: date | None = None
+    date_to: date | None = None
+    customer: str | None = Field(default=None, max_length=120)
+    limit: int = Field(default=DEFAULT_TOOL_ROWS, ge=1)
+    offset: int = Field(default=0, ge=0)
+
+    @field_validator("limit")
+    @classmethod
+    def cap_rows(cls, value: int) -> int:
+        return min(value, MAX_TOOL_ROWS)
+
+    @model_validator(mode="after")
+    def resolve_window(self):
+        if self.period and (self.date_from is not None or self.date_to is not None):
+            raise ValueError("period and an explicit date_from/date_to cannot be combined - use one")
+        if self.period:
+            try:
+                start, end = periods.resolve_period(self.period)
+            except KeyError:
+                raise ValueError(
+                    f"unknown period {self.period!r}; choose one of {', '.join(periods.PERIOD_NAMES)}"
+                )
+            self.date_from, self.date_to = start, end
+            return self
+        if (self.date_from is None) != (self.date_to is None):
+            raise ValueError("date_from and date_to must be given together")
+        if self.date_from is not None and self.date_to is not None:
+            if self.date_to < self.date_from:
+                raise ValueError("date_to must be on or after date_from")
+            return self
+        if (self.customer or "").strip():
+            self.date_from = date(2000, 1, 1)
+            self.date_to = datetime.now(processors.USER_TZ).date()
+            return self
+        today = periods.business_today()
+        self.date_from, self.date_to = today, today
+        return self
+
+
+class AnalysesArgs(ToolArgs):
+    """Two CRM records' analyses, fetched in parallel in Python."""
+
+    records: list[Customer360DetailArgs] = Field(min_length=1, max_length=2)
+
+
+class Customer360PaymentsArgs(PeriodMixin):
+    """CRM payments arguments that can never die on a dateless call.
+
+    Live Oct 27, second time: 'TREATDAY ke CRM payments dikhao' died in
+    invoke_tool with 'date_from and date_to are required unless a named
+    period is given' - the Oct 26 fix only changed the *function*, which
+    invoke_tool never reaches because the inherited DateRangeArgs
+    validator runs first. The Oct 26 unit test called the function
+    directly, so it passed while live chat still failed. This class
+    owns the fallback itself: a named period (resolved by PeriodMixin),
+    an explicit pair, a customer with no dates (all time), or - with
+    neither - today on the ERP business calendar. The regression test
+    for this goes through invoke_tool, the live path, not the function.
+    """
+
+    date_from: date | None = None
+    date_to: date | None = None
     customer: str = Field(default="", max_length=120)
+
+    @model_validator(mode="after")
+    def dates_or_fallback(self):
+        if self.date_from is not None and self.date_to is None:
+            raise ValueError("date_from and date_to must be given together")
+        if self.date_from is None and self.date_to is not None:
+            raise ValueError("date_from and date_to must be given together")
+        if self.date_from is not None and self.date_to is not None:
+            if self.date_to < self.date_from:
+                raise ValueError("date_to must be on or after date_from")
+            return self
+        if (self.customer or "").strip():
+            # All time means every calendar date the CRM could hold,
+            # including a row dated on the reader's today in Karachi
+            # (which is still yesterday on the ERP calendar).
+            self.date_from, self.date_to = (
+                date(2000, 1, 1),
+                datetime.now(processors.USER_TZ).date(),
+            )
+            return self
+        today = periods.business_today()
+        self.date_from, self.date_to = today, today
+        return self
 
 
 class RecordArgs(ToolArgs):
@@ -1247,10 +1352,21 @@ async def get_invoices(
             balance = round(total - processors.to_number(row.get("amount_paid")), 2)
             if not _in_window(row.get("invoice_date"), args.date_from, args.date_to):
                 continue
-            if args.status and args.status.casefold() not in str(
-                row.get("payment_status_label") or row.get("status_label") or ""
-            ).casefold():
-                continue
+            if args.status:
+                # Live Oct 27: "show me unpaid invoices" came back 0 while
+                # overdue balances existed, because no ERP label contains
+                # the word "unpaid" ("Not Paid", "Partially Paid", "No
+                # payment recorded"). Unpaid is already defined by the
+                # balance filter below, so those words skip the label
+                # match instead of zeroing the whole answer.
+                wanted_status = args.status.casefold().strip()
+                if wanted_status not in {"unpaid", "outstanding", "unpaid invoices", "due"} and (
+                    wanted_status
+                    not in str(
+                        row.get("payment_status_label") or row.get("status_label") or ""
+                    ).casefold()
+                ):
+                    continue
             if balance <= 0:
                 continue
             age = processors.age_days(processors.parse_date(row.get("invoice_date")), now) or 0.0
@@ -1320,8 +1436,20 @@ async def get_quotes(
         for row in rows:
             if not _in_window(row.get("created_at"), args.date_from, args.date_to):
                 continue
-            if args.status and args.status.casefold() not in str(row.get("status") or "").casefold():
-                continue
+            if args.status:
+                # Live Oct 27: "how many quotes are open" came back 0
+                # while 365 stale quotes existed, because no ERP quote
+                # status contains the word "open". Open means "not in a
+                # closed status" (processors.CLOSED_QUOTE_STATUSES), so
+                # that word skips the substring match and excludes only
+                # genuinely closed quotes.
+                wanted_status = args.status.casefold().strip()
+                if wanted_status in {"open", "open quotes"}:
+                    closed = {s.casefold() for s in processors.CLOSED_QUOTE_STATUSES}
+                    if str(row.get("status") or "").strip().casefold() in closed:
+                        continue
+                elif wanted_status not in str(row.get("status") or "").casefold():
+                    continue
             if args.stale_only and row.get("id") not in stale_ids:
                 continue
             if wanted_id is not None and not _same_id(_customer_id_of(row), wanted_id):
@@ -1455,11 +1583,13 @@ async def get_leads(
         if args.status and args.status.casefold() not in str(row.get("status") or "").casefold():
             continue
         parsed = processors.parse_lead_description(row.get("description"))
+        contact_name = " ".join(
+            part for part in (str(row.get("firstName") or ""), str(row.get("lastName") or "")) if part
+        ) or None
+        missing_fields = processors.missing_lead_fields(parsed)
         item = {
             "lead_id": lead_id,
-            "contact_name": " ".join(
-                part for part in (str(row.get("firstName") or ""), str(row.get("lastName") or "")) if part
-            ) or None,
+            "contact_name": contact_name,
             "company": str(row.get("company") or "") or None,
             "status": str(row.get("status") or ""),
             "source": str(row.get("source") or "") or None,
@@ -1475,7 +1605,8 @@ async def get_leads(
             "size": parsed.get("size"),
             "material": parsed.get("material"),
             "finish": parsed.get("finish"),
-            "missing": processors.missing_lead_fields(parsed),
+            "missing": missing_fields,
+            "next_action": processors.lead_next_action(missing_fields, contact_name),
             "stuck": lead_id in stuck_ids if args.stuck_only else None,
         }
         if item["days_since_activity"] is not None:
@@ -1865,6 +1996,160 @@ async def get_crm_payments(
             "results": [],
             "note": f"The Zoho CRM payments ledger could not be reached: {exc}",
         }
+
+
+async def get_payments_both_ledgers(
+    period: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    customer: str | None = None,
+    limit: int = DEFAULT_TOOL_ROWS,
+    offset: int = 0,
+    database: Any = None,
+) -> dict:
+    """ERP + Zoho CRM payments in ONE Python call, totals kept separate.
+
+    Live Oct 27, twice: "Canyon Plastics ki payments dikhao" answered
+    from the ERP alone ("CRM payments have not been checked yet") even
+    though the system prompt and both tool descriptions say to call
+    BOTH. A prompt instruction the model can skip is not a guarantee;
+    one call the model cannot half-complete is. The TREATDAY row-9
+    corruption ("$1?") is the same class: two separate lists the model
+    had to copy and reconcile by hand. Here Python totals each ledger
+    and pairs rows by ERP id on the page, so the model copies one
+    structure instead of reconciling two. The totals are NEVER added
+    together - the CRM mirrors ERP payments, so a sum would double-count.
+    Row cap is 20 per ledger even when a larger limit is asked: totals
+    and counts still cover every matched row, and the compact rows keep
+    this payload inside the context budget (a 50+50 full-row payload
+    would collapse into a truncated preview and lose the totals).
+    """
+    args = CombinedPaymentsArgs.model_validate(
+        {
+            "period": period, "date_from": date_from, "date_to": date_to,
+            "customer": customer, "limit": limit, "offset": offset,
+        }
+    )
+    db = _database(database)
+    row_limit = min(args.limit, 20)
+    erp = await get_payments(
+        date_from=args.date_from, date_to=args.date_to, customer=args.customer,
+        limit=row_limit, offset=args.offset, database=db,
+    )
+    crm = await get_crm_payments(
+        date_from=args.date_from, date_to=args.date_to,
+        customer=args.customer or "", database=db,
+    )
+    erp_items = [
+        {
+            "payment_id": row.get("payment_id"),
+            "amount": row.get("amount"),
+            "payment_date": row.get("payment_date"),
+            "customer_name": row.get("customer_name"),
+            "reference": row.get("reference"),
+        }
+        for row in (erp.get("items") or [])[:row_limit]
+    ]
+    crm_rows = crm.get("results") or []
+    crm_page = crm_rows[args.offset : args.offset + row_limit]
+    crm_items = [
+        {
+            "payment_name": row.get("payment_name"),
+            "erp_id": row.get("erp_id"),
+            "amount_received": row.get("amount_received"),
+            "receive_date": row.get("receive_date"),
+            "customer_name": row.get("customer_name"),
+        }
+        for row in crm_page
+    ]
+    erp_ids_on_page = {str(row.get("payment_id")) for row in erp_items}
+    crm_matched_on_page = sum(
+        1 for row in crm_items if str(row.get("erp_id")) in erp_ids_on_page
+    )
+    return {
+        "source": "payments_both_ledgers",
+        "window": {
+            "date_from": args.date_from.isoformat(),
+            "date_to": args.date_to.isoformat(),
+            "customer": args.customer or None,
+            "period": period,
+            "resolved_on": "ERP business calendar (US Central) for a named period; "
+            "all time (2000-01-01 to today) for a customer with no period",
+            "business_date": periods.business_today().isoformat(),
+        },
+        "ledger_note": (
+            "ERP and CRM are SEPARATE ledgers with separate totals below. "
+            "Report each under its own label. Never add the two totals: "
+            "the CRM mirrors ERP payments, so a sum double-counts."
+        ),
+        "erp": {
+            "total_count": erp.get("total_count"),
+            "sum_amount": erp.get("sum_amount"),
+            "sum_amount_covers": erp.get("sum_amount_covers"),
+            "items": erp_items,
+            "page": {
+                "offset": erp.get("offset"), "limit": row_limit,
+                "returned": len(erp_items), "has_more": erp.get("has_more"),
+                "next_offset": erp.get("next_offset"),
+            },
+        },
+        "crm": {
+            "available": crm.get("available", True),
+            "total_count": crm.get("total_count"),
+            "sum_amount_received": crm.get("sum_amount_received"),
+            "items": crm_items,
+            "coverage": crm.get("coverage"),
+            "note": crm.get("note"),
+            "page": {
+                "offset": args.offset, "limit": row_limit,
+                "returned": len(crm_items),
+                "has_more": args.offset + len(crm_items) < (crm.get("total_count") or 0),
+            },
+        },
+        "paired_on_this_page_only": {
+            "crm_rows_with_erp_id_on_this_page": crm_matched_on_page,
+            "crm_rows_on_this_page": len(crm_items),
+            "note": "Page-local only: a CRM row whose ERP id is not on this "
+            "page is not missing, it is on another page.",
+        },
+    }
+
+
+async def get_customer360_analyses(
+    records: list[dict], database: Any = None
+) -> dict:
+    """CRM AI analyses for one or two records, fetched in parallel.
+
+    Live Oct 27: "Frank Jr ke dono records ki analysis do" failed as a
+    network timeout after the single-record analysis had already failed
+    the same way - two slow, uncached CRM AI calls run one after another
+    (each re-aggregates and calls OpenAI, ~49s cold, plus 5xx retries)
+    exceed what one chat turn survives. Run in Python in parallel, the
+    wall time is the slower call, not the sum, and one record's failure
+    no longer takes the other record's analysis down with it.
+    """
+    args = AnalysesArgs.model_validate({"records": records})
+    import asyncio as _asyncio
+
+    async def one(record: Customer360DetailArgs) -> dict:
+        result = await get_customer360_analysis(
+            record.record_id, record.record_type, database=database
+        )
+        return result
+
+    results = await _asyncio.gather(
+        *(one(record) for record in args.records), return_exceptions=True
+    )
+    out = []
+    for record, result in zip(args.records, results):
+        if isinstance(result, Exception):
+            out.append({
+                "record_id": record.record_id, "record_type": record.record_type,
+                "available": False, "note": f"Customer 360 analysis failed: {result}",
+            })
+        else:
+            out.append(result)
+    return {"source": "customer360", "analyses": out}
 
 
 async def get_customer360_analysis(
@@ -2881,7 +3166,7 @@ CHAT_TOOLS = [
     ChatTool("get_rep_summary", "Get Python-computed quote, order, and payment counts and totals for one rep and date range.", RepSummaryArgs, get_rep_summary),
     ChatTool(
         "get_stuck_leads",
-        "Get leads that are stuck before becoming an order: status New or Attempted to Contact, recent activity, a description present, not flagged by the lead desk. Returns Python-parsed product/quantity/size/material/finish, the missing-field list and artwork state (Provided/Missing/Not stated). No email or phone numbers are returned." + PAGING_NOTE,
+        "Get leads that are stuck before becoming an order: status New or Attempted to Contact, recent activity, a description present, not flagged by the lead desk. Returns Python-parsed product/quantity/size/material/finish, the missing-field list, artwork state (Provided/Missing/Not stated), and next_action - the one Python-computed question to ask that lead (for example 'Ask Orthoza for the missing material.'). For advice questions, quote next_action as the question: never recommend the very thing it says is missing. No email or phone numbers are returned." + PAGING_NOTE,
         StuckLeadsArgs,
         get_stuck_leads,
     ),
@@ -2890,6 +3175,12 @@ CHAT_TOOLS = [
         "List individual payment records (who paid): customer name and ID, amount, payment date, received timestamp, payment reference and the invoice numbers the payment was applied to. Filters: received-date range, customer name or ID, min/max amount. Answer 'who paid today' with this tool." + PAGING_NOTE,
         PaymentArgs,
         get_payments,
+    ),
+    ChatTool(
+        "get_payments_both_ledgers",
+        "FIRST choice for any question about payments received - today, this week, this month, or from a customer. One call returns BOTH ledgers with Python totals kept separate: the ERP ledger and the Zoho CRM ledger, each under its own label with its own total and its own page of rows, plus a page-local pairing by ERP id. Report each ledger separately and NEVER add the two totals together (the CRM mirrors ERP payments, so a sum double-counts). A customer with no period scans all time; a named period resolves on the ERP business calendar, the same day the revenue tile reports. Use the single-ledger tools only when the user names one ledger explicitly.",
+        CombinedPaymentsArgs,
+        get_payments_both_ledgers,
     ),
     ChatTool(
         "get_invoices",
@@ -2911,7 +3202,7 @@ CHAT_TOOLS = [
     ),
     ChatTool(
         "get_leads",
-        "List lead records with parsed product/quantity/size/material/finish and the missing-field list. Filters: status text, stuck_only, search text. No contact details are returned." + PAGING_NOTE,
+        "List lead records with parsed product/quantity/size/material/finish, the missing-field list and next_action - the one Python-computed question to ask that lead. For advice questions, quote next_action as the question: never recommend the very thing it says is missing. Filters: status text, stuck_only, search text. No contact details are returned." + PAGING_NOTE,
         LeadArgs,
         get_leads,
     ),
@@ -2944,6 +3235,12 @@ CHAT_TOOLS = [
         "Run the Zoho CRM's own AI follow-up analysis for ONE CRM record (record_id + record_type from search_customer360) and show it: urgency, reasoning, the action needed and a drafted email. Call this ONLY when the user names a record and explicitly asks for its analysis ('analyze him', 'is ki analysis karo') - it is slow (up to a minute cold), calls OpenAI on the CRM side every time, and is never a background or speculative call. Its words are the CRM AI's, not verified facts: present them labeled as the CRM AI analysis, and if ai_status is not 'Verified' say plainly that the CRM returned a placeholder analysis.",
         Customer360DetailArgs,
         get_customer360_analysis,
+    ),
+    ChatTool(
+        "get_customer360_analyses",
+        "Run the Zoho CRM's own AI analyses for TWO records in parallel in Python (records: [{record_id, record_type}, ...] from search_customer360) and show each under its own label. Use this - not two sequential get_customer360_analysis calls - whenever the user asks for both records' analyses: sequential slow CRM calls exceed one chat turn, parallel calls do not, and one record's failure does not take the other's analysis down. Same explicit-ask-only and Verified/placeholder rules as get_customer360_analysis.",
+        AnalysesArgs,
+        get_customer360_analyses,
     ),
     ChatTool(
         "get_crm_follow_up_queue",
