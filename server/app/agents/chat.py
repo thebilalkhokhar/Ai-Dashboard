@@ -69,7 +69,8 @@ HOW TO WORK
    them into one figure, and never answer "no payments" from one ledger
    alone. A CRM receive date is a calendar date with no clock time - if the
    user asks for an exact time, say the CRM records the date only (its
-   record_created_at is the sync time, not when the money arrived). For a
+   record_created_at is the sync time, shown in the system timezone in
+   24-hour format, not when the money arrived). For a
    person's payments or orders, resolve their company with find_customer
    first and query by the company name as well as the person's name -
    records are filed under the company.
@@ -145,7 +146,8 @@ total_count, returned, remaining_count, has_more, next_offset.
   fresh data: never cite a figure from an excerpt as current - re-check it
   with a data tool first.
 - Payment times: state an exact time ONLY when the payment result gives
-  received_time_pkt (a genuine instant the backend converted for you).
+  received_time (a genuine instant the backend converted for you, in
+  the system timezone, 24-hour format - show it exactly as given).
   When timestamp_precision is "date", the source recorded only the date:
   give the date and say the exact arrival time is not recorded. Never
   convert a midnight timestamp into a clock time yourself.

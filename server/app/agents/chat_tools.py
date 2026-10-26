@@ -1033,8 +1033,9 @@ def _payment_timestamp(value: Any) -> dict:
     unrelated payments). A midnight value therefore carries a DATE, not
     an arrival time: converting it to "5:00 AM PKT" would manufacture a
     precision the source never had. Only a value with a real time
-    component is an instant, and its PKT rendering is computed here, in
-    Python - the model never does timezone arithmetic.
+    component is an instant, and its rendering - system timezone,
+    24-hour clock - is computed here, in Python: the model never does
+    timezone arithmetic, and a raw UTC string never reaches an answer.
     """
     if value is None:
         return {"timestamp_precision": "missing", "received_date": None}
@@ -1055,10 +1056,16 @@ def _payment_timestamp(value: Any) -> dict:
             "timestamp_precision": "date",
             "received_date": pkt.date().isoformat(),
         }
+    # received_date stays on the user's calendar (the day the payment
+    # belongs to); the clock time is shown in the system timezone,
+    # 24-hour - on the operator's own machine the two agree.
+    shown = moment.astimezone(processors.system_timezone())
     return {
         "timestamp_precision": "instant",
         "received_date": pkt.date().isoformat(),
-        "received_time_pkt": pkt.strftime("%b %d, %Y, %I:%M %p PKT"),
+        "received_time": shown.strftime(
+            f"%b %d, %Y, %H:%M {processors.system_tz_label()}"
+        ),
     }
 
 
@@ -2905,7 +2912,7 @@ CHAT_TOOLS = [
     ),
     ChatTool(
         "get_crm_payments",
-        "Payments recorded in the Zoho CRM (Customer 360) for a date range, optionally filtered by a customer/name search. This is a SEPARATE ledger from the ERP payments tool: the CRM mirrors ERP payments (each row carries its erp_id) and also holds CRM-only payments, so for any question about payments received - today, this week, from a customer - call BOTH this and get_payments and report each ledger under its own label with its own total; NEVER add the two totals together and never report 'no payments' from one ledger alone. Receive dates are calendar dates with no clock time recorded; record_created_at is the CRM record's creation/sync time, not the payment time.",
+        "Payments recorded in the Zoho CRM (Customer 360) for a date range, optionally filtered by a customer/name search. This is a SEPARATE ledger from the ERP payments tool: the CRM mirrors ERP payments (each row carries its erp_id) and also holds CRM-only payments, so for any question about payments received - today, this week, from a customer - call BOTH this and get_payments and report each ledger under its own label with its own total; NEVER add the two totals together and never report 'no payments' from one ledger alone. Receive dates are calendar dates with no clock time recorded; record_created_at is the CRM record's creation/sync time, already rendered in the system's timezone in 24-hour format - show it exactly as given, never as a raw UTC string - and it is not the payment time.",
         Customer360PaymentsArgs,
         get_crm_payments,
     ),
