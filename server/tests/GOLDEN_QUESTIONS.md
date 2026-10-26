@@ -19,7 +19,7 @@ paraphrase that drops a ledger, a total, or the blocker.
 | P1 | What did customers pay today? | ERP total AND CRM total, each under its own label, for the ERP business day (the same day the revenue tile reports). Never $0 from one ledger alone while the other holds money. |
 | P2 | What did customers pay this week? | ERP total AND CRM total, separate, never added together. |
 | P3 | TREATDAY LLC ki sari payments show karo. | ERP $10,201 across 10 payments AND CRM $10,201 across 10 payments, every row with the same amount on both sides (row 9: $1,250 on 2025-11-06, payment 4986 — never "$1?"). Baseline verified Oct 27, 2026. |
-| P4 | TREATDAY ke CRM payments dikhao. | All-time CRM total $10,201 / 10 payments — NOT the last-30-days $1,250. Root cause fixed Oct 27: the dateless call used to die in argument validation. |
+| P4 | TREATDAY ke CRM payments dikhao. | All-time CRM total $10,201 / 10 payments — NOT the last-30-days $1,250. Root cause fixed Oct 27: the dateless call used to die in argument validation. Oct 27 late: passing period 'all time' itself is now accepted (registry entry in periods.py) — the Canyon failure mode, where the model passed 'all time' and the validator rejected it. |
 | P5 | Canyon Plastics ki payments dikhao. | ERP leg AND CRM leg, both reported. "CRM payments have not been checked yet" is a FAIL — the combined tool makes a skipped leg impossible. |
 | P6 | Show me all payments for TREATDAY LLC. | The 10-payment list, not a single invoice row. |
 
@@ -41,6 +41,7 @@ paraphrase that drops a ledger, a total, or the blocker.
 | L2 | Show me the next page. | Continuation of L1 with the same filters, offset = previous next_offset, no repeated rows. |
 | L3 | Orthoza lead ko order mein kaise convert karein? | First line: blocker "material". The closing question must be the tool's next_action ("Ask Orthoza for the missing material."). Must NOT recommend a material (foil / standard vinyl / any substrate) and must NOT offer to contact Orthoza. |
 | L4 | Orthoza lead ka next action kya hai? | Same as L3: blocker first, next_action as the question, no invented spec, no outreach offer. |
+| L5 | Top stuck lead jo abhi tak order mein convert nahi hui — reason aur conversion steps? | Row 1 is the most recently active stuck lead (rows are newest-activity first), not the biggest. Must show conversion_reason quoted as the reason (never invented "typical blockers" like pricing approval or payment terms) and next_action quoted as the closing question. A lead with all specs parsed but artwork Not stated asks to confirm the artwork — never "ready to convert" and never a draft-email/send offer. |
 
 ## CRM records, analysis, conversation
 

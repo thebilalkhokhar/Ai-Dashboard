@@ -104,6 +104,37 @@ async def test_combined_payments_returns_both_ledgers_separately(crm):
 
 
 @pytest.mark.asyncio
+async def test_all_time_period_accepted_on_crm_tool(crm):
+    """Oct 27 retest: Canyon Plastics died in invoke_tool with
+    \"unknown period 'all time'\" - the model reaches for that phrase on
+    customer questions without a period, and no such name existed. The
+    registry entry makes it resolve to the full window on every tool
+    that accepts a period, single-ledger ones included."""
+    db = business_db()
+    result = await invoke_tool(
+        "get_crm_payments", {"period": "all time", "customer": "Picazo"}, database=db
+    )
+    assert result["available"] is True
+    assert result["date_from"] == "2000-01-01"
+    assert result["total_count"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("period", ["all time", "all_time", "all"])
+async def test_all_time_period_accepted_on_combined_tool(crm, period):
+    """Same Canyon failure mode through the combined tool: any spelling
+    of all time must yield the full window on both legs, never a
+    validation error the model has to work around."""
+    db = business_db(payments_flat=Collection([payment(index=1, amount=1250.0)]))
+    result = await invoke_tool(
+        "get_payments_both_ledgers", {"period": period, "customer": "Picazo"}, database=db
+    )
+    assert result["window"]["date_from"] == "2000-01-01"
+    assert result["erp"]["total_count"] == 1
+    assert result["crm"]["total_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_combined_payments_today_is_the_erp_business_day(crm):
     """Oct 27 contradiction: payments 'today' $0 vs revenue payments today
     12 - two tools defined 'today' differently. The combined tool resolves
@@ -154,6 +185,76 @@ async def test_stuck_leads_carry_next_action():
     item = result["items"][0]
     assert item["missing"] == ["material"]
     assert item["next_action"] == "Ask Orthoza for the missing material."
+
+
+def _valerie_lead():
+    """The live Oct 27 late 'top lead' answer: every spec parsed, artwork
+    unstated. The old fallback called it ready to convert, and the model
+    filled the gap with invented 'typical blockers' plus a draft-email
+    offer. The tool must instead name the one open item."""
+    return lead(
+        firstName="Valerie",
+        lastName="Eskelsen",
+        company="Balaika",
+        status="New",
+        description=(
+            '{"product": "Custom Quote", "quantity": "15000", '
+            '"size": "5 x 2 inch", "material": "Foil", '
+            '"finish": "Softouch Lamination, Spot Gloss"}'
+        ),
+        email="valerie@example.com",
+        lastActivityAt=(NOW - timedelta(days=7)).isoformat(),
+        createdAt=(NOW - timedelta(days=30)).isoformat(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_stuck_lead_with_specs_but_artwork_unstated_asks_artwork():
+    db = business_db(leads=Collection([_valerie_lead()]))
+    result = await invoke_tool("get_stuck_leads", {}, database=db)
+    assert result["total_count"] == 1
+    item = result["items"][0]
+    assert item["missing"] == []
+    assert item["artwork"] == "Not stated"
+    assert item["next_action"] == "Ask Valerie Eskelsen to confirm the artwork."
+    assert "artwork not confirmed" in item["conversion_reason"]
+    assert "typical" not in item["conversion_reason"]
+
+
+@pytest.mark.asyncio
+async def test_stuck_lead_ready_to_convert_says_so_plainly():
+    ready = _valerie_lead()
+    ready["description"] = (
+        '{"product": "Custom Quote", "quantity": "15000", '
+        '"size": "5 x 2 inch", "material": "Foil", '
+        '"finish": "Softouch Lamination, Spot Gloss", "artwork": ["proof.pdf"]}'
+    )
+    db = business_db(leads=Collection([ready]))
+    result = await invoke_tool("get_stuck_leads", {}, database=db)
+    item = result["items"][0]
+    assert item["artwork"] == "Provided"
+    assert item["next_action"] == (
+        "Confirm the order details and convert the lead to an order."
+    )
+    assert item["conversion_reason"].startswith("Nothing missing")
+
+
+@pytest.mark.asyncio
+async def test_get_leads_carries_artwork_and_artwork_question():
+    """get_leads keeps the artwork state and the corrected next_action,
+    but deliberately carries NO conversion_reason: its pages must match
+    get_stuck_leads row-for-row, and the ~10,500-char response cap trims
+    rows off the page when one more sentence per row is added (caught
+    by test_both_stuck_lead_views_page_the_same_sequence)."""
+    db = business_db(leads=Collection([_valerie_lead()]))
+    result = await invoke_tool(
+        "get_leads", {"stuck_only": True}, database=db
+    )
+    assert result["total_count"] == 1
+    item = result["items"][0]
+    assert item["artwork"] == "Not stated"
+    assert item["next_action"] == "Ask Valerie Eskelsen to confirm the artwork."
+    assert "conversion_reason" not in item
 
 
 # ------------------------------------------------------- status words
