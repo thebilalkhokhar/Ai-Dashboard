@@ -37,6 +37,13 @@ const AGENT_CLIPS: Record<string, string> = {
   chat: "/chat.mp4",
 };
 
+// Still portraits for the two CRM agents, same circle crop as the clips,
+// so a branch node never renders an empty circle.
+const AGENT_IMAGES: Record<string, string> = {
+  crm_engagement: "/crm-engagement.webp",
+  crm_deal_watch: "/crm-deal-watch.webp",
+};
+
 // Tree columns, in percent of the stage.
 const ROOT_X = 7;
 const BRANCH_X = 26;
@@ -386,6 +393,7 @@ export function OperationFlow({
         {tree.branches.map((branch) => {
           const pos = branchPos.get(branch.agentId)!;
           const clip = AGENT_CLIPS[branch.agentId];
+          const image = AGENT_IMAGES[branch.agentId];
           return (
             <button
               key={branch.agentId}
@@ -400,6 +408,9 @@ export function OperationFlow({
               <span className="jtree-avatar jtree-avatar--md">
                 {clip && (
                   <video className="jtree-clip" src={clip} aria-hidden="true" muted loop playsInline autoPlay={!reducedMotion} preload="metadata" tabIndex={-1} />
+                )}
+                {!clip && image && (
+                  <img className="jtree-clip" src={image} alt="" aria-hidden="true" />
                 )}
                 {branch.state === "done" && <span className="jtree-badge jtree-badge--done" aria-hidden="true" />}
                 {branch.state === "failed" && <span className="jtree-badge jtree-badge--failed" aria-hidden="true" />}

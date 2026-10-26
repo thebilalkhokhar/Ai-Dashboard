@@ -24,12 +24,20 @@ const CENTER = 50;
 // Each registered assistant has a short looping clip in /public, so the node is
 // the assistant's own face rather than a coloured dot. Keyed by registry id:
 // no new agent is implied, and an agent without a clip keeps its dot.
+// The two CRM agents have still portraits instead of clips (their videos
+// could not be generated here), rendered through the same circle crop, so
+// no branch node ever shows an empty circle.
 const AGENT_CLIPS: Record<string, string> = {
   master: "/master.mp4",
   negotiation: "/negotiations.mp4",
   collections: "/collections.mp4",
   lead_followup: "/leads.mp4",
   chat: "/chat.mp4",
+};
+
+const AGENT_IMAGES: Record<string, string> = {
+  crm_engagement: "/crm-engagement.webp",
+  crm_deal_watch: "/crm-deal-watch.webp",
 };
 
 function nodePosition(index: number, total: number): { x: number; y: number } {
@@ -229,6 +237,7 @@ export function NeuralNetwork({
         const cached = typeof node.cached === "number" && node.cached > 0;
         const master = node.kind === "orchestrator";
         const clip = AGENT_CLIPS[node.id];
+        const image = AGENT_IMAGES[node.id];
         // Only the lowest nodes wear their label above the circle; an avatar is
         // tall enough that labelling the top node from above leaves the stage.
         const placement = y > 68 ? "above" : "below";
@@ -239,7 +248,7 @@ export function NeuralNetwork({
             data-state={node.status}
             data-working={working ? "true" : "false"}
             data-placement={placement}
-            data-clip={clip ? "true" : "false"}
+            data-clip={clip || image ? "true" : "false"}
             style={{ left: `${x}%`, top: `${y}%` }}
           >
             <span className="jn-dot" style={{ animationDelay: `${(index % 5) * 0.7}s` }}>
@@ -255,6 +264,9 @@ export function NeuralNetwork({
                   preload="metadata"
                   tabIndex={-1}
                 />
+              )}
+              {!clip && image && (
+                <img className="jn-clip" src={image} alt="" aria-hidden="true" />
               )}
               {node.status === "completed" && <span className="jn-check" aria-hidden="true" />}
               {node.status === "failed" && <span className="jn-cross" aria-hidden="true" />}
