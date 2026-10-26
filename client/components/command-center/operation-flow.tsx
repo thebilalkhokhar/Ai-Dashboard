@@ -399,7 +399,11 @@ export function OperationFlow({
             <span className="jtree-core">{core}</span>
           ) : (
             <span className="jtree-avatar jtree-avatar--lg">
-              <video className="jtree-clip" src={AGENT_CLIPS.chat} aria-hidden="true" muted loop playsInline autoPlay={!reducedMotion} preload="metadata" tabIndex={-1} />
+              {/* A branch/root clip is motion for work in progress: once the
+              node settles, it holds a still frame instead of looping. The
+              key remounts on the flip, because flipping autoPlay alone
+              never pauses a video that is already playing. */}
+              <video key={tree.root.state === "active" && !reducedMotion ? "live" : "still"} className="jtree-clip" src={AGENT_CLIPS.chat} aria-hidden="true" muted loop={tree.root.state === "active" && !reducedMotion} playsInline autoPlay={tree.root.state === "active" && !reducedMotion} preload="metadata" tabIndex={-1} />
               {tree.root.state === "done" && <span className="jtree-badge jtree-badge--done" aria-hidden="true" />}
               {tree.root.state === "failed" && <span className="jtree-badge jtree-badge--failed" aria-hidden="true" />}
               {tree.root.state === "active" && !reducedMotion && <span className="jtree-ring" aria-hidden="true" />}
@@ -429,7 +433,7 @@ export function OperationFlow({
             >
               <span className="jtree-avatar jtree-avatar--md">
                 {clip && (
-                  <video className="jtree-clip" src={clip} aria-hidden="true" muted loop playsInline autoPlay={!reducedMotion} preload="metadata" tabIndex={-1} />
+                  <video key={branch.state === "active" && !reducedMotion ? "live" : "still"} className="jtree-clip" src={clip} aria-hidden="true" muted loop={branch.state === "active" && !reducedMotion} playsInline autoPlay={branch.state === "active" && !reducedMotion} preload="metadata" tabIndex={-1} />
                 )}
                 {!clip && image && (
                   <img className="jtree-clip" src={image} alt="" aria-hidden="true" />
