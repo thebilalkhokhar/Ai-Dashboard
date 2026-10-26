@@ -544,6 +544,22 @@ async def test_analysis_tool_passes_verified_output_through_labeled(stub):
 
 
 @pytest.mark.asyncio
+async def test_analysis_tool_works_through_invoke_tool(stub):
+    # Regression: invoke_tool splats the shared args dump (including
+    # fresh=False) into the function. Calling the function directly hid a
+    # TypeError that killed every live chat analysis call at 0 ms.
+    from app.agents.chat_tools import invoke_tool
+
+    result = await invoke_tool(
+        "get_customer360_analysis",
+        {"record_id": "665f2ab1c360", "record_type": "Lead"},
+    )
+    assert result["available"] is True
+    assert result["is_real_ai"] is True
+    assert result["analysis"]["urgency"] == "Urgent"
+
+
+@pytest.mark.asyncio
 async def test_analysis_tool_flags_fallback_mode_as_placeholder(monkeypatch):
     from app.agents.chat_tools import get_customer360_analysis
 
