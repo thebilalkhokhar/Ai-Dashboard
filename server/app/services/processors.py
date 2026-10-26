@@ -640,7 +640,12 @@ _NEXT_ACTION_LABELS = {
 }
 
 
-def lead_next_action(missing: Iterable[str] | None, contact_name: str | None = None) -> str:
+def lead_next_action(
+    missing: Iterable[str] | None,
+    contact_name: str | None = None,
+    artwork_present: bool | None = True,
+    description_shape: str | None = None,
+) -> str:
     """The one question to ask about a stuck lead, computed in Python.
 
     Live Oct 27: the Orthoza advice answers still *recommended* a material
@@ -651,13 +656,60 @@ def lead_next_action(missing: Iterable[str] | None, contact_name: str | None = N
     recommending the very thing that is missing. The first missing field
     in the tool's own order is the blocker; a lead with nothing missing
     gets the conversion step, not a question.
+
+    One refinement, live Oct 27 late (the Valerie/Balaika "top lead"
+    answer): a structured description with every spec parsed but artwork
+    unstated is NOT ready to convert - the old fallback said "confirm the
+    order details and convert", and the model turned that into invented
+    "typical blockers" plus a draft-email offer. Artwork unknown is not
+    the same as artwork missing (None means the record does not state
+    it, not that the customer sent nothing), so it stays out of
+    `missing` - but the question becomes confirming the artwork, not
+    converting. Prose descriptions stay on the old fallback: with nothing
+    parsed, no single question is honest. Callers that do not pass
+    artwork state keep the legacy behaviour (artwork_present defaults
+    to True, i.e. provided).
     """
     who = (contact_name or "").strip() or "the customer"
     for field in missing or []:
         label = _NEXT_ACTION_LABELS.get(field)
         if label:
             return f"Ask {who} for the missing {label}."
+    if artwork_present is None and description_shape in ("json", "key_value"):
+        return f"Ask {who} to confirm the artwork."
     return "Confirm the order details and convert the lead to an order."
+
+
+def conversion_reason(
+    missing: Iterable[str] | None,
+    status: str | None,
+    days_idle: int | None,
+    artwork_present: bool | None = True,
+    description_shape: str | None = None,
+) -> str:
+    """Why this lead has not become an order yet - computed in Python.
+
+    The model must quote this instead of inventing "typical blockers":
+    live Oct 27 late, the Valerie/Balaika answer listed pricing approval,
+    artwork proofs and payment terms as reasons when the record states
+    none of them. The only grounded facts are the missing fields, the
+    artwork state, the status, and how long the lead has sat idle - so
+    the reason says exactly that, and nothing else. A lead with nothing
+    missing says so plainly: conversion then needs a human go-ahead,
+    not more details.
+    """
+    state = (status or "New").strip() or "New"
+    idle = f", {days_idle}d idle" if days_idle is not None else ""
+    labels = [
+        _NEXT_ACTION_LABELS[field]
+        for field in (missing or [])
+        if field in _NEXT_ACTION_LABELS
+    ]
+    if labels:
+        return f"Still {state}{idle}: missing {', '.join(labels)}."
+    if artwork_present is None and description_shape in ("json", "key_value"):
+        return f"Still {state}{idle}: artwork not confirmed."
+    return f"Nothing missing; still {state}{idle}."
 
 
 def stuck_leads(
@@ -734,7 +786,19 @@ def stuck_leads(
                 "artwork_present": parsed.get("artwork_present"),
                 "description_shape": parsed.get("shape"),
                 "missing": missing,
-                "next_action": lead_next_action(missing, contact_name),
+                "next_action": lead_next_action(
+                    missing,
+                    contact_name,
+                    artwork_present=parsed.get("artwork_present"),
+                    description_shape=parsed.get("shape"),
+                ),
+                "conversion_reason": conversion_reason(
+                    missing,
+                    status,
+                    int(age),
+                    artwork_present=parsed.get("artwork_present"),
+                    description_shape=parsed.get("shape"),
+                ),
                 "has_contact_details": bool(email or phone),
                 "description": description,
             }

@@ -14,6 +14,10 @@ Semantics, so the names are unambiguous:
   * a week runs **Monday through Sunday**;
   * a "last ..." period is the previous *complete* one, never a shifted partial;
   * "last N days" is a rolling window ending on the business today;
+  * "all time" spans 2000-01-01 through the business today - the full
+    history window. It exists because the model reaches for exactly that
+    phrase on customer questions without a period (live Oct 27: Canyon
+    Plastics died on period='all time' because no such name existed);
   * the calendar is the ERP's, so the business date rolls at US Central
     midnight - not at UTC and not at the reader's local midnight.
 
@@ -118,6 +122,10 @@ def _rolling(days: int) -> Resolver:
     return resolve
 
 
+def _all_time(business_today: date) -> Period:
+    return date(2000, 1, 1), business_today
+
+
 PERIODS: dict[str, Resolver] = {
     "today": _today,
     "yesterday": _yesterday,
@@ -134,6 +142,8 @@ PERIODS: dict[str, Resolver] = {
     "last_7_days": _rolling(7),
     "last_30_days": _rolling(30),
     "last_90_days": _rolling(90),
+    "all_time": _all_time,
+    "all": _all_time,
 }
 
 PERIOD_NAMES: tuple[str, ...] = tuple(PERIODS)
@@ -163,7 +173,9 @@ def resolve_period(name: str, today: date | None = None) -> Period:
     error the model can read, so an invented period never silently becomes a
     whole-history scan.
     """
-    key = (name or "").strip().casefold()
+    # The model writes names with spaces ("all time", "this week") as
+    # readily as underscores; both spellings resolve to the same name.
+    key = (name or "").strip().casefold().replace(" ", "_")
     resolver = PERIODS.get(key)
     if resolver is None:
         raise KeyError(name)
@@ -190,6 +202,7 @@ def resolve_period(name: str, today: date | None = None) -> Period:
 # Ordered so a longer phrasing is matched before one nested inside it; a matched
 # span is blanked out so "this week" cannot also fire inside "this week to date".
 _PERIOD_PHRASES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\ball\s+time\b"), "all_time"),
     (re.compile(r"\b(?:this\s+week\s+to\s+date|week\s+to\s+date|so\s+far\s+this\s+week|this\s+week\s+so\s+far)\b"), "this_week_to_date"),
     (re.compile(r"\b(?:this\s+month\s+to\s+date|month\s+to\s+date|so\s+far\s+this\s+month|this\s+month\s+so\s+far)\b"), "this_month_to_date"),
     (re.compile(r"\b(?:last|previous)\s+week\b"), "last_week"),
