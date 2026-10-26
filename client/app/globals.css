@@ -770,6 +770,63 @@ button {
   }
 }
 
+/* The neural mesh: faint neurons and links across the whole stage, with
+   pulses drifting along them. Dimmer once the turn settles, brighter
+   while it runs - the backdrop breathes, the tree itself stays honest. */
+.jtree-mesh {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.jtree-mesh-line {
+  fill: none;
+  stroke: rgba(125, 190, 255, 0.16);
+  stroke-width: 1;
+}
+
+.jtree[data-live="false"] .jtree-mesh-line {
+  stroke: rgba(125, 190, 255, 0.1);
+}
+
+.jtree-mesh-node {
+  fill: rgba(147, 197, 253, 0.45);
+}
+
+.jtree-mesh-node--hub {
+  fill: rgba(125, 240, 255, 0.7);
+}
+
+.jtree-mesh-pulse {
+  fill: #a5f3fc;
+  filter: drop-shadow(0 0 3px rgba(125, 240, 255, 0.9));
+}
+
+.jtree-mesh-pulse--fast {
+  fill: #e0f2fe;
+}
+
+/* Settled dots keep a slow orbit: the tree stays alive after the run
+   without pretending work is still in progress. */
+.jtree-node[data-state="done"] .jtree-dot::after {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 999px;
+  border: 1px dashed rgba(125, 240, 255, 0.28);
+  animation: jtree-spin 9s linear infinite;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jtree-node[data-state="done"] .jtree-dot::after {
+    display: none;
+  }
+}
+
 .jtree-stage {
   position: relative;
   min-height: 0;
