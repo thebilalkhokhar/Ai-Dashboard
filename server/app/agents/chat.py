@@ -723,7 +723,8 @@ def _format_answer_money(text: str) -> str:
 
 _NULL_PLACEHOLDER_RE = re.compile(
     r"\s*[—–-]\s*[A-Za-z][A-Za-z ]{0,30}:\s*(?:\(\s*(?:null|none)\s*\)|(?:null|none)\b)"
-    r"|\(\s*(?:null|none)\s*\)",
+    r"|\(\s*(?:null|none)\s*\)"
+    r"|\bnull\s*\(unnamed\)",
     re.I,
 )
 
@@ -736,9 +737,15 @@ def _scrub_null_placeholders(text: str) -> str:
     "(Unnamed) — Contact: null". A missing field must vanish from the
     row, not render as null/None. Same class as money normalization: a
     display scrub, not data invention. The word-boundary guard keeps real
-    words like "nullable" untouched.
+    words like "nullable" untouched. One form keeps a label instead of
+    vanishing: "null (unnamed)" becomes "Unnamed", or the row would be
+    left with no name at all.
     """
-    return _NULL_PLACEHOLDER_RE.sub("", text or "")
+
+    def _replace(match: Any) -> str:
+        return "Unnamed" if "unnamed" in match.group(0).lower() else ""
+
+    return _NULL_PLACEHOLDER_RE.sub(_replace, text or "")
 
 
 def _fallback_text(user_message: str) -> str:

@@ -649,15 +649,17 @@ async def get_stuck_leads(
     # which the empty-fields rule forbids. Identity fields are the one
     # exception: a dropped company/contact invites the model to fill the
     # slot by copying a neighbour row's value (live Oct 26 retest: "Canyon
-    # Plastics" on 7 rows, and a product as Thomas Wall Sr.'s company).
-    # Like artwork, they always carry an explicit label - "Not stated" -
-    # which the model reproduces faithfully instead of inventing one.
+    # Plastics" on 7 rows). Like artwork, they always carry an explicit
+    # label which the model reproduces faithfully instead of inventing
+    # one: "Not stated" for a missing company, "Unnamed" for a missing
+    # contact name - the name slot rejects "Not stated" (live Oct 26
+    # retest: the model still wrote "null (unnamed)" for it).
     items = [
         {
             key: value
             for key, value in {
                 "lead_id": row["lead_id"],
-                "contact_name": row["contact_name"] or "Not stated",
+                "contact_name": row["contact_name"] or "Unnamed",
                 "company": row["company"] or "Not stated",
                 "status": row["status"],
                 "days_since_activity": row["days_since_activity"],
