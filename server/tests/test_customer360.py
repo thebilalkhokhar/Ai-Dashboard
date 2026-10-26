@@ -550,6 +550,35 @@ async def test_get_crm_payments_tool_and_its_failure_shape(stub):
     assert result["results"] == []
 
 
+@pytest.mark.asyncio
+async def test_get_crm_payments_customer_without_dates_scans_all_time(monkeypatch):
+    """Live 2026-10-26: 'TREATDAY LLC ki sari payments' died at 0 ms because
+    the date-range validator refuses a dateless call. A customer with no
+    dates is an all-time scan, not a missing argument."""
+    seen = {}
+
+    class AllTimeClient:
+        async def list_page(self, module, page, limit, search=""):
+            seen["search"] = search
+            if page == 1 and search == "TREATDAY LLC":
+                return {"success": True, "payments": [
+                    {"paymentName": "33609", "erpId": "9964", "customerName": "TREATDAY LLC",
+                     "projectName": "Box", "amountReceived": 1250, "totalAmount": 1250,
+                     "invoiceStatus": "Created", "ownerName": "Mary James",
+                     "amountReceiveDate": "2026-10-26T00:00:00.000Z",
+                     "createdAt": "2026-10-26T19:24:00.000Z"},
+                ], "pagination": {"total": 1, "page": 1, "limit": limit, "pages": 1}}
+            return {"success": True, "payments": [],
+                    "pagination": {"total": 0, "page": page, "limit": limit, "pages": 1}}
+
+    monkeypatch.setattr(chat_tools, "_c360_client", lambda: AllTimeClient())
+    result = await get_crm_payments(customer="TREATDAY LLC")
+    assert result["available"] is True
+    assert result["total_count"] == 1
+    assert result["date_from"] == "2000-01-01"
+    assert seen["search"] == "TREATDAY LLC"
+
+
 # ------------------------------------------------------------- CRM analysis
 
 @pytest.mark.asyncio

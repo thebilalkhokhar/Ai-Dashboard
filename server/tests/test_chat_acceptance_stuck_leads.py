@@ -298,6 +298,21 @@ async def test_both_stuck_lead_views_page_the_same_sequence():
         ], f"the two stuck views disagree at offset {offset}"
 
 
+@pytest.mark.asyncio
+async def test_a_nameless_lead_ships_no_null_fields_to_the_model():
+    """Live 2026-10-26: a lead with no name on file was answered as
+    'Contact: (null)' - the model renders a null it receives literally,
+    which the empty-fields rule forbids. Missing fields are absent."""
+    nameless = lead(firstName="", lastName="", company="")
+    db = business_db(leads=Collection([nameless]), chat_logs=FakeCollection([]))
+    result = await invoke_tool("get_stuck_leads", {}, database=db)
+    assert result["total_count"] == 1
+    item = result["items"][0]
+    assert "contact_name" not in item
+    assert "company" not in item
+    assert None not in item.values()
+
+
 def test_evidence_summary_keeps_a_page_total_even_with_no_money():
     """A leads page computes its total_count but no money; the replaced answer
     must still state the verified count instead of the generic apology."""

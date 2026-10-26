@@ -438,6 +438,25 @@ def test_a_numbered_list_is_not_read_as_a_claims():
     ) == []
 
 
+def test_an_inline_numbered_list_is_not_read_as_claims():
+    """Live 2026-10-26: the CRM's own Frank Jr analysis died on the 3) of
+    its inline 'Action needed: 1) ... 2) ... 3) ...' list, and the fallback
+    then blamed a timeout the CRM never had. A lone 'Page 3' stays refused
+    (see test_a_page_position_the_backend_did_not_compute_is_still_refused)."""
+    results = [{"tool": "get_customer360_analysis", "result": {
+        "urgency": "Urgent",
+        "reasoning": "An open estimate for $1,400 is stalled on price.",
+        "action_needed": "Revise the quote and confirm the quantity.",
+    }}]
+    answer = (
+        "CRM AI analysis - Urgency: Urgent. "
+        "Reasoning: An open estimate for $1,400 is stalled on price. "
+        "Action needed: 1) revise the quote. 2) confirm the quantity. 3) send it."
+    )
+
+    assert validate_numeric_claims(answer, results, "", "Give me Frank Jr's CRM analysis") == []
+
+
 def test_a_page_position_the_backend_did_not_compute_is_still_refused():
     results = [{"tool": "get_payments", "result": {
         "offset": 0, "limit": 10, "total_count": 64, "returned": 10,
