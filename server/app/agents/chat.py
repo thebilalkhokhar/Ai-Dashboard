@@ -2397,6 +2397,23 @@ def _text_chunks(text: str, words_per_chunk: int = 4):
         yield "".join(words[start : start + words_per_chunk])
 
 
+# In-flight chat turns, keyed by the server task id, so a turn can be
+# stopped from another request (the Stop button). A turn abandoned by a
+# dead stream is cancelled the same way, and that cancellation is recorded
+# as task.cancelled - never silent, so no client keeps polling a thread
+# that will never land.
+_CHAT_WORKERS: dict[str, asyncio.Task] = {}
+
+
+async def cancel_chat_turn(task_id: str) -> bool:
+    """Cancel a running chat turn. True only when a live worker was cancelled."""
+    task = _CHAT_WORKERS.get(task_id)
+    if task is None or task.done():
+        return False
+    task.cancel()
+    return True
+
+
 async def stream_chat(
     thread_id: str,
     message: str,
@@ -2448,13 +2465,32 @@ async def stream_chat(
                     },
                 }
             )
+        except asyncio.CancelledError:
+            # A dead stream (page reload, Stop) cancels the turn. That must
+            # be observable: without a terminal event the client keeps
+            # polling a thread that will never land, and the turn reads as
+            # stuck. The shielded emit survives the cancellation itself.
+            try:
+                await asyncio.shield(
+                    get_event_service().emit(
+                        task_id=task_id,
+                        type="task.cancelled",
+                        agent_id="chat",
+                        payload={"error": "cancelled"},
+                    )
+                )
+            except Exception:
+                log.exception("could not record chat cancellation")
+            raise
         except Exception:
             log.exception("chat turn failed")
             await queue.put({"event": "error", "data": {"message": "Chat could not complete this request."}})
         finally:
             await queue.put(None)
+            _CHAT_WORKERS.pop(task_id, None)
 
     task = asyncio.create_task(worker())
+    _CHAT_WORKERS[task_id] = task
     try:
         while True:
             event = await queue.get()
