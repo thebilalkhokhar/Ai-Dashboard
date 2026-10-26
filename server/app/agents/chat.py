@@ -721,6 +721,26 @@ def _format_answer_money(text: str) -> str:
     )
 
 
+_NULL_PLACEHOLDER_RE = re.compile(
+    r"\s*[—–-]\s*[A-Za-z][A-Za-z ]{0,30}:\s*(?:\(\s*(?:null|none)\s*\)|(?:null|none)\b)"
+    r"|\(\s*(?:null|none)\s*\)",
+    re.I,
+)
+
+
+def _scrub_null_placeholders(text: str) -> str:
+    """Drop field placeholders for missing values from model prose.
+
+    The tools already omit None-valued keys (Oct 26), but the model still
+    fills its row template with the word itself - live Oct 26 retest:
+    "(Unnamed) — Contact: null". A missing field must vanish from the
+    row, not render as null/None. Same class as money normalization: a
+    display scrub, not data invention. The word-boundary guard keeps real
+    words like "nullable" untouched.
+    """
+    return _NULL_PLACEHOLDER_RE.sub("", text or "")
+
+
 def _fallback_text(user_message: str) -> str:
     if re.search(r"\bartwork\b", user_message, re.I):
         return "The order data does not include artwork status, so I can't identify which orders are missing artwork."
@@ -1998,7 +2018,7 @@ def build_chat_graph(model: Any = None, tools: list | None = None):
                     )
                 continue
 
-            final_text = _format_answer_money(_message_text(response))
+            final_text = _scrub_null_placeholders(_format_answer_money(_message_text(response)))
             period_phrase = _period_phrase(named_period)
             # A no-tool-call response IS the answer generation, and the guard
             # below is the validation stage: both are real boundaries in this
