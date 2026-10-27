@@ -4,7 +4,6 @@
 // them. The data lives in hooks (use-live-data, use-signals, use-stuck-leads)
 // and each tab renders a panel from components/dashboard/*.
 
-import { RefreshCw } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useLiveData } from "@/hooks/use-live-data";
 import { ROW_PAGE_SIZE, useSignals } from "@/hooks/use-signals";
@@ -25,7 +24,7 @@ export function Dashboard({
   onSelectCustomer: (customerId: number | null) => void;
   onTabChange?: (tab: string) => void;
 }) {
-  const { snapshot, status, error: liveError, lastEventAt, refresh } = useLiveData();
+  const { snapshot, error: liveError, refresh } = useLiveData();
   const [activeTab, setActiveTab] = useState("command-center");
 
   const signals = useSignals({
@@ -45,64 +44,39 @@ export function Dashboard({
     if (tab === "leads") leads.setLeadRowLimit(() => ROW_PAGE_SIZE);
   }
 
-  const liveLabel =
-    status === "live"
-      ? "Live stream connected"
-      : status === "connecting"
-        ? "Connecting to live stream..."
-        : status === "reconnecting"
-          ? "Live stream reconnecting..."
-          : "Live stream offline";
-  const liveDot =
-    status === "live"
-      ? "bg-emerald-400"
-      : status === "offline"
-        ? "bg-red-400"
-        : "bg-amber-300";
-
   return (
-    <section aria-labelledby="dashboard-title" className="space-y-5">
-      <div className="flex flex-wrap items-end justify-between gap-3">
+    <section aria-labelledby="dashboard-title" className="space-y-6">
+      {/* Persistent Context: Metrics and Signals timestamps prominently visible & labeled */}
+      <div className="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-3 border-b border-border/60 pb-4">
         <div>
-          <div className="space-y-0.5 text-xs text-muted">
-            <p>Metrics as of {snapshot ? formatDateTime(snapshot.generated_at) : "—"}</p>
-            <p>
-              Signals as of {signals.signals ? formatDateTime(signals.signals.generated_at) : "—"}
-            </p>
-          </div>
-          <h1 id="dashboard-title" className="mt-1 text-2xl font-semibold tracking-tight">
+          <h1 id="dashboard-title" className="text-2xl sm:text-3xl font-semibold tracking-tight text-foreground font-sans">
             Command center
           </h1>
+          <p className="mt-1 text-xs text-muted">
+            Real-time operations, ERP/Zoho mirrors, and autonomous assistant dispatch
+          </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <span
-            className="inline-flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1.5 text-xs text-muted"
-            role="status"
-            title={liveError || liveLabel}
-          >
-            <span className={`h-2 w-2 rounded-full ${liveDot}`} aria-hidden="true" />
-            {liveLabel}
-          </span>
-          {lastEventAt && (
-            <span className="text-xs text-muted">Updated {formatDateTime(lastEventAt)}</span>
-          )}
-          <button
-            type="button"
-            onClick={() => {
-              void refresh();
-              signals.retry();
-            }}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs text-muted transition-colors hover:bg-surface-raised hover:text-foreground"
-          >
-            <RefreshCw size={13} aria-hidden="true" />
-            Refresh
-          </button>
+
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-mono shadow-sm">
+          <div className="inline-flex items-center gap-1.5">
+            <span className="text-muted">Metrics as of</span>
+            <span className="font-semibold text-foreground">
+              {snapshot ? formatDateTime(snapshot.generated_at) : "—"}
+            </span>
+          </div>
+          <span className="text-border" aria-hidden="true">|</span>
+          <div className="inline-flex items-center gap-1.5">
+            <span className="text-muted">Signals as of</span>
+            <span className="font-semibold text-foreground">
+              {signals.signals ? formatDateTime(signals.signals.generated_at) : "—"}
+            </span>
+          </div>
         </div>
       </div>
 
       {(liveError || signals.signalsError) && (
         <div
-          className="rounded-xl border border-red-400/30 bg-red-400/5 px-4 py-3 text-sm text-red-300"
+          className="rounded-xl border border-negative-border bg-negative-muted px-4 py-3 text-sm text-negative-foreground shadow-sm"
           role="alert"
         >
           {liveError && <p>{liveError}</p>}
@@ -155,7 +129,7 @@ export function Dashboard({
         </TabsContent>
       </Tabs>
 
-      <p className="text-[11px] text-muted">
+      <p className="text-[11px] font-mono text-muted pt-6 border-t border-border/40">
         All totals are computed by the backend. This UI only formats and renders them.
       </p>
     </section>

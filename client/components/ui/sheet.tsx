@@ -1,5 +1,6 @@
 "use client";
 
+import * as React from "react";
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import { cn } from "@/lib/utils";
 
@@ -10,7 +11,7 @@ function Sheet({ ...props }: DialogPrimitive.Root.Props) {
 function SheetTrigger({ className, ...props }: DialogPrimitive.Trigger.Props) {
   return (
     <DialogPrimitive.Trigger
-      className={cn("cursor-pointer", className)}
+      className={cn("cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", className)}
       {...props}
     />
   );
@@ -21,17 +22,18 @@ function SheetContent({
   children,
   side = "right",
   ...props
-}: DialogPrimitive.Popup.Props & { side?: "left" | "right" }) {
+}: DialogPrimitive.Popup.Props & { side?: "left" | "right" | "top" | "bottom" }) {
   return (
     <DialogPrimitive.Portal>
-      <DialogPrimitive.Backdrop className="fixed inset-0 z-50 bg-black/60 transition-opacity data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
+      <DialogPrimitive.Backdrop className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm transition-opacity duration-normal ease-default data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
       <DialogPrimitive.Popup
         className={cn(
-          "fixed inset-y-0 z-50 flex h-full w-full flex-col gap-5 overflow-y-auto border-border bg-surface p-6 text-foreground shadow-2xl outline-none transition-transform duration-300",
-          side === "right"
-            ? "right-0 border-l data-[ending-style]:translate-x-full data-[starting-style]:translate-x-full"
-            : "left-0 border-r data-[ending-style]:-translate-x-full data-[starting-style]:-translate-x-full",
-          className,
+          "fixed inset-y-0 z-50 flex h-full w-full flex-col gap-5 overflow-y-auto border-border bg-surface-overlay p-6 text-foreground shadow-overlay outline-none transition-transform duration-slow ease-default",
+          side === "right" &&
+            "right-0 border-l data-[ending-style]:translate-x-full data-[starting-style]:translate-x-full",
+          side === "left" &&
+            "left-0 border-r data-[ending-style]:-translate-x-full data-[starting-style]:-translate-x-full",
+          className
         )}
         {...props}
       >
@@ -48,10 +50,36 @@ function SheetHeader({ className, ...props }: React.ComponentProps<"div">) {
 function SheetTitle({ className, ...props }: DialogPrimitive.Title.Props) {
   return (
     <DialogPrimitive.Title
-      className={cn("text-lg font-semibold tracking-tight", className)}
+      className={cn("text-lg font-semibold tracking-tight text-foreground", className)}
       {...props}
     />
   );
 }
 
-export { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger };
+function SheetDescription({ className, ...props }: DialogPrimitive.Description.Props) {
+  return (
+    <DialogPrimitive.Description
+      className={cn("text-xs text-muted leading-relaxed", className)}
+      {...props}
+    />
+  );
+}
+
+function SheetFooter({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      className={cn("mt-auto flex flex-col-reverse sm:flex-row sm:justify-end gap-2", className)}
+      {...props}
+    />
+  );
+}
+
+export {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetDescription,
+  SheetFooter,
+  SheetTrigger,
+};

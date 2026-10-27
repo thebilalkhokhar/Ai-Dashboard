@@ -133,20 +133,20 @@ export function ChatInterface() {
       <div className="chat-head">
         <span className="chat-head-status">
           <span
-            className={`h-1.5 w-1.5 rounded-full ${isSending || isLive ? "bg-cyan-300" : "bg-accent"}`}
+            className={`h-2 w-2 rounded-full ${isSending || isLive ? "bg-accent shadow-[0_0_8px_rgba(163,230,53,0.7)] animate-pulse" : "bg-positive"}`}
             aria-hidden="true"
           />
-          <span role="status">{status}</span>
+          <span role="status" className="font-medium text-foreground">{status}</span>
         </span>
         {activeTool && (
-          <span className="truncate text-[11px] text-cyan-200/80">{toolPhrase(activeTool)}</span>
+          <span className="truncate text-xs font-mono text-accent">{toolPhrase(activeTool)}</span>
         )}
         <span className="ml-auto inline-flex shrink-0 items-center gap-1.5">
           {(isSending || isLive) && (
             <button
               type="button"
               onClick={stop}
-              className="inline-flex shrink-0 items-center gap-1 rounded-md border border-red-400/40 px-2 py-1 text-[11px] text-red-300 transition-colors hover:border-red-400/70 hover:text-red-200"
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-negative-border bg-negative-muted px-2.5 py-1 text-[11px] font-semibold text-negative transition-colors hover:bg-negative/20 hover:text-negative-foreground"
               title="Stop this request, on the backend as well"
             >
               <Square size={11} aria-hidden="true" />
@@ -160,7 +160,7 @@ export function ChatInterface() {
               newChat();
             }}
             disabled={isSending}
-            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-muted transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-50"
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-surface px-2.5 py-1 text-[11px] font-medium text-muted transition-all hover:border-accent/40 hover:text-accent hover:bg-surface-overlay disabled:opacity-50"
             title="Start a new conversation - this one stays stored under Chats"
           >
             <Plus size={12} aria-hidden="true" />
@@ -177,10 +177,10 @@ export function ChatInterface() {
         aria-label="Conversation"
       >
         {messages.length === 0 && (
-          <div className="space-y-4 py-2">
+          <div className="space-y-4 py-3">
             <div className="space-y-1.5">
-              <p className="flex items-center gap-2 text-sm font-medium text-foreground">
-                <Sparkles size={14} className="text-cyan-300" aria-hidden="true" />
+              <p className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                <Sparkles size={15} className="text-accent" aria-hidden="true" />
                 Ask about the business
               </p>
               <p className="text-xs leading-5 text-muted">
@@ -200,7 +200,7 @@ export function ChatInterface() {
                     setReplyTo(null);
                     send(suggestion);
                   }}
-                  className="rounded-full border border-border bg-surface-raised/60 px-3 py-1.5 text-left text-[11px] text-muted transition-colors hover:border-cyan-300/40 hover:text-foreground disabled:opacity-50"
+                  className="rounded-full border border-border bg-surface-raised px-3.5 py-1.5 text-left text-xs text-muted transition-all hover:border-accent/40 hover:bg-surface-overlay hover:text-foreground disabled:opacity-50"
                 >
                   {suggestion}
                 </button>
@@ -345,7 +345,7 @@ export function ChatInterface() {
         )}
         <form
           onSubmit={handleSubmit}
-          className="flex items-center gap-2 rounded-xl border border-border bg-surface-raised/60 px-2.5 py-1.5 focus-within:border-cyan-300/40"
+          className="flex items-center gap-2 rounded-xl border border-border bg-surface-raised px-2.5 py-1.5 transition-all focus-within:border-accent/50 focus-within:ring-2 focus-within:ring-accent/15"
         >
           <textarea
             value={message}
@@ -365,7 +365,7 @@ export function ChatInterface() {
             aria-label="Send message"
             title={isSending ? "Queue message" : "Send message"}
             disabled={message.trim().length === 0}
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-cyan-300 to-violet-400 text-[#081016] disabled:cursor-not-allowed disabled:opacity-40"
+            className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-accent text-accent-foreground font-semibold shadow-sm transition-all hover:bg-accent-hover active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Send size={15} aria-hidden="true" />
           </button>

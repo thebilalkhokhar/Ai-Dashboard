@@ -31,57 +31,81 @@ export function UnpaidTable({
         <EmptyNote>No invoices currently carry a balance.</EmptyNote>
       ) : (
         <>
-          <table className="w-full min-w-[820px] text-left text-sm">
-            <thead>
-              <tr className="border-b border-border text-xs text-muted">
-                <th className="px-4 py-3 font-medium">Invoice</th>
-                <th className="px-4 py-3 font-medium">Customer</th>
-                <th className="px-4 py-3 font-medium">Payment status</th>
-                <th className="px-4 py-3 text-right font-medium">Balance</th>
-                <th className="px-4 py-3 text-right font-medium">Total</th>
-                <th className="px-4 py-3 text-right font-medium">Age</th>
-                <th className="px-4 py-3 font-medium">Overdue</th>
-                <th className="px-4 py-3 font-medium">Rep</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {visible.map((invoice, index) => (
-                <tr key={invoice.id ?? `${invoice.inv_ref ?? "invoice"}-${index}`}>
-                  <td className="px-4 py-3">
-                    <p className="font-medium">{invoice.inv_ref || "—"}</p>
-                    <p className="mt-1 text-xs text-muted">ID {invoice.id ?? "—"}</p>
-                  </td>
-                  <td className="px-4 py-3">
-                    <CustomerCell customer={invoice.customer} onSelectCustomer={onSelectCustomer} />
-                  </td>
-                  <td className="px-4 py-3 text-muted">
-                    {invoice.payment_status_label || "Status not provided"}
-                  </td>
-                  <td className="px-4 py-3 text-right tabular-nums">
-                    {formatMoney(invoice.balance)}
-                  </td>
-                  <td className="px-4 py-3 text-right tabular-nums text-muted">
-                    {formatMoney(invoice.total_amount)}
-                  </td>
-                  <td className="px-4 py-3 text-right tabular-nums text-muted">
-                    {invoice.days_invoice_age}d
-                  </td>
-                  <td className="px-4 py-3">
-                    <span
-                      className={`rounded-md px-2 py-1 text-[11px] ${
-                        invoice.overdue
-                          ? "bg-red-400/10 text-red-300"
-                          : "bg-surface-raised text-muted"
-                      }`}
-                    >
-                      {invoice.overdue ? "Overdue" : "Within terms"}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-muted">{invoice.sale_rep?.name || "Unassigned"}</td>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[840px] text-left text-sm">
+              <thead>
+                <tr className="border-b border-border bg-surface-raised/40 text-[11px] font-semibold uppercase tracking-wider text-muted">
+                  <th scope="col" className="px-4 py-3">Invoice</th>
+                  <th scope="col" className="px-4 py-3">Customer</th>
+                  <th scope="col" className="px-4 py-3">Payment status</th>
+                  <th scope="col" className="px-4 py-3 text-right">Balance</th>
+                  <th scope="col" className="px-4 py-3 text-right">Total</th>
+                  <th scope="col" className="px-4 py-3 text-right">Age</th>
+                  <th scope="col" className="px-4 py-3">Overdue</th>
+                  <th scope="col" className="px-4 py-3">Rep</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-border/60">
+                {visible.map((invoice, index) => {
+                  const isOverdue = Boolean(invoice.overdue);
+                  return (
+                    <tr
+                      key={invoice.id ?? `${invoice.inv_ref ?? "invoice"}-${index}`}
+                      className="group transition-colors hover:bg-surface-raised/50"
+                    >
+                      <td className="px-4 py-3.5 align-middle">
+                        <p className="font-mono text-sm font-semibold text-foreground group-hover:text-accent transition-colors">
+                          {invoice.inv_ref || "—"}
+                        </p>
+                        <p className="mt-0.5 font-mono text-[11px] text-muted">ID {invoice.id ?? "—"}</p>
+                      </td>
+                      <td className="px-4 py-3.5 align-middle">
+                        <CustomerCell customer={invoice.customer} onSelectCustomer={onSelectCustomer} />
+                      </td>
+                      <td className="px-4 py-3.5 align-middle text-xs text-muted">
+                        <span className="inline-flex items-center rounded-md bg-surface-raised px-2 py-0.5 text-xs text-foreground/80 border border-border/60">
+                          {invoice.payment_status_label || "Status not provided"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3.5 text-right align-middle">
+                        <span className={`font-mono text-sm font-bold tracking-tight tabular-nums ${
+                          isOverdue ? "text-negative" : "text-foreground"
+                        }`}>
+                          {formatMoney(invoice.balance)}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3.5 text-right align-middle font-mono text-xs tabular-nums text-muted">
+                        {formatMoney(invoice.total_amount)}
+                      </td>
+                      <td className="px-4 py-3.5 text-right align-middle">
+                        <span className={`font-mono text-xs tabular-nums ${
+                          invoice.days_invoice_age > 60
+                            ? "font-semibold text-warning"
+                            : "text-muted"
+                        }`}>
+                          {invoice.days_invoice_age}d
+                        </span>
+                      </td>
+                      <td className="px-4 py-3.5 align-middle">
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold uppercase tracking-wider ${
+                            isOverdue
+                              ? "bg-negative-muted text-negative border border-negative-border"
+                              : "bg-surface-raised text-muted border border-border"
+                          }`}
+                        >
+                          {isOverdue ? "Overdue" : "Within terms"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3.5 align-middle text-xs text-foreground/80">
+                        {invoice.sale_rep?.name || <span className="text-muted italic">Unassigned</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
           <ShowMore shown={visible.length} total={totalCount} onShowMore={onShowMore} />
         </>
       )}

@@ -59,29 +59,26 @@ export function SystemHealthProvider({ children }: { children: ReactNode }) {
 export function SystemHealthBadge() {
   const healthState = useContext(HealthContext);
 
-  if (!healthState) {
-    throw new Error("SystemHealthBadge must be rendered inside SystemHealthProvider.");
-  }
-
+  const status = healthState?.status ?? "ok";
   const label =
-    healthState.status === "checking"
+    status === "checking"
       ? "Checking backend..."
-      : healthState.status === "unavailable"
+      : status === "unavailable"
         ? "Backend unreachable"
-        : healthState.status === "degraded"
+        : status === "degraded"
           ? "Backend degraded"
           : "Backend online";
   const indicatorClass =
-    healthState.status === "unavailable" || healthState.status === "degraded"
-      ? "bg-red-400"
-      : healthState.status === "checking"
-        ? "bg-amber-300"
-        : "bg-emerald-400";
+    status === "unavailable" || status === "degraded"
+      ? "bg-red-400 shadow-[0_0_8px_rgba(239,68,68,0.5)]"
+      : status === "checking"
+        ? "bg-amber-300 shadow-[0_0_8px_rgba(245,158,11,0.5)]"
+        : "bg-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.5)]";
   const detail =
-    healthState.status === "unavailable"
-      ? healthState.error
-      : healthState.status === "checking"
-        ? undefined
+    !healthState || healthState.status === "checking"
+      ? undefined
+      : healthState.status === "unavailable"
+        ? healthState.error
         : [
             `MongoDB: ${healthState.health.mongo ? "ok" : "unavailable"}`,
             `Database: ${healthState.health.database}`,
@@ -90,13 +87,13 @@ export function SystemHealthBadge() {
 
   return (
     <div
-      className="inline-flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1.5 text-xs text-muted"
+      className="inline-flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1 text-xs font-medium text-foreground/90 transition-all duration-fast hover:border-border-hover hover:bg-surface-raised cursor-default select-none shadow-sm"
       role="status"
       title={detail}
       aria-label={detail ? `${label}. ${detail}` : label}
     >
-      <span className={`h-2 w-2 rounded-full ${indicatorClass}`} aria-hidden="true" />
-      {label}
+      <span className={`h-1.5 w-1.5 rounded-full ${indicatorClass}`} aria-hidden="true" />
+      <span>{label}</span>
     </div>
   );
 }

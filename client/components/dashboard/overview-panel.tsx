@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { QuoteVolumeChart, RevenueTrendChart, TopRepsChart } from "@/components/charts";
 import { AttentionRow, ChartCard, EmptyNote, KpiCard } from "@/components/dashboard/primitives";
+import { SkeletonChartFrame, SkeletonKpiTile } from "@/components/ui/skeleton";
 import { formatMoney } from "@/lib/format";
 import type { DashboardSnapshot, SignalsReport, StuckLeadsResponse } from "@/types/api";
 
@@ -37,27 +38,43 @@ export function OverviewPanel({
 }) {
   if (!snapshot) {
     return (
-      <section className="rounded-xl border border-border bg-surface p-8 text-center">
-        <Activity size={22} className="mx-auto text-accent" aria-hidden="true" />
-        <p className="mt-3 text-sm font-medium">Waiting for the first dashboard snapshot</p>
-        <p className="mt-1 text-xs text-muted">
-          The backend builds one on its scheduler cycle (`GET /api/metrics` returns 503 until then).
-        </p>
-        <button
-          type="button"
-          onClick={onRefresh}
-          className="mt-4 inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-2 text-xs text-muted hover:bg-surface-raised hover:text-foreground"
-        >
-          <RefreshCw size={13} aria-hidden="true" />
-          Try again
-        </button>
-      </section>
+      <div className="space-y-6">
+        <section className="rounded-xl border border-border bg-surface p-8 text-center shadow-sm">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-xl border border-accent-border bg-accent-muted text-accent">
+            <Activity size={24} aria-hidden="true" />
+          </div>
+          <p className="mt-3.5 text-base font-semibold text-foreground">Waiting for the first dashboard snapshot</p>
+          <p className="mt-1 text-xs text-muted max-w-md mx-auto">
+            The backend builds one on its scheduler cycle (`GET /api/metrics` returns 503 until then).
+          </p>
+          <button
+            type="button"
+            onClick={onRefresh}
+            className="mt-5 inline-flex items-center gap-2 rounded-lg border border-border bg-surface-raised px-4 py-2 text-xs font-semibold text-foreground shadow-sm transition-all hover:border-accent/40 hover:bg-surface-overlay"
+          >
+            <RefreshCw size={13} aria-hidden="true" />
+            Try again
+          </button>
+        </section>
+
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {Array.from({ length: 9 }).map((_, i) => (
+            <SkeletonKpiTile key={i} />
+          ))}
+        </div>
+
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,1.8fr)_minmax(0,1fr)]">
+          <SkeletonChartFrame />
+          <SkeletonChartFrame />
+        </div>
+      </div>
     );
   }
 
   return (
-    <>
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="space-y-6">
+      {/* 9 KPI Tiles in a balanced 3x3 dashboard grid */}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <KpiCard
           icon={DollarSign}
           label="Revenue today"
@@ -82,9 +99,6 @@ export function OverviewPanel({
           value={`${snapshot.open_quotes_count}`}
           detail={`${snapshot.open_quotes_value_display} in open value`}
         />
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <KpiCard
           icon={AlertTriangle}
           label="Unpaid balance"
@@ -126,7 +140,8 @@ export function OverviewPanel({
         />
       </div>
 
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+      {/* 14-day Area & Bar Charts */}
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.8fr)_minmax(0,1fr)]">
         <ChartCard title="Revenue received" subtitle="Last 14 days · from payments">
           <RevenueTrendChart data={snapshot.revenue_per_day} />
         </ChartCard>
@@ -135,7 +150,8 @@ export function OverviewPanel({
         </ChartCard>
       </div>
 
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+      {/* Top Reps Ranking & Deterministic Needs Attention */}
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
         <ChartCard title="Top reps this month" subtitle="Ranked by payments received">
           {snapshot.top_reps_this_month.length > 0 ? (
             <TopRepsChart reps={snapshot.top_reps_this_month} />
@@ -144,46 +160,50 @@ export function OverviewPanel({
           )}
         </ChartCard>
 
-        <section className="rounded-xl border border-border bg-surface">
-          <div className="flex items-center gap-3 border-b border-border px-5 py-4">
-            <AlertTriangle size={17} className="text-accent" aria-hidden="true" />
-            <div>
-              <h2 className="font-semibold">Needs attention</h2>
-              <p className="mt-1 text-xs text-muted">
-                Deterministic counts from `GET /api/signals`
-              </p>
+        <section className="rounded-xl border border-border bg-surface shadow-sm overflow-hidden flex flex-col justify-between">
+          <div>
+            <div className="flex items-center gap-3 border-b border-border px-5 py-4 bg-surface-raised/40">
+              <div className="grid h-8 w-8 place-items-center rounded-lg border border-warning-border bg-warning-muted text-warning">
+                <AlertTriangle size={16} aria-hidden="true" />
+              </div>
+              <div>
+                <h2 className="font-semibold text-foreground tracking-tight">Needs attention</h2>
+                <p className="mt-0.5 text-xs text-muted">
+                  Deterministic counts from `GET /api/signals`
+                </p>
+              </div>
             </div>
-          </div>
-          <div className="space-y-3 p-4">
-            <AttentionRow
-              label="Stale quotes"
-              count={signals?.summary.stale_quotes.count}
-              amount={signals ? formatMoney(signals.summary.stale_quotes.total_amount) : undefined}
-              onClick={() => onSelectTab("pipeline")}
-            />
-            <AttentionRow
-              label="Unpaid invoices"
-              count={signals?.summary.unpaid_invoices.count}
-              amount={
-                signals ? formatMoney(signals.summary.unpaid_invoices.total_amount) : undefined
-              }
-              detail={
-                signals
-                  ? `${signals.summary.unpaid_invoices.overdue_count} overdue · ${signals.summary.unpaid_invoices.partially_paid_count} partially paid`
-                  : undefined
-              }
-              onClick={() => onSelectTab("receivables")}
-            />
-            <AttentionRow
-              label="Stalled orders"
-              count={signals?.summary.stalled_orders.count}
-              amount={signals ? formatMoney(signals.summary.stalled_orders.total_amount) : undefined}
-              detail="Signal is marked unreliable by the backend"
-              onClick={() => onSelectTab("pipeline")}
-            />
+            <div className="space-y-3 p-4">
+              <AttentionRow
+                label="Stale quotes"
+                count={signals?.summary.stale_quotes.count}
+                amount={signals ? formatMoney(signals.summary.stale_quotes.total_amount) : undefined}
+                onClick={() => onSelectTab("pipeline")}
+              />
+              <AttentionRow
+                label="Unpaid invoices"
+                count={signals?.summary.unpaid_invoices.count}
+                amount={
+                  signals ? formatMoney(signals.summary.unpaid_invoices.total_amount) : undefined
+                }
+                detail={
+                  signals
+                    ? `${signals.summary.unpaid_invoices.overdue_count} overdue · ${signals.summary.unpaid_invoices.partially_paid_count} partially paid`
+                    : undefined
+                }
+                onClick={() => onSelectTab("receivables")}
+              />
+              <AttentionRow
+                label="Stalled orders"
+                count={signals?.summary.stalled_orders.count}
+                amount={signals ? formatMoney(signals.summary.stalled_orders.total_amount) : undefined}
+                detail="Signal is marked unreliable by the backend"
+                onClick={() => onSelectTab("pipeline")}
+              />
+            </div>
           </div>
         </section>
       </div>
-    </>
+    </div>
   );
 }

@@ -16,8 +16,8 @@ export function VoiceConsole() {
           <h2 id="voice-title" className="font-semibold">Voice console</h2>
           <p className="mt-1 text-xs text-muted">Push-to-talk interface</p>
         </div>
-        <span className="inline-flex items-center gap-1.5 text-xs text-amber-300">
-          <Radio size={14} aria-hidden="true" />
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-warning-border bg-warning-muted px-2.5 py-0.5 text-xs font-semibold text-warning-foreground">
+          <Radio size={13} aria-hidden="true" className="text-warning" />
           Backend endpoint missing
         </span>
       </div>

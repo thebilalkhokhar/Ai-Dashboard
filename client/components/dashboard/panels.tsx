@@ -26,7 +26,7 @@ export function ReceivablesPanel({
 }) {
   const showMore = () => signals.setRowLimit((current) => current + ROW_PAGE_SIZE);
   return (
-    <>
+    <div className="space-y-6">
       <FilterBar
         title="Receivables"
         description="Every invoice with a balance greater than zero. The overdue threshold changes which rows are flagged, not which rows are returned."
@@ -56,7 +56,7 @@ export function ReceivablesPanel({
           onRetry={signals.retry}
         />
       )}
-    </>
+    </div>
   );
 }
 
@@ -69,7 +69,7 @@ export function PipelinePanel({
 }) {
   const showMore = () => signals.setRowLimit((current) => current + ROW_PAGE_SIZE);
   return (
-    <>
+    <div className="space-y-6">
       <FilterBar
         title="Pipeline"
         description="Open quotes and stalled orders. Both lists are computed by the backend; stalled orders are explicitly unreliable because the ERP has no status timestamps."
@@ -93,7 +93,7 @@ export function PipelinePanel({
       {signals.isLoadingSignals && !signals.signals ? (
         <LoadingNote />
       ) : signals.signals ? (
-        <div className="space-y-5">
+        <div className="space-y-6">
           <StaleQuoteTable
             rows={signals.signals.stale_quotes}
             totalCount={signals.signals.summary.stale_quotes.count}
@@ -122,17 +122,17 @@ export function PipelinePanel({
           onRetry={signals.retry}
         />
       )}
-    </>
+    </div>
   );
 }
 
 export function LeadsPanel({ leads }: { leads: StuckLeadsState }) {
   return (
-    <>
-      <div className="flex flex-wrap items-end justify-between gap-4 rounded-xl border border-border bg-surface px-5 py-4">
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-end justify-between gap-4 rounded-2xl border border-border/80 bg-surface/80 p-5 shadow-sm backdrop-blur-md">
         <div className="max-w-2xl">
-          <h2 className="font-semibold">Leads</h2>
-          <p className="mt-1 text-xs text-muted">
+          <h2 className="text-base font-semibold tracking-tight text-foreground">Leads</h2>
+          <p className="mt-1 text-xs leading-relaxed text-muted">
             Leads stuck before becoming an order: status New or Attempted to Contact, activity
             within the last {leads.stuckLeads?.days ?? 14} days, a description present, not flagged
             by the lead desk. The filter and every parsed field come from the backend
@@ -155,6 +155,6 @@ export function LeadsPanel({ leads }: { leads: StuckLeadsState }) {
           onRetry={leads.retry}
         />
       )}
-    </>
+    </div>
   );
 }
