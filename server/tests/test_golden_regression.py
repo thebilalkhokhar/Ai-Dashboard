@@ -147,6 +147,117 @@ async def test_combined_payments_today_is_the_erp_business_day(crm):
     assert result["window"]["business_date"] == business_day
 
 
+# ------------------------------------------------------- combined payments pagination (Oct 31)
+
+
+def _crm_rows_many(count, start_erp=7251, amount=100.0, name="Picazo Cleaning Services"):
+    return [
+        {
+            "paymentName": f"{33600 + i}", "erpId": start_erp + i, "customerName": name,
+            "amountReceived": amount, "totalAmount": amount,
+            "amountReceiveDate": "2026-10-21T00:00:00.000Z",
+            "createdAt": "2026-10-21T19:24:00.000Z",
+        }
+        for i in range(count)
+    ]
+
+
+def _crm_with_rows(monkeypatch, rows):
+    monkeypatch.setattr(chat_tools, "_c360_client", lambda: _crm_client(rows))
+
+
+@pytest.mark.asyncio
+async def test_combined_payments_small_set_returns_every_row_no_cursors(monkeypatch):
+    """Oct 31 transcript: 'fetch next page' fetched pages 2 AND 3 on both
+    ledgers and the answer narrated offset/limit/has_more instead of listing
+    a payment. A small set must come back whole, with no cursor fields left
+    to narrate, and the summary must state both totals and the gap."""
+    _crm_with_rows(monkeypatch, [
+        {
+            "paymentName": "33609", "erpId": 7251, "customerName": "Picazo Cleaning Services",
+            "amountReceived": 1250, "totalAmount": 1250,
+            "amountReceiveDate": "2026-10-21T00:00:00.000Z",
+            "createdAt": "2026-10-21T19:24:00.000Z",
+        },
+        {
+            "paymentName": "33610", "erpId": 9999, "customerName": "Picazo Cleaning Services",
+            "amountReceived": 750, "totalAmount": 750,
+            "amountReceiveDate": "2026-10-21T00:00:00.000Z",
+            "createdAt": "2026-10-21T19:24:00.000Z",
+        },
+    ])
+    db = business_db(payments_flat=Collection([
+        payment(index=1, amount=501.0),
+        payment(index=2, amount=502.0),
+        payment(index=3, amount=503.0),
+    ]))
+    result = await invoke_tool("get_payments_both_ledgers", {"customer": "Picazo"}, database=db)
+    assert result["summary"]["coverage"] == "complete"
+    assert result["summary"]["next_offset"] is None
+    assert result["erp"]["total_count"] == 3
+    assert len(result["erp"]["items"]) == 3
+    assert result["crm"]["total_count"] == 2
+    assert len(result["crm"]["items"]) == 2
+    assert result["erp"]["page"]["all_rows_returned"] is True
+    assert result["crm"]["page"]["all_rows_returned"] is True
+    assert "offset" not in result["erp"]["page"] and "offset" not in result["crm"]["page"]
+    assert "next_offset" not in result["erp"]["page"] and "next_offset" not in result["crm"]["page"]
+    assert result["summary"]["erp_total"] == "$1,506"
+    assert result["summary"]["crm_total"] == "$2,000"
+    assert result["summary"]["ledger_difference"] == "CRM total exceeds ERP total by $494."
+    assert result["paired_on_this_page_only"]["crm_rows_with_erp_id_on_this_page"] == 1
+
+
+@pytest.mark.asyncio
+async def test_combined_payments_equal_totals_carry_no_gap_line(monkeypatch):
+    """Same totals, no gap to explain: the summary must not invent one."""
+    _crm_with_rows(monkeypatch, _crm_rows_many(1, amount=1250.0))
+    db = business_db(payments_flat=Collection([payment(index=1, amount=1250.0)]))
+    result = await invoke_tool("get_payments_both_ledgers", {"customer": "Picazo"}, database=db)
+    assert result["summary"]["coverage"] == "complete"
+    assert result["summary"]["erp_total"] == result["summary"]["crm_total"] == "$1,250"
+    assert result["summary"]["ledger_difference"] is None
+
+
+@pytest.mark.asyncio
+async def test_combined_payments_large_set_still_pages_one_call(monkeypatch):
+    """Totals above the all-rows ceiling keep paging, but one combined call
+    carries both ledgers and both page blocks name their page - the model
+    pages with one call instead of one call per ledger."""
+    _crm_with_rows(monkeypatch, _crm_rows_many(55))
+    db = business_db(payments_flat=Collection(
+        [payment(index=i, amount=100.0) for i in range(1, 56)]
+    ))
+    result = await invoke_tool("get_payments_both_ledgers", {"customer": "Picazo"}, database=db)
+    assert result["summary"]["coverage"] == "page"
+    assert result["summary"]["next_offset"] == 10
+    assert len(result["erp"]["items"]) == 10
+    assert len(result["crm"]["items"]) == 10
+    assert result["erp"]["total_count"] == 55
+    assert result["crm"]["total_count"] == 55
+    assert result["erp"]["page"]["has_more"] is True
+    assert result["erp"]["page"]["page"] == 1
+    assert result["erp"]["page"]["pages_total"] == 6
+    assert result["crm"]["page"]["page"] == 1
+    assert result["crm"]["page"]["pages_total"] == 6
+
+
+@pytest.mark.asyncio
+async def test_combined_payments_oversized_payload_falls_back_to_pages(monkeypatch):
+    """The all-rows budget is honest: a small set with very long customer
+    names must page rather than collapse into a truncated preview."""
+    long_name = "Picazo " + "P" * 193
+    _crm_with_rows(monkeypatch, _crm_rows_many(25, name=long_name))
+    db = business_db(payments_flat=Collection([
+        payment(index=i, amount=100.0, customer={"id": 6079, "company_name": long_name})
+        for i in range(1, 26)
+    ]))
+    result = await invoke_tool("get_payments_both_ledgers", {"customer": "Picazo"}, database=db)
+    assert result["summary"]["coverage"] == "page"
+    assert result["erp"]["page"]["has_more"] is True
+    assert len(result["crm"]["items"]) == 10
+
+
 # ------------------------------------------------------- stuck leads next_action
 
 

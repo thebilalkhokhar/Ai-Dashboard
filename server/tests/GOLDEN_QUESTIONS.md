@@ -22,6 +22,7 @@ paraphrase that drops a ledger, a total, or the blocker.
 | P4 | TREATDAY ke CRM payments dikhao. | All-time CRM total $10,201 / 10 payments — NOT the last-30-days $1,250. Root cause fixed Oct 27: the dateless call used to die in argument validation. Oct 27 late: passing period 'all time' itself is now accepted (registry entry in periods.py) — the Canyon failure mode, where the model passed 'all time' and the validator rejected it. |
 | P5 | Canyon Plastics ki payments dikhao. | ERP leg AND CRM leg, both reported. "CRM payments have not been checked yet" is a FAIL — the combined tool makes a skipped leg impossible. |
 | P6 | Show me all payments for TREATDAY LLC. | The 10-payment list, not a single invoice row. |
+| P7 | What did customers pay this week? (39 payments) then "fetch next page". | One answer: both totals first, then the payments, no page metadata. A small set returns every row in one call — "fetch next page" must NOT fetch pages 2 and 3 (Oct 31 transcript: 4 tool calls, zero rows listed, then "would you like pages 2 or 3?"). When the ledgers differ, one line states the gap (ERP $306,349 vs CRM $292,122.68 = $14,226.32 apart). Large sets still page, one combined call per page. |
 
 ## Invoices / quotes / orders — status words must not zero the answer
 
