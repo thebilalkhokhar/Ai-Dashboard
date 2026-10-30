@@ -793,6 +793,12 @@ async def get_rep_summary(
 
 DEFAULT_TOOL_ROWS = 10
 MAX_TOOL_ROWS = 50
+# The combined payments answer may return every row instead of a page, but
+# only while the whole payload stays this far under invoke_tool's 10,500-char
+# _bounded cliff: past it the result collapses into a truncated preview and
+# the totals the answer needs are lost. The margin covers the money
+# formatting invoke_tool applies on the way out.
+ALL_ROWS_BUDGET = 9_500
 
 PAGING_NOTE = (
     " Paged: the answer gives offset, limit, total_count, returned, remaining_count, has_more,"
@@ -991,8 +997,19 @@ class CombinedPaymentsArgs(ToolArgs):
         " unfiltered totals. With a customer and no period, the window is"
         " all time.",
     )
-    limit: int = Field(default=DEFAULT_TOOL_ROWS, ge=1)
-    offset: int = Field(default=0, ge=0)
+    limit: int = Field(
+        default=DEFAULT_TOOL_ROWS,
+        ge=1,
+        description="Rows per ledger for one page (the combined view caps a page at 20 per ledger). "
+        "When the whole set is small the tool returns every row instead of a page.",
+    )
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="How many matching rows to skip before this page. To fetch the next page of "
+        "BOTH ledgers, re-call this tool with the same filters and offset set to the previous "
+        "page's next_offset - one call, never one call per ledger.",
+    )
 
     @field_validator("limit")
     @classmethod
@@ -1244,6 +1261,23 @@ def _payment_row(row: dict) -> dict:
     }
 
 
+def _compact_payment_row(row: dict) -> dict:
+    """The all-rows shape: date, customer, amount - nothing else.
+
+    The full row carries invoices, timestamps and references; fifty of those
+    would blow the context budget the combined answer lives under. The
+    all-rows view answers "what did customers pay", which needs who, when
+    and how much - ids stay in the paged view, where one page is small.
+    """
+    stamp = _payment_timestamp(row.get("received_at"))
+    return {
+        "payment_id": row.get("id"),
+        "payment_date": row.get("payment_date") or stamp.get("received_date"),
+        "customer_name": _customer_name_of(row) or "Customer not recorded",
+        "amount": processors.to_number(row.get("amount")),
+    }
+
+
 async def get_payments(
     date_from: date | None = None,
     date_to: date | None = None,
@@ -1253,9 +1287,16 @@ async def get_payments(
     method: str | None = None,
     limit: int = DEFAULT_TOOL_ROWS,
     offset: int = 0,
+    compact: bool = False,
     database: Any = None,
 ) -> dict:
-    """Individual payment records: who paid, how much, when, against which invoice."""
+    """Individual payment records: who paid, how much, when, against which invoice.
+
+    ``compact`` is a Python-side switch for the combined tool's all-rows
+    probe, not a model argument: the schema never offers it, so invoke_tool
+    never passes it, and a direct caller gets small rows that survive
+    _bounded where fifty full rows would be trimmed.
+    """
     args = PaymentArgs.model_validate(
         {
             "date_from": date_from, "date_to": date_to, "customer": customer,
@@ -1293,7 +1334,10 @@ async def get_payments(
         "sum_amount_covers": (
             "every matched payment record, not only the rows on this page"
         ),
-        "items": [_payment_row(row) for row in matched[args.offset : args.offset + args.limit]],
+        "items": [
+            (_compact_payment_row(row) if compact else _payment_row(row))
+            for row in matched[args.offset : args.offset + args.limit]
+        ],
         "filters_applied": {
             "date_from": args.date_from.isoformat() if args.date_from else None,
             "date_to": args.date_to.isoformat() if args.date_to else None,
@@ -1311,7 +1355,9 @@ async def get_payments(
     result = _paginate(
         _bounded(result), total=len(matched), offset=args.offset, limit=args.limit
     )
-    if any(item["timestamp_precision"] in {"date", "missing"} for item in result["items"]):
+    if not compact and any(
+        item["timestamp_precision"] in {"date", "missing"} for item in result["items"]
+    ):
         # stated once for the whole page, not repeated on every row
         result["timestamp_note"] = (
             "Exact arrival times are not recorded for the date-only payments "
@@ -2035,6 +2081,63 @@ async def get_crm_payments(
         }
 
 
+def _payments_summary(
+    erp_sum: Any,
+    crm_sum: Any,
+    erp_total: int,
+    crm_total: int,
+    *,
+    coverage: str,
+    next_offset: int | None,
+) -> dict:
+    """The copy-pasteable head of a payments answer: totals first, then rows.
+
+    Oct 31 transcript: the answer led with page metadata ("offset 10,
+    limit 10") and never explained why two ledgers with the same count
+    totalled differently. Python states both totals, their counts, and the
+    gap when there is one, so the model copies figures instead of
+    narrating cursors. CRM receive_date is a calendar date, not a time -
+    stated here because the CRM note is dropped from the all-rows payload
+    to stay inside the budget.
+    """
+    difference = None
+    if erp_sum is not None and crm_sum is not None:
+        erp_value = processors.to_number(erp_sum)
+        crm_value = processors.to_number(crm_sum)
+        gap = round(abs(erp_value - crm_value), 2)
+        if gap:
+            leader, other = ("ERP", "CRM") if erp_value > crm_value else ("CRM", "ERP")
+            difference = f"{leader} total exceeds {other} total by {format_money(gap)}."
+    if coverage == "complete":
+        report = (
+            "Report the ERP total and the CRM total first, then list the payments "
+            "in each ledger. These items are the complete set for the window - "
+            "there is no next page."
+        )
+    elif next_offset is not None:
+        report = (
+            "Report the ERP total and the CRM total first, then list the payments "
+            f"on this page. More rows remain; the next page of both ledgers is "
+            f"offset {next_offset}."
+        )
+    else:
+        report = (
+            "Report the ERP total and the CRM total first, then list the payments "
+            "on this page. This is the last page."
+        )
+    report += " CRM receive_date is a calendar date, not a time."
+    return {
+        "erp_total": format_money(erp_sum) if erp_sum is not None else None,
+        "crm_total": format_money(crm_sum) if crm_sum is not None else None,
+        "erp_count": erp_total,
+        "crm_count": crm_total,
+        "ledger_difference": difference,
+        "coverage": coverage,
+        "next_offset": next_offset,
+        "report": report,
+    }
+
+
 async def get_payments_both_ledgers(
     period: str | None = None,
     date_from: date | None = None,
@@ -2060,6 +2163,13 @@ async def get_payments_both_ledgers(
     and counts still cover every matched row, and the compact rows keep
     this payload inside the context budget (a 50+50 full-row payload
     would collapse into a truncated preview and lose the totals).
+
+    Oct 31 transcript: "fetch next page" fetched pages 2 AND 3 on both
+    ledgers (four tool calls) and the answer narrated the page metadata
+    instead of listing a single payment. Two changes end that class: a
+    small set returns every row in one call with no cursor fields left to
+    narrate, and the summary block states both totals, their counts and
+    the gap between them before any row.
     """
     args = CombinedPaymentsArgs.model_validate(
         {
@@ -2069,13 +2179,100 @@ async def get_payments_both_ledgers(
     )
     db = _database(database)
     row_limit = min(args.limit, 20)
-    erp = await get_payments(
-        date_from=args.date_from, date_to=args.date_to, customer=args.customer,
-        limit=row_limit, offset=args.offset, database=db,
+    window = {
+        "date_from": args.date_from.isoformat(),
+        "date_to": args.date_to.isoformat(),
+        "customer": args.customer or None,
+        "period": period,
+        "resolved_on": "ERP business calendar (US Central) for a named period; "
+        "all time (2000-01-01 to today) for a customer with no period",
+        "business_date": periods.business_today().isoformat(),
+    }
+    ledger_note = (
+        "ERP and CRM are SEPARATE ledgers with separate totals below. "
+        "Report each under its own label. Never add the two totals: "
+        "the CRM mirrors ERP payments, so a sum double-counts."
     )
     crm = await get_crm_payments(
         date_from=args.date_from, date_to=args.date_to,
         customer=args.customer or "", database=db,
+    )
+    crm_rows = crm.get("results") or []
+    crm_total = crm.get("total_count") or 0
+    crm_sum = crm.get("sum_amount_received")
+    # The probe: one compact call that answers the only question the mode
+    # decision needs - how many ERP rows match - and, when the set is small,
+    # already holds every one of them. Fifty full rows would be trimmed by
+    # _bounded inside get_payments; fifty compact rows are not. A large set
+    # pays one extra call for the probe; a small set never pages at all.
+    erp_probe = await get_payments(
+        date_from=args.date_from, date_to=args.date_to, customer=args.customer,
+        limit=MAX_TOOL_ROWS, offset=0, compact=True, database=db,
+    )
+    erp_total = erp_probe.get("total_count") or 0
+    erp_sum = erp_probe.get("sum_amount")
+    if erp_total <= MAX_TOOL_ROWS and crm_total <= MAX_TOOL_ROWS:
+        erp_ids = {str(row.get("payment_id")) for row in (erp_probe.get("items") or [])}
+        crm_matched = sum(1 for row in crm_rows if str(row.get("erp_id")) in erp_ids)
+        erp_items = [
+            {
+                "payment_date": row.get("payment_date"),
+                "customer_name": row.get("customer_name"),
+                "amount": row.get("amount"),
+            }
+            for row in (erp_probe.get("items") or [])
+        ]
+        crm_items = [
+            {
+                "receive_date": row.get("receive_date"),
+                "customer_name": row.get("customer_name"),
+                "amount_received": row.get("amount_received"),
+            }
+            for row in crm_rows
+        ]
+        crm_block: dict = {
+            "available": crm.get("available", True),
+            "total_count": crm_total,
+            "sum_amount_received": crm_sum,
+            "items": crm_items,
+            "coverage": crm.get("coverage"),
+            "page": {"returned": len(crm_items), "has_more": False, "all_rows_returned": True},
+        }
+        if not crm.get("available", True):
+            # the failure reason is the one field the summary cannot carry
+            crm_block["note"] = crm.get("note")
+        candidate = {
+            "source": "payments_both_ledgers",
+            "window": window,
+            "ledger_note": ledger_note,
+            "summary": _payments_summary(
+                erp_sum, crm_sum, erp_total, crm_total,
+                coverage="complete", next_offset=None,
+            ),
+            "erp": {
+                "total_count": erp_total,
+                "sum_amount": erp_sum,
+                "sum_amount_covers": erp_probe.get("sum_amount_covers"),
+                "items": erp_items,
+                "page": {"returned": len(erp_items), "has_more": False, "all_rows_returned": True},
+            },
+            "crm": crm_block,
+            "paired_on_this_page_only": {
+                "crm_rows_with_erp_id_on_this_page": crm_matched,
+                "crm_rows_on_this_page": len(crm_items),
+                "note": "Full set, not page-local: every row is included, so a CRM "
+                "row whose ERP id is not among the ERP rows is genuinely "
+                "unmatched, not on another page.",
+            },
+        }
+        if len(json.dumps(candidate, ensure_ascii=False, separators=(",", ":"))) <= ALL_ROWS_BUDGET:
+            return candidate
+        # Too big for one honest payload (very long customer names): fall
+        # through to the paged view below rather than let invoke_tool's
+        # _bounded collapse the whole result into a truncated preview.
+    erp = await get_payments(
+        date_from=args.date_from, date_to=args.date_to, customer=args.customer,
+        limit=row_limit, offset=args.offset, database=db,
     )
     erp_items = [
         {
@@ -2087,7 +2284,6 @@ async def get_payments_both_ledgers(
         }
         for row in (erp.get("items") or [])[:row_limit]
     ]
-    crm_rows = crm.get("results") or []
     crm_page = crm_rows[args.offset : args.offset + row_limit]
     crm_items = [
         {
@@ -2103,44 +2299,47 @@ async def get_payments_both_ledgers(
     crm_matched_on_page = sum(
         1 for row in crm_items if str(row.get("erp_id")) in erp_ids_on_page
     )
+    crm_has_more = args.offset + len(crm_items) < crm_total
+    crm_next = args.offset + len(crm_items) if crm_has_more else None
+    erp_next = erp.get("next_offset")
+    next_offsets = [n for n in (erp_next, crm_next) if isinstance(n, int)]
+    next_offset = max(next_offsets) if next_offsets else None
+    crm_pages_total = max(1, -(-crm_total // row_limit)) if crm_total else 1
     return {
         "source": "payments_both_ledgers",
-        "window": {
-            "date_from": args.date_from.isoformat(),
-            "date_to": args.date_to.isoformat(),
-            "customer": args.customer or None,
-            "period": period,
-            "resolved_on": "ERP business calendar (US Central) for a named period; "
-            "all time (2000-01-01 to today) for a customer with no period",
-            "business_date": periods.business_today().isoformat(),
-        },
-        "ledger_note": (
-            "ERP and CRM are SEPARATE ledgers with separate totals below. "
-            "Report each under its own label. Never add the two totals: "
-            "the CRM mirrors ERP payments, so a sum double-counts."
+        "window": window,
+        "ledger_note": ledger_note,
+        "summary": _payments_summary(
+            erp.get("sum_amount"), crm_sum, erp_total, crm_total,
+            coverage="page", next_offset=next_offset,
         ),
         "erp": {
-            "total_count": erp.get("total_count"),
+            "total_count": erp_total,
             "sum_amount": erp.get("sum_amount"),
             "sum_amount_covers": erp.get("sum_amount_covers"),
             "items": erp_items,
             "page": {
                 "offset": erp.get("offset"), "limit": row_limit,
                 "returned": len(erp_items), "has_more": erp.get("has_more"),
-                "next_offset": erp.get("next_offset"),
+                "next_offset": erp_next,
+                "page": erp.get("page"),
+                "pages_total": erp.get("pages_total"),
             },
         },
         "crm": {
             "available": crm.get("available", True),
-            "total_count": crm.get("total_count"),
-            "sum_amount_received": crm.get("sum_amount_received"),
+            "total_count": crm_total,
+            "sum_amount_received": crm_sum,
             "items": crm_items,
             "coverage": crm.get("coverage"),
             "note": crm.get("note"),
             "page": {
                 "offset": args.offset, "limit": row_limit,
                 "returned": len(crm_items),
-                "has_more": args.offset + len(crm_items) < (crm.get("total_count") or 0),
+                "has_more": crm_has_more,
+                "next_offset": crm_next,
+                "page": (args.offset // row_limit) + 1 if row_limit else 1,
+                "pages_total": crm_pages_total,
             },
         },
         "paired_on_this_page_only": {
