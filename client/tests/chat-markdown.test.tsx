@@ -32,6 +32,21 @@ describe("ChatMarkdown", () => {
     expect(table).toBeInTheDocument();
   });
 
+  it("gives non-lead pipe records one spaced row each instead of a wall", () => {
+    const { container } = render(
+      <ChatMarkdown
+        text={
+          "Here are the overdue invoices.\n\nPure 7 | invoice 27608 | balance $357,500 | days overdue 335 | overdue yes\nModus Holdings | invoice 33193 | balance $31,920 | days overdue 0 | overdue yes\n\nWould you like the next page?"
+        }
+      />,
+    );
+    const rows = container.querySelectorAll(".cmd-row");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("Pure 7 | invoice 27608 | balance $357,500");
+    expect(rows[1]).toHaveTextContent("Modus Holdings | invoice 33193");
+    expect(screen.getByText("Would you like the next page?")).toBeInTheDocument();
+  });
+
   it("renders inline emphasis, code and safe links", () => {
     render(<ChatMarkdown text={"**Paid** _in full_ via `ACH` — [detail](https://erp.example/x)"} />);
     expect(screen.getByText("Paid").tagName).toBe("STRONG");

@@ -13,6 +13,12 @@
 // renders as the literal text it is.
 
 import { Fragment, type ReactNode } from "react";
+import { LeadCards } from "@/components/chat-lead-cards";
+import {
+  isImportantNote,
+  parseLeadAnswerItem,
+  type LeadCard,
+} from "@/lib/lead-answer";
 
 const INLINE_RE = /(\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|`[^`\n]+`|\[[^\]\n]+\]\([^)\s]+\))/g;
 
@@ -64,9 +70,37 @@ const isTableSeparator = (line: string) => /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lin
 export function ChatMarkdown({ text }: { text: string }) {
   const lines = (text ?? "").replace(/\r\n/g, "\n").split("\n");
   const blocks: ReactNode[] = [];
-  let index = 0;
 
-  const push = (node: ReactNode) => blocks.push(<Fragment key={blocks.length}>{node}</Fragment>);
+  // The lead-list shape is read before rendering so a message that carries
+  // leads can never be split into cards by accident: every line is checked
+  // by the same parser that decides whether it is a lead at all.
+  const leadCards = new Map<number, LeadCard>();
+  lines.forEach((line, lineIndex) => {
+    const card = parseLeadAnswerItem(line);
+    if (card) leadCards.set(lineIndex, card);
+  });
+  const hasLeadCards = leadCards.size > 0;
+
+  // Notes sit below the cards they follow; a later block flushes them first.
+  let pendingNotes: ReactNode[] = [];
+  const flushNotes = () => {
+    if (pendingNotes.length === 0) return;
+    blocks.push(
+      <div className="cmd-notes" key={`notes-${blocks.length}`}>
+        {pendingNotes}
+      </div>,
+    );
+    pendingNotes = [];
+  };
+  const push = (node: ReactNode) => {
+    flushNotes();
+    blocks.push(<Fragment key={blocks.length}>{node}</Fragment>);
+  };
+  const pushCards = (node: ReactNode) => {
+    blocks.push(<Fragment key={blocks.length}>{node}</Fragment>);
+  };
+
+  let index = 0;
 
   while (index < lines.length) {
     const line = lines[index];
@@ -74,6 +108,52 @@ export function ChatMarkdown({ text }: { text: string }) {
     if (!line.trim()) {
       index += 1;
       continue;
+    }
+
+    // An answer that lists leads is rendered as cards, one per lead, in the
+    // order the answer wrote them. The Important note is lifted out of the
+    // list and becomes a callout under the cards.
+    if (hasLeadCards) {
+      const card = leadCards.get(index);
+      if (card) {
+        const group: LeadCard[] = [card];
+        index += 1;
+        while (index < lines.length) {
+          const nextCard = leadCards.get(index);
+          if (!nextCard) break;
+          group.push(nextCard);
+          index += 1;
+        }
+        pushCards(<LeadCards cards={group} />);
+        continue;
+      }
+
+      if (isImportantNote(line)) {
+        const body: string[] = [
+          line.replace(/^\s*>\s?/, "").replace(/^\s*(?:[-*+]|\d+[.)])\s+/, "").trim(),
+        ];
+        index += 1;
+        while (
+          index < lines.length &&
+          lines[index].trim() &&
+          !leadCards.has(index) &&
+          !isBullet(lines[index]) &&
+          !isOrdered(lines[index]) &&
+          !isHeading(lines[index]) &&
+          !isRule(lines[index]) &&
+          !isQuote(lines[index]) &&
+          !/^```/.test(lines[index].trim())
+        ) {
+          body.push(lines[index].trim());
+          index += 1;
+        }
+        pendingNotes.push(
+          <aside className="cmd-callout" role="note" key={`note-${index}`}>
+            {inlineNodes(body.join(" "), `note${index}`)}
+          </aside>,
+        );
+        continue;
+      }
     }
 
     // Fenced code: kept verbatim, never markdown-parsed inside.
@@ -188,6 +268,42 @@ export function ChatMarkdown({ text }: { text: string }) {
       paragraph.push(lines[index].trim());
       index += 1;
     }
+
+    // Record lines written as "A | field: value | field: value" are common
+    // for invoices and payments. They are not lead cards, but one record per
+    // row with real spacing is the readable prose fallback.
+    const isRecordLine = (value: string) => value.split("|").length >= 3;
+    if (paragraph.filter(isRecordLine).length >= 2) {
+      let recordRun: string[] = [];
+      const flushRecords = () => {
+        if (recordRun.length === 0) return;
+        push(
+          <div className="cmd-rows">
+            {recordRun.map((row, rowIndex) => (
+              <p className="cmd-row" key={`${rowIndex}-${row.length}`}>
+                {inlineNodes(row, `row${index}-${rowIndex}`)}
+              </p>
+            ))}
+          </div>,
+        );
+        recordRun = [];
+      };
+      paragraph.forEach((part, partIndex) => {
+        if (isRecordLine(part)) {
+          recordRun.push(part);
+          return;
+        }
+        flushRecords();
+        push(
+          <p className="cmd-p">
+            {inlineNodes(part, `p${index}-${partIndex}`)}
+          </p>,
+        );
+      });
+      flushRecords();
+      continue;
+    }
+
     push(
       <p className="cmd-p">
         {paragraph.map((part, partIndex) => (
@@ -200,5 +316,6 @@ export function ChatMarkdown({ text }: { text: string }) {
     );
   }
 
+  flushNotes();
   return <div className="cmd">{blocks}</div>;
 }

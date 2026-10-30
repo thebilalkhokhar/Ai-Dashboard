@@ -2610,7 +2610,7 @@ button {
 
 .cmd {
   display: grid;
-  gap: 0.55rem;
+  gap: 0.8rem;
 }
 
 .cmd > * + * {
@@ -2619,11 +2619,31 @@ button {
 
 .cmd-p {
   margin: 0;
+  line-height: 1.72;
+}
+
+/* Non-lead records (invoices, payments) keep their own line and get space
+   between rows instead of collapsing into one wall. */
+.cmd-rows {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.cmd-row {
+  margin: 0;
+  padding: 0.45rem 0.65rem;
+  border-left: 2px solid color-mix(in oklab, var(--border) 78%, #7df0ff);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: rgba(148, 163, 184, 0.04);
+  font-size: 0.86rem;
+  line-height: 1.55;
+  color: color-mix(in oklab, var(--foreground) 92%, var(--muted));
+  overflow-wrap: anywhere;
 }
 
 .cmd-h {
-  margin: 0.35rem 0 0;
-  font-size: 0.8rem;
+  margin: 0.45rem 0 0;
+  font-size: 0.84rem;
   font-weight: 600;
   letter-spacing: 0.02em;
   color: color-mix(in oklab, var(--foreground) 88%, #7df0ff);
@@ -2631,9 +2651,10 @@ button {
 
 .cmd-list {
   margin: 0;
-  padding-left: 1.25rem;
+  padding-left: 1.35rem;
   display: grid;
-  gap: 0.28rem;
+  gap: 0.5rem;
+  line-height: 1.68;
   /* preflight removes list markers; an answer's bullets are its structure */
   list-style: disc;
 }
@@ -2642,8 +2663,269 @@ button {
   list-style: decimal;
 }
 
+.cmd-list li {
+  padding-left: 0.15rem;
+}
+
 .cmd-list li::marker {
   color: rgba(125, 240, 255, 0.6);
+}
+
+.cmd strong {
+  font-weight: 600;
+  color: color-mix(in oklab, var(--foreground) 94%, var(--accent));
+}
+
+/* --------------------------------------------------- lead cards */
+/* One card per lead, in the answer's own order. Every value is the text the
+   answer stated; only field labels and emphasis are added here. */
+
+.lead-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.7rem;
+}
+
+.lead-card {
+  display: grid;
+  gap: 0.55rem;
+  min-width: 0;
+  padding: 0.85rem 0.95rem 0.8rem;
+  border: 1px solid color-mix(in oklab, var(--border) 82%, transparent);
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0)),
+    color-mix(in oklab, var(--surface-raised) 55%, transparent);
+  box-shadow: var(--shadow-sm);
+}
+
+.lead-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.lead-card-identity {
+  min-width: 0;
+  display: grid;
+  gap: 0.12rem;
+}
+
+.lead-card-name {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 650;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+
+.lead-card-company {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.lead-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem 0.55rem;
+  flex-wrap: wrap;
+}
+
+.lead-status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.14rem 0.55rem;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  font-size: 0.67rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: color-mix(in oklab, var(--foreground) 82%, transparent);
+  white-space: nowrap;
+}
+
+.lead-status-pill[data-state="new"] {
+  border-color: var(--accent-border);
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.lead-status-pill[data-state="attempted-to-contact"] {
+  border-color: var(--warning-border);
+  background: var(--warning-muted);
+  color: var(--warning-foreground);
+}
+
+.lead-idle {
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.lead-card-product {
+  margin: 0;
+  font-size: 0.84rem;
+  line-height: 1.5;
+  font-weight: 500;
+  color: color-mix(in oklab, var(--foreground) 90%, var(--muted));
+  overflow-wrap: anywhere;
+}
+
+/* The four specs share one row so a missing quantity and a supplied size are
+   read at the same glance. The grid collapses to two columns in a narrow chat
+   column. */
+.lead-specs {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7.4rem, 1fr));
+  gap: 0.45rem 0.6rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid color-mix(in oklab, var(--border) 58%, transparent);
+  border-radius: var(--radius-md);
+  background: rgba(148, 163, 184, 0.045);
+}
+
+.lead-spec {
+  min-width: 0;
+  display: grid;
+  gap: 0.12rem;
+  align-content: start;
+}
+
+.lead-spec dt {
+  margin: 0;
+  font-size: 0.57rem;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.lead-spec dd {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+
+.lead-spec[data-missing="true"] dt {
+  color: color-mix(in oklab, var(--warning) 72%, var(--muted));
+}
+
+.lead-missing-chip {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 0.12rem 0.48rem;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--warning-border);
+  background: var(--warning-muted);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--warning-foreground);
+}
+
+.lead-nothing-missing {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin: 0;
+  padding: 0.12rem 0.48rem;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--positive-border);
+  background: var(--positive-muted);
+  font-size: 0.66rem;
+  font-weight: 600;
+  color: var(--positive-foreground);
+}
+
+.lead-next {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.6rem;
+  padding: 0.55rem 0.7rem;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: linear-gradient(90deg, var(--accent-muted), transparent 88%);
+}
+
+.lead-next-label {
+  flex-shrink: 0;
+  padding-top: 0.12rem;
+  font-size: 0.57rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.lead-next-text {
+  flex: 1;
+  min-width: 12rem;
+  margin: 0;
+  font-size: 0.83rem;
+  line-height: 1.5;
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+
+.lead-extra {
+  margin: 0;
+  font-size: 0.73rem;
+  line-height: 1.45;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.lead-extra-label {
+  font-weight: 600;
+  color: color-mix(in oklab, var(--foreground) 78%, var(--muted));
+}
+
+.lead-ref {
+  margin: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.6rem;
+  letter-spacing: 0.02em;
+  color: color-mix(in oklab, var(--muted) 78%, transparent);
+}
+
+/* The "Important: there are more records" note is a callout under the cards,
+   never another line in the lead list. */
+.cmd-notes {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.cmd-callout {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--warning-border);
+  border-left: 3px solid var(--warning);
+  border-radius: var(--radius-md);
+  background: var(--warning-muted);
+  font-size: 0.8rem;
+  line-height: 1.55;
+  color: var(--warning-foreground);
+}
+
+.cmd-callout strong {
+  font-weight: 700;
+  color: var(--warning-foreground);
 }
 
 .cmd-quote {
@@ -3058,6 +3340,18 @@ button {
 @media (max-width: 520px) {
   .cc-workspace-title {
     font-size: 1.05rem;
+  }
+
+  .lead-card {
+    padding: 0.75rem 0.8rem;
+  }
+
+  .lead-specs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .lead-next-text {
+    min-width: 0;
   }
 
   /* On a narrow stage the ring of avatars is only a few dozen pixels outside
